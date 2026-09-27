@@ -2,7 +2,7 @@
 
     brain = SolanaBrain.bootstrap("workspaces/sol", history)   # or SolanaBrain("workspaces/sol")
     brain.ingest(event)                 # swaps, launches, migrations, LP changes, transfers
-    report = brain.assess(mint)         # forecasts + risk + cost-aware edge + red flags
+    report = brain.assess(mint)         # forecasts + risk + edge + fat-tail view + red flags
     brain.resolve()                     # label matured assessments → continual learning
     brain.maintenance()                 # adapt / retrain / promote / refit risk model
 
@@ -37,6 +37,7 @@ from nardis_neural.solana.events import Event
 from nardis_neural.solana.features import SolanaFeatureBuilder
 from nardis_neural.solana.labels import SolanaLabeler
 from nardis_neural.solana.market import EventStore, SolanaMarket
+from nardis_neural.solana.moonshot import MoonshotSpec, TailModel, moonshot_markdown, run_moonshot_research
 from nardis_neural.solana.risk import SolanaRiskModel
 from nardis_neural.training.continual import ContinualLearner
 from nardis_neural.training.pipeline import train_engine
@@ -67,6 +68,10 @@ class SolanaAssessment(BaseModel):
     """Meta-labeling edge estimate for an executable round trip (latency, impact, fees):
     p_win, expected_net, uncertainty, edge_score (lower confidence bound), kelly_fraction,
     threshold and above_threshold (1.0 / 0.0).  Empty until ``fit_edge`` has been run."""
+    moonshot: dict[str, float] = Field(default_factory=dict)
+    """Fat-tail view of a ticket bought now: P(peak ≥ k) for every level (``p_ge_10x`` …),
+    median and expected ladder multiple, lottery-Kelly fraction, tail index, epistemic spread
+    and ``in_entry_window``.  Empty until ``fit_moonshot`` has been run."""
 
 
 def _normal_sf(z: float) -> float:
@@ -138,6 +143,9 @@ class SolanaBrain:
         if (self.root / "edge" / "edge.json").exists():
             self.edge = EdgeModel.load(self.root / "edge")
             self.edge_meta = json.loads((self.root / "edge" / "research.json").read_text())
+        self.moonshot: TailModel | None = None
+        if (self.root / "moonshot" / "tail.json").exists():
+            self.moonshot = TailModel.load(self.root / "moonshot")
         self.pending: list[_Pending] = []
         self.risk_x: list[F32] = []
         self.risk_y: list[F32] = []
@@ -214,6 +222,7 @@ class SolanaBrain:
             ex, _ = edge_features(out, probs, current, engine.config.horizon_names, list(engine.expert_names))
             edge = self.edge.predict(ex)
             threshold = float(self.edge_meta.get("threshold", 0.0))
+        moon = self._moonshot_view(mints, out, probs, current, now)
         reports = []
         for i, (mint, obs, pred) in enumerate(zip(mints, observations, preds, strict=True)):
             self.learner.record_prediction(pred)
@@ -254,10 +263,44 @@ class SolanaBrain:
                         "threshold": threshold,
                         "above_threshold": float(edge.edge_score[i] >= threshold),
                     },
+                    moonshot=moon[i],
                     features=feats,
                 )
             )
         return reports
+
+    def _moonshot_view(
+        self,
+        mints: list[str],
+        out: dict[str, Any],
+        probs: npt.NDArray[Any] | None,
+        current: npt.NDArray[Any],
+        now: float,
+    ) -> list[dict[str, float]]:
+        model = self.moonshot
+        if model is None:
+            return [{} for _ in mints]
+        if model.inputs == "neural":
+            engine = self.learner.champion
+            x, _ = edge_features(out, probs, current, engine.config.horizon_names, list(engine.expert_names))
+        else:
+            x = np.nan_to_num(current).astype(np.float32)
+        tp = model.predict(x)
+        spec = model.spec
+        views = []
+        for i, mint in enumerate(mints):
+            age = now - self.market.token(mint).launch.t
+            v = {f"p_ge_{k:g}x": float(tp.survival[i, j]) for j, k in enumerate(spec.levels)}
+            v |= {
+                "median_multiple": float(tp.median_multiple[i]),
+                "expected_multiple": float(tp.expected_multiple[i]),
+                "lottery_kelly": float(tp.lottery_kelly[i]),
+                "tail_index": float(tp.tail_index[i]),
+                "epistemic": float(tp.survival_std[i].max()),
+                "in_entry_window": float(spec.min_entry_age_seconds <= age <= spec.max_entry_age_seconds),
+            }
+            views.append(v)
+        return views
 
     def assess_active(
         self, max_idle_seconds: float = 120.0, min_age_seconds: float | None = None
@@ -342,6 +385,39 @@ class SolanaBrain:
         (self.root / "edge" / "research.json").write_text(report_json)
         (self.root / "edge" / "REPORT.md").write_text(research_markdown(research.report))
         self.edge, self.edge_meta = research.model, research.report
+        return research.report
+
+    def fit_moonshot(
+        self,
+        spec: MoonshotSpec | None = None,
+        inputs: str = "raw",
+        n_folds: int = 4,
+        test_fraction: float = 0.35,
+        min_expected_multiple: float = 1.0,
+        history: EventStore | None = None,
+        archetypes: dict[str, str] | None = None,
+        log: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        """Fat-tail research on the workspace history; installs the tail model."""
+        engine = self.learner.champion
+        research = run_moonshot_research(
+            history or self.history,
+            self.cfg,
+            engine.config,
+            spec or MoonshotSpec(),
+            inputs=inputs,
+            n_folds=n_folds,
+            test_fraction=test_fraction,
+            min_expected_multiple=min_expected_multiple,
+            archetypes=archetypes,
+            device=engine.device,
+            log=log or (lambda _: None),
+        )
+        d = self.root / "moonshot"
+        research.model.save(d)
+        (d / "research.json").write_text(json.dumps(research.report, indent=2, default=float))
+        (d / "REPORT.md").write_text(moonshot_markdown(research.report))
+        self.moonshot = research.model
         return research.report
 
     # ------------------------------------------------------------------ persistence

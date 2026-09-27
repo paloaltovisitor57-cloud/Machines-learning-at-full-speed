@@ -38,6 +38,9 @@ champion → challenger lifecycle.
 - [Testing & quality gates](#testing--quality-gates)
 - [Performance](#performance)
 - [Future Nardis integration](#future-nardis-integration)
+- [Solana intelligence layer](#solana-intelligence-layer)
+- [Edge engine](#edge-engine)
+- [Moonshot engine](#moonshot-engine)
 - [Optional / not included](#optional--not-included)
 
 ## At a glance
@@ -74,7 +77,8 @@ flowchart TB
 
 | Capability | Implementation |
 |---|---|
-| Temporal pathways | causal pre-LN Transformer, packed GRU/LSTM, dilated causal TCN, residual MLP, optional relational GraphSAGE/GAT (pure PyTorch) |
+| Temporal pathways | causal pre-LN Transformer, packed GRU/LSTM, dilated causal TCN, selective state-space (Mamba-style) SSM, residual MLP, optional relational GraphSAGE/GAT (pure PyTorch) |
+| Hardware | one code path from a laptop CPU to a large GPU: `cpu-lite` / `cpu` / `gpu` / `gpu-frontier` profiles (≈0.17 M → 16.6 M parameters per member), auto-detected |
 | Fusion | learned, per-observation softmax gate with load-balance, entropy and z-loss regularisers; expert dropout and noisy gating |
 | Outputs | per horizon: return mean + variance + quantiles, max upside, max drawdown, volatility (heteroscedastic), upside/downside event probabilities |
 | Uncertainty | deep ensemble (independent members), seeded MC dropout, epistemic / aleatoric / total decomposition, member disagreement |
@@ -83,7 +87,7 @@ flowchart TB
 | Continual learning | 3-pool replay (recent FIFO, historical reservoir, protected rare events), 5 sampling strategies, candidate cloning, distillation, EWC, full retraining with configurable weights |
 | Lifecycle | immutable checkpoints, champion/candidate/challenger/retired/failed registry with audit log, shadow mode, 10-gate promotion, manual and optional automatic rollback |
 | Representation | self-supervised pretraining (masked timestep, masked feature, contrastive), embedding export to Parquet/NumPy, KMeans / GMM / HDBSCAN regime discovery |
-| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 188 tests |
+| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 197 tests |
 
 ## Quick start
 
@@ -123,6 +127,7 @@ The full design rationale is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | **Transformer** (`models/transformer.py`) | pre-LayerNorm blocks, causal + key-padding attention mask via `scaled_dot_product_attention`, recency positional embedding + continuous time encoding, residuals, dropout, configurable depth/heads/width. Tests cover causality and padding invariance. |
 | **Recurrent** (`models/recurrent.py`) | GRU by default (LSTM configurable). Observed steps are compacted and run as a packed sequence, so padding and interior gaps never enter the state. |
 | **TCN** (`models/tcn.py`) | dilated causal convolutions, residual blocks, per-timestep LayerNorm (no future-leaking norms), unobserved steps held at zero, learned mixture over receptive-field scales. Tests cover causality and receptive field. |
+| **SSM** (`models/ssm.py`) | selective state-space layers (Mamba-style): causal depthwise conv, input-dependent step size Δ and B/C matrices, diagonal stable A, gated output. Unobserved steps get Δ = 0 so the state passes through unchanged. Linear in sequence length, pure PyTorch (CPU / CUDA / MPS). Tests cover causality, gaps and padding invariance. |
 | **Tabular** (`models/tabular.py`) | residual MLP with LayerNorm, GELU/SiLU and dropout for the immediate state vector. |
 | **Graph** (`models/graph.py`, optional) | relational GraphSAGE or GAT over wallet→token / wallet→wallet / token→token edges, in pure PyTorch (no PyG dependency). Disabled by default; everything works without it. |
 
@@ -309,6 +314,7 @@ trainer.promote_if_ready()
 | `inspect-model` | metadata, architecture and reference statistics |
 | `status` | workspace lifecycle state |
 | `benchmark` | latency, throughput and memory |
+| `hardware` | detected device and recommended compute profile (`train --profile auto` applies it) |
 
 ## Configuration
 
@@ -326,7 +332,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 
 ```
 ├── configs/                 default.yaml · small.yaml
-├── docs/                    ARCHITECTURE.md · CONTINUAL_LEARNING.md · INTEGRATION.md · SOLANA.md · EDGE.md
+├── docs/                    ARCHITECTURE.md · CONTINUAL_LEARNING.md · INTEGRATION.md · SOLANA.md · EDGE.md · MOONSHOT.md
 ├── examples/                nardis_integration.py (runnable, tested)
 ├── src/nardis_neural/
 │   ├── config.py            Pydantic config tree
@@ -335,7 +341,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │   ├── benchmark.py         latency / throughput / memory
 │   ├── cli.py               Typer CLI
 │   ├── data/                loaders · datasets · sequences · splits · normalization · replay
-│   ├── models/              transformer · recurrent · tcn · tabular · graph · experts ·
+│   ├── models/              transformer · recurrent · tcn · ssm · tabular · graph · experts ·
 │   │                        gating · fusion · heads · ensemble · main · common
 │   ├── training/            trainer · losses · metrics · scheduling · pipeline ·
 │   │                        continual · distillation · ewc · pretraining
@@ -345,7 +351,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │   ├── monitoring/          drift
 │   └── solana/              amm · events · market · wallets · features · labels · dataset ·
 │                            risk · simulator · brain · config · cli · ingest/ · edge/
-└── tests/                   188 tests incl. synthetic end-to-end pipeline
+└── tests/                   197 tests incl. synthetic end-to-end pipeline
 ```
 
 ## Testing & quality gates
@@ -354,7 +360,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 ruff check .        # lint
 ruff format --check .
 mypy                # strict mode: src, tests and examples
-pytest              # 188 tests; CUDA / MPS tests auto-skip when unavailable
+pytest              # 197 tests; CUDA / MPS tests auto-skip when unavailable
 ```
 
 The suite covers:
@@ -375,17 +381,18 @@ The suite covers:
 
 ## Performance
 
-Default configuration (3 members × 664 k parameters, 2 MC samples), CPU only, 4-core Xeon
-@ 2.1 GHz:
+Default configuration (3 members × 729 k parameters, 5 experts incl. SSM, 2 MC samples),
+CPU only, 4-core Xeon @ 2.1 GHz:
 
 | | p50 latency | throughput |
 |---|---|---|
-| single observation (full API) | ~40 ms | – |
-| batch 32 | ~130 ms | ~250 obs/s |
-| batch 256 | ~650 ms | ~390 obs/s |
-| single observation, `mc_dropout_samples: 0` | ~27 ms | – |
+| single observation (full API) | ~49 ms | – |
+| batch 32 | ~190 ms | ~170 obs/s |
+| batch 256 | ~1.2 s | ~215 obs/s |
+| single observation, `mc_dropout_samples: 0` | ~39 ms | – |
+| single observation, `--profile cpu-lite` (2 × 168 k) | ~21 ms | ~640 obs/s at batch 256 |
 
-Peak RSS is about 0.8 GB. GPUs are much faster. Run `nardis-neural benchmark` on your
+Peak RSS is about 1 GB (0.8 GB for `cpu-lite`). GPUs are much faster. Run `nardis-neural benchmark` on your
 hardware.
 
 ## Future Nardis integration
@@ -456,6 +463,26 @@ See [docs/EDGE.md](docs/EDGE.md).
   momentum and take-everything baselines at the same trade budget;
 - `nardis-neural solana edge-research` installs the model; every `SolanaAssessment` then
   carries `edge` (p_win, expected_net, edge_score, kelly_fraction, above_threshold).
+
+## Moonshot engine
+
+`nardis_neural.solana.moonshot` is for the other end of the distribution: the rare launch
+that runs 100x to 1000x. See [docs/MOONSHOT.md](docs/MOONSHOT.md).
+
+- **executable peak-multiple labels**: the best liquidation multiple a ticket bought now
+  could have realised (latency on both legs, own impact, fees). Labels are
+  **right-censored** while a token is still running, and dead tokens resolve causally;
+- a **censored power-law tail model**: a deep ensemble of mixture-of-log-logistic
+  networks gives calibrated P(peak ≥ 2x, 5x, 10x, 100x, 1000x) per token, with a learned
+  tail index and epistemic spread;
+- **decision helpers**: expected payoff of a take-profit ladder with a trailing moon bag,
+  and a **lottery-Kelly** fraction that maximises expected log-wealth;
+- **honest research**: train on earlier tokens with labels truncated at the cutoff, score
+  once on later tokens against every-launch, random and momentum tickets;
+- `runner` launches in the simulator (`solana simulate --market degen`) so there are real
+  100–1000x+ tails to find; `nardis-neural solana moonshot-research` installs the model and
+  every `SolanaAssessment` then carries `moonshot` (`p_ge_10x`, `p_ge_1000x`,
+  `expected_multiple`, `lottery_kelly`, `tail_index`, `in_entry_window`, …).
 
 ## Optional / not included
 

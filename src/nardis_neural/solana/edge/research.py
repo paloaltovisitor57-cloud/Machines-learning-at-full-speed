@@ -164,22 +164,20 @@ class OOFPredictions:
 
 
 def walk_forward_oof(
-    eds: EdgeDataset,
+    ds: SolanaDataset,
     cfg: SolanaConfig,
     ncfg: NeuralConfig,
-    spec: BarrierSpec,
+    hold_seconds: float = 0.0,
     n_folds: int = 4,
     min_train_fraction: float = 0.4,
     device: torch.device | None = None,
     log: Logger = _quiet,
 ) -> OOFPredictions:
-    ds = eds.base
+    """Walk-forward neural + risk predictions; ``hold_seconds`` extends the embargo."""
     store = ds.store()
-    ts = eds.timestamps
+    ts = np.asarray(ds.arrays["timestamp"], dtype=np.float64)
     n = len(ts)
-    embargo = max(
-        ncfg.embargo_seconds, cfg.risk_horizon_seconds, spec.max_hold_seconds + 2 * spec.latency_seconds
-    )
+    embargo = max(ncfg.embargo_seconds, cfg.risk_horizon_seconds, hold_seconds)
     splits = walk_forward_splits(ts, n_folds, min_train_fraction, embargo_seconds=embargo)
     preds: dict[str, Array] = {}
     risk = np.full((n, len(RISK_LABELS)), np.nan)
@@ -250,7 +248,15 @@ def run_edge_research(
         f"edge dataset: {len(eds)} snapshots with executable outcomes, "
         f"base win rate {(eds.net > 0).mean():.3f}"
     )
-    oof = walk_forward_oof(eds, cfg, ncfg, spec, n_folds, device=device, log=log)
+    oof = walk_forward_oof(
+        eds.base,
+        cfg,
+        ncfg,
+        spec.max_hold_seconds + 2 * spec.latency_seconds,
+        n_folds,
+        device=device,
+        log=log,
+    )
     rows = np.flatnonzero(oof.covered)
     ts = eds.timestamps[rows]
     x, names = edge_features(

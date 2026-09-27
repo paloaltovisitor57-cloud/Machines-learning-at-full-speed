@@ -45,12 +45,23 @@ def simulate(
     prefix: Annotated[str, typer.Option("--prefix")] = "Mint",
     start_time: Annotated[float, typer.Option("--start-time")] = 1_750_000_000.0,
     hours: Annotated[float, typer.Option("--hours")] = 3.0,
+    market: Annotated[
+        str, typer.Option("--market", help="archetype mix: default, or degen (mostly duds + runners)")
+    ] = "default",
+    runners: Annotated[
+        float | None, typer.Option("--runners", help="override the share of 100–1000x runner launches")
+    ] = None,
 ) -> None:
-    """Simulate memecoin launches (snipers, bundles, rugs, graduations, smart money, bots)."""
+    """Simulate memecoin launches (snipers, bundles, rugs, graduations, runners, smart money, bots)."""
     from collections import Counter
 
-    from nardis_neural.solana.simulator import LaunchSimSpec, simulate_launches
+    from nardis_neural.solana.simulator import MARKET_PRESETS, LaunchSimSpec, simulate_launches
 
+    if market not in MARKET_PRESETS:
+        raise typer.BadParameter(f"unknown market {market!r}; choose from {sorted(MARKET_PRESETS)}")
+    weights = dict(MARKET_PRESETS[market])
+    if runners is not None:
+        weights["runner"] = runners
     store, arch = simulate_launches(
         LaunchSimSpec(
             n_tokens=tokens,
@@ -58,6 +69,7 @@ def simulate(
             mint_prefix=prefix,
             start_time=start_time,
             duration_seconds=hours * 3600,
+            archetype_weights=weights,
         )
     )
     store.save(out)
@@ -99,6 +111,9 @@ def bootstrap(
     solana_config: SolCfg = None,
     config: BaseCfg = None,
     epochs: Annotated[int | None, typer.Option("--epochs")] = None,
+    profile: Annotated[
+        str | None, typer.Option("--profile", help="auto | cpu-lite | cpu | gpu | gpu-frontier")
+    ] = None,
     device: DeviceOpt = None,
 ) -> None:
     """Train the neural ensemble + risk model from history and create a Solana workspace."""
@@ -107,6 +122,10 @@ def bootstrap(
     from nardis_neural.solana.market import EventStore
 
     base = load_config(config)
+    if profile is not None:
+        from nardis_neural.hardware import apply_profile
+
+        base = apply_profile(base, profile)
     if epochs is not None:
         base.training.epochs = epochs
     if device is not None:
@@ -289,3 +308,53 @@ def edge_research(
     report = brain.fit_edge(spec, n_folds=folds, max_positions=max_positions, log=typer.echo)
     typer.echo(research_markdown(report))
     typer.echo(f"edge model installed in {workspace / 'edge'}")
+
+
+@app.command("moonshot-research")
+def moonshot_research(
+    workspace: Annotated[
+        Path, typer.Option("--workspace", "-w", help="Solana workspace (history + champion)")
+    ],
+    inputs: Annotated[
+        str, typer.Option("--inputs", help="raw (on-chain features) or neural (walk-forward OOF stack)")
+    ] = "raw",
+    size: Annotated[float, typer.Option("--size", help="ticket size, SOL")] = 0.5,
+    latency: Annotated[float, typer.Option("--latency", help="entry/exit latency, seconds")] = 1.0,
+    horizon_hours: Annotated[float, typer.Option("--horizon-hours")] = 6.0,
+    max_entry_age: Annotated[float, typer.Option("--max-entry-age", help="seconds after launch")] = 600.0,
+    min_ev: Annotated[
+        float, typer.Option("--min-ev", help="ticket when E[ladder payoff] per SOL is at least this")
+    ] = 1.0,
+    test_fraction: Annotated[float, typer.Option("--test-fraction")] = 0.35,
+    folds: Annotated[int, typer.Option("--folds", help="walk-forward folds (neural inputs)")] = 4,
+    archetypes: Annotated[
+        Path | None, typer.Option("--archetypes", help="simulator archetypes.json for diagnostics")
+    ] = None,
+    device: DeviceOpt = None,
+) -> None:
+    """Fat-tail research: P(≥2x … ≥1000x) per token, ladder payoff, lottery-Kelly sizing hints.
+
+    Train on earlier tokens with labels censored at the cutoff, score once on later tokens
+    against every-launch, random and momentum tickets; installs the tail model."""
+    from nardis_neural.solana.brain import SolanaBrain
+    from nardis_neural.solana.moonshot import MoonshotSpec, moonshot_markdown
+
+    brain = SolanaBrain(workspace, device=device)
+    spec = MoonshotSpec(
+        size_sol=size,
+        latency_seconds=latency,
+        horizon_seconds=horizon_hours * 3600,
+        max_entry_age_seconds=max_entry_age,
+    )
+    arch = json.loads(archetypes.read_text()) if archetypes is not None else None
+    report = brain.fit_moonshot(
+        spec,
+        inputs=inputs,
+        n_folds=folds,
+        test_fraction=test_fraction,
+        min_expected_multiple=min_ev,
+        archetypes=arch,
+        log=typer.echo,
+    )
+    typer.echo(moonshot_markdown(report))
+    typer.echo(f"tail model installed in {workspace / 'moonshot'}")
