@@ -61,6 +61,12 @@ CURRENT_FEATURES: tuple[str, ...] = (
     "priority_fee_60s_log",
     "jito_share_60s",
     "slot_density_60s",
+    # edge-seeking dynamics
+    "bonding_velocity_60s",
+    "holders_growth_60s",
+    "smart_buyer_share_60s",
+    "top_holder_sell_share_60s",
+    "buy_acceleration_30s",
     # token safety
     "mint_authority_revoked",
     "freeze_authority_revoked",

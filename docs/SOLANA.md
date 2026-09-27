@@ -21,7 +21,7 @@ flowchart LR
     T --> WI[WalletIntel<br/>funding clusters · hubs]
     MK -->|buys queued, resolved after horizon| REP[Wallet reputations<br/>Beta posterior · rug marks]
     WI --> REP
-    MK & REP --> FB[SolanaFeatureBuilder<br/>48 named features · 1s/5s/30s bars · wallet graph]
+    MK & REP --> FB[SolanaFeatureBuilder<br/>53 named features · 1s/5s/30s bars · wallet graph]
     FB --> NE[Neural ensemble<br/>Transformer · GRU · TCN · MLP · Graph + MoE]
     NE --> EMB[MarketStateEmbedding]
     EMB & FB --> RK[Risk ensemble<br/>P rug · P graduation · P dev dump]
@@ -59,7 +59,7 @@ canonical order (launch → transfer → migration → LP → swap at equal time
 
 ## 3. Features (`features.py`)
 
-48 named current-state features (`CURRENT_FEATURES`):
+53 named current-state features (`CURRENT_FEATURES`):
 
 | Group | Features |
 |---|---|
@@ -70,6 +70,7 @@ canonical order (launch → transfer → migration → LP → swap at equal time
 | Smart money & bots | reputation-weighted **smart flow**, #smart buyers, **bot share**, **rug-associated share** |
 | Execution competition | priority fees, **Jito tip share**, slot density |
 | Token safety | mint and freeze authority revoked, LP burned fraction |
+| Edge dynamics | bonding-curve velocity, holder growth, smart-buyer share, top-holder sell share, buy acceleration |
 
 **Trade bars** (fast 1 s × 60, medium 5 s × 48, slow 30 s × 40) carry 10 features each:
 return, realised vol, volume, buy share, #trades, #unique wallets, net flow, liquidity,
@@ -158,7 +159,7 @@ An agent-based simulator used for tests and demos. It is not a market model.
 |---|---|
 | simulate 40 launches (~50 k events) | ~4 s |
 | replay 52 k events into a market | ~0.8 s |
-| build one observation (48 features + 3 bar streams + graph) | ~1 ms |
+| build one observation (53 features + 3 bar streams + graph) | ~1 ms |
 | dataset from 40 launches (~7.8 k leakage-free snapshots) | ~25 s |
 | `assess_many` 1 / 8 / 32 tokens (tiny 2-member test model) | ~23 / 38 / 74 ms |
 | neural ensemble on held-out snapshots (tiny model) | downside AUC 0.84, return rank-corr 0.13 |

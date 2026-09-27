@@ -83,7 +83,7 @@ flowchart TB
 | Continual learning | 3-pool replay (recent FIFO, historical reservoir, protected rare events), 5 sampling strategies, candidate cloning, distillation, EWC, full retraining with configurable weights |
 | Lifecycle | immutable checkpoints, champion/candidate/challenger/retired/failed registry with audit log, shadow mode, 10-gate promotion, manual and optional automatic rollback |
 | Representation | self-supervised pretraining (masked timestep, masked feature, contrastive), embedding export to Parquet/NumPy, KMeans / GMM / HDBSCAN regime discovery |
-| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 180 tests |
+| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 188 tests |
 
 ## Quick start
 
@@ -326,7 +326,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 
 ```
 ├── configs/                 default.yaml · small.yaml
-├── docs/                    ARCHITECTURE.md · CONTINUAL_LEARNING.md · INTEGRATION.md · SOLANA.md
+├── docs/                    ARCHITECTURE.md · CONTINUAL_LEARNING.md · INTEGRATION.md · SOLANA.md · EDGE.md
 ├── examples/                nardis_integration.py (runnable, tested)
 ├── src/nardis_neural/
 │   ├── config.py            Pydantic config tree
@@ -344,8 +344,8 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │   ├── lifecycle/           checkpoints · champion · candidate · shadow · promotion · rollback
 │   ├── monitoring/          drift
 │   └── solana/              amm · events · market · wallets · features · labels · dataset ·
-│                            risk · simulator · brain · config · cli · ingest/
-└── tests/                   180 tests incl. synthetic end-to-end pipeline
+│                            risk · simulator · brain · config · cli · ingest/ · edge/
+└── tests/                   188 tests incl. synthetic end-to-end pipeline
 ```
 
 ## Testing & quality gates
@@ -354,7 +354,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 ruff check .        # lint
 ruff format --check .
 mypy                # strict mode: src, tests and examples
-pytest              # 180 tests; CUDA / MPS tests auto-skip when unavailable
+pytest              # 188 tests; CUDA / MPS tests auto-skip when unavailable
 ```
 
 The suite covers:
@@ -409,7 +409,7 @@ The trading system never touches model internals.
 - **wallet intelligence**: union-find funding clusters with exchange-hub detection
   (sybil / bundle discovery) and Beta-posterior reputations learned online *only* from
   outcomes that have already resolved, plus rug attribution to creator clusters;
-- **48 named on-chain features**: holder concentration, dev / sniper / bundle /
+- **53 named on-chain features**: holder concentration, dev / sniper / bundle /
   creator-cluster exposure, fresh wallets, smart-money flow, bots, priority fees and Jito
   tips, authorities, liquidity. Also 1 s / 5 s / 30 s trade bars with forward-filled
   prices, and a live wallet→token / funding / cluster **graph** for the graph expert;
@@ -439,6 +439,23 @@ for report in brain.assess_active():  # one batched forward pass per round
 brain.resolve()
 brain.maintenance()
 ```
+
+## Edge engine
+
+`nardis_neural.solana.edge` hunts for **edge after costs** and checks whether it is real.
+See [docs/EDGE.md](docs/EDGE.md).
+
+- **executable triple-barrier labels**: latency-delayed entry and exit, exact bonding-curve
+  and AMM impact plus fees on both legs, take-profit / stop-loss / time exits;
+- **walk-forward out-of-fold** retraining of the neural ensemble and risk model, so the
+  second stage only ever learns from forecasts a live system would have seen;
+- a **meta-labeling edge model**: a bootstrap ensemble predicting calibrated P(win) and
+  expected net return; a lower-confidence-bound edge score; a capped fractional-Kelly hint;
+- an **honest backtest**: fit / tune / test in time order, threshold chosen on tune, one
+  shot on test, position constraints, bootstrap confidence intervals, compared with random,
+  momentum and take-everything baselines at the same trade budget;
+- `nardis-neural solana edge-research` installs the model; every `SolanaAssessment` then
+  carries `edge` (p_win, expected_net, edge_score, kelly_fraction, above_threshold).
 
 ## Optional / not included
 

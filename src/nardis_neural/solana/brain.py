@@ -30,6 +30,9 @@ from nardis_neural.data.sequences import observations_to_arrays
 from nardis_neural.schemas import NeuralObservation, NeuralPrediction
 from nardis_neural.solana.config import RISK_LABELS, SolanaConfig
 from nardis_neural.solana.dataset import SolanaDataset, build_solana_dataset
+from nardis_neural.solana.edge.barriers import BarrierSpec
+from nardis_neural.solana.edge.model import EdgeModel
+from nardis_neural.solana.edge.research import edge_features, research_markdown, run_edge_research
 from nardis_neural.solana.events import Event
 from nardis_neural.solana.features import SolanaFeatureBuilder
 from nardis_neural.solana.labels import SolanaLabeler
@@ -60,6 +63,10 @@ class SolanaAssessment(BaseModel):
     """P(return beats the round-trip cost) under the predictive distribution."""
     flags: list[str] = Field(default_factory=list)
     features: dict[str, float] = Field(default_factory=dict)
+    edge: dict[str, float] = Field(default_factory=dict)
+    """Meta-labeling edge estimate for an executable round trip (latency, impact, fees):
+    p_win, expected_net, uncertainty, edge_score (lower confidence bound), kelly_fraction,
+    threshold and above_threshold (1.0 / 0.0).  Empty until ``fit_edge`` has been run."""
 
 
 def _normal_sf(z: float) -> float:
@@ -126,6 +133,11 @@ class SolanaBrain:
         self.risk = (
             SolanaRiskModel.load(self.root / "risk") if (self.root / "risk" / "risk.json").exists() else None
         )
+        self.edge: EdgeModel | None = None
+        self.edge_meta: dict[str, Any] = {}
+        if (self.root / "edge" / "edge.json").exists():
+            self.edge = EdgeModel.load(self.root / "edge")
+            self.edge_meta = json.loads((self.root / "edge" / "research.json").read_text())
         self.pending: list[_Pending] = []
         self.risk_x: list[F32] = []
         self.risk_y: list[F32] = []
@@ -197,6 +209,11 @@ class SolanaBrain:
         current = np.stack([o.current_features for o in observations])
         x = SolanaRiskModel.inputs(out["embedding"], current)
         probs, unc = self.risk.predict(x) if self.risk is not None else (None, None)
+        edge = None
+        if self.edge is not None:
+            ex, _ = edge_features(out, probs, current, engine.config.horizon_names, list(engine.expert_names))
+            edge = self.edge.predict(ex)
+            threshold = float(self.edge_meta.get("threshold", 0.0))
         reports = []
         for i, (mint, obs, pred) in enumerate(zip(mints, observations, preds, strict=True)):
             self.learner.record_prediction(pred)
@@ -226,6 +243,17 @@ class SolanaBrain:
                     expected_net_return=exp_net,
                     prob_net_positive=p_net,
                     flags=red_flags(feats, pred, risk),
+                    edge={}
+                    if edge is None
+                    else {
+                        "p_win": float(edge.p_win[i]),
+                        "expected_net": float(edge.expected_net[i]),
+                        "uncertainty": float(edge.uncertainty[i]),
+                        "edge_score": float(edge.edge_score[i]),
+                        "kelly_fraction": float(edge.kelly[i]),
+                        "threshold": threshold,
+                        "above_threshold": float(edge.edge_score[i] >= threshold),
+                    },
                     features=feats,
                 )
             )
@@ -287,6 +315,34 @@ class SolanaBrain:
             "champion": self.learner.registry.champion_version,
             "pending": len(self.pending),
         }
+
+    # ------------------------------------------------------------------ edge research
+    def fit_edge(
+        self,
+        spec: BarrierSpec | None = None,
+        n_folds: int = 4,
+        max_positions: int = 5,
+        history: EventStore | None = None,
+        log: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        """Walk-forward edge research on the workspace history; installs the edge model."""
+        engine = self.learner.champion
+        research = run_edge_research(
+            history or self.history,
+            self.cfg,
+            engine.config,
+            spec or BarrierSpec(size_sol=self.cfg.trade_size_sol),
+            n_folds=n_folds,
+            max_positions=max_positions,
+            device=engine.device,
+            log=log or (lambda _: None),
+        )
+        research.model.save(self.root / "edge")
+        report_json = json.dumps(research.report, indent=2, default=float)
+        (self.root / "edge" / "research.json").write_text(report_json)
+        (self.root / "edge" / "REPORT.md").write_text(research_markdown(research.report))
+        self.edge, self.edge_meta = research.model, research.report
+        return research.report
 
     # ------------------------------------------------------------------ persistence
     def _load_risk_samples(self) -> None:

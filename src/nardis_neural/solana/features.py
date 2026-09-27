@@ -206,11 +206,48 @@ class SolanaFeatureBuilder:
         f["priority_fee_60s_log"] = np.log1p(fees.mean() * 1e6) if len(fees) else 0.0
         f["jito_share_60s"] = float((s["jito_tip"][w60] > 0).mean()) if len(fees) else 0.0
         f["slot_density_60s"] = len(fees) / 150.0
+        f.update(self._dynamics(log, wallets, now, bal_holders=holders))
         f["mint_authority_revoked"] = float(log.launch.mint_authority_revoked)
         f["freeze_authority_revoked"] = float(log.launch.freeze_authority_revoked)
         f["lp_burned_fraction"] = float(log.launch.lp_burned_fraction)
         vec = np.asarray([f[name] for name in CURRENT_FEATURES], dtype=np.float64)
         return np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
+
+    def _dynamics(
+        self, log: TokenEventLog, wallets: WalletIntel, now: float, bal_holders: dict[int, float]
+    ) -> dict[str, float]:
+        """Rates of change that tend to lead price: curve velocity, holder growth, who is
+        buying (smart money) and who is selling (top holders), and buy acceleration."""
+        s = log.swaps
+        t, wal, buy, sol, tok = s["t"], s["wallet"], s["is_buy"], s["sol"], s["tokens"]
+        out: dict[str, float] = {}
+        if log.venue == "pump_fun":
+            liq_now, liq_60 = self._liquidity_at(log, np.array([now, now - 60.0]))
+            out["bonding_velocity_60s"] = float((liq_now - liq_60) / 85.0)
+        else:
+            out["bonding_velocity_60s"] = 0.0
+        past = t <= now - 60
+        if past.any():
+            ids = wal[past]
+            signed = np.where(buy[past], tok[past], -tok[past])
+            _, inv = np.unique(ids, return_inverse=True)
+            held = np.bincount(inv, weights=signed)
+            holders_60 = int((held > DUST_TOKENS).sum())
+        else:
+            holders_60 = 0
+        out["holders_growth_60s"] = float(np.log1p(len(bal_holders)) - np.log1p(holders_60))
+        w60 = t > now - 60
+        buyers = np.unique(wal[w60 & buy])
+        out["smart_buyer_share_60s"] = float((wallets.skills(buyers) > 0.2).mean()) if len(buyers) else 0.0
+        top = {w for w, _ in sorted(bal_holders.items(), key=lambda kv: -kv[1])[:10]}
+        sells = w60 & ~buy
+        sell_sol = float(sol[sells].sum())
+        top_sell = float(sum(v for w, v in zip(wal[sells], sol[sells], strict=True) if int(w) in top))
+        out["top_holder_sell_share_60s"] = top_sell / sell_sol if sell_sol > 0 else 0.0
+        recent = int((buy & (t > now - 30)).sum())
+        prior = int((buy & (t > now - 60) & (t <= now - 30)).sum())
+        out["buy_acceleration_30s"] = float(np.log1p(recent) - np.log1p(prior))
+        return out
 
     # ------------------------------------------------------------------ bars
     def bars(self, log: TokenEventLog, now: float, spec: BarSpec) -> SequenceInput:

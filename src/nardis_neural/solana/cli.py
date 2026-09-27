@@ -256,3 +256,36 @@ def stream(
         if fh is not None:
             fh.close()
     _echo(stats)
+
+
+@app.command("edge-research")
+def edge_research(
+    workspace: Annotated[
+        Path, typer.Option("--workspace", "-w", help="Solana workspace (history + champion)")
+    ],
+    folds: Annotated[int, typer.Option("--folds")] = 4,
+    take_profit: Annotated[float, typer.Option("--take-profit")] = 0.25,
+    stop_loss: Annotated[float, typer.Option("--stop-loss")] = 0.15,
+    max_hold: Annotated[float, typer.Option("--max-hold", help="seconds")] = 180.0,
+    latency: Annotated[float, typer.Option("--latency", help="entry/exit latency, seconds")] = 1.0,
+    max_positions: Annotated[int, typer.Option("--max-positions")] = 5,
+    device: DeviceOpt = None,
+) -> None:
+    """Walk-forward edge research on the workspace history; installs the edge model.
+
+    Paper research: executable triple-barrier outcomes, out-of-fold meta-labeling, threshold
+    chosen on a tune period, one report on an untouched test period vs baselines."""
+    from nardis_neural.solana.brain import SolanaBrain
+    from nardis_neural.solana.edge import BarrierSpec, research_markdown
+
+    brain = SolanaBrain(workspace, device=device)
+    spec = BarrierSpec(
+        take_profit=take_profit,
+        stop_loss=stop_loss,
+        max_hold_seconds=max_hold,
+        latency_seconds=latency,
+        size_sol=brain.cfg.trade_size_sol,
+    )
+    report = brain.fit_edge(spec, n_folds=folds, max_positions=max_positions, log=typer.echo)
+    typer.echo(research_markdown(report))
+    typer.echo(f"edge model installed in {workspace / 'edge'}")
