@@ -61,7 +61,9 @@ class LatentEncoder(nn.Module):
     def __init__(self, d_in: int, latent_dim: int, dropout: float, depth: int = 2) -> None:
         super().__init__()
         self.inp = nn.Linear(d_in, latent_dim)
-        self.blocks = nn.Sequential(*[ResidualBlock(latent_dim, 2 * latent_dim, dropout) for _ in range(depth)])
+        self.blocks = nn.Sequential(
+            *[ResidualBlock(latent_dim, 2 * latent_dim, dropout) for _ in range(depth)]
+        )
         self.norm = nn.LayerNorm(latent_dim)
 
     def forward(self, x: Tensor) -> Tensor:

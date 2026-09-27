@@ -68,4 +68,3 @@ class ResidualBlock(nn.Module):
         y = self.fc2(self.drop1(self.act(self.fc1(self.norm(x)))))
         out: Tensor = x + self.drop2(y)
         return out
-

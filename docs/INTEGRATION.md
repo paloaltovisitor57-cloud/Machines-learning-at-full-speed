@@ -20,14 +20,17 @@ import numpy as np
 from nardis_neural import NeuralObservation, SequenceInput
 
 obs = NeuralObservation(
-    observation_id="SoLToken123:1718000000.25",   # any unique string
-    timestamp=1718000000.25,                     # prediction time, unix seconds
-    current_features=np.asarray(current_vec, np.float32),          # (current_dim,)
+    observation_id="SoLToken123:1718000000.25",  # any unique string
+    timestamp=1718000000.25,  # prediction time, unix seconds
+    current_features=np.asarray(current_vec, np.float32),  # (current_dim,)
     sequences={
-        "fast":   SequenceInput(values=bars_1s),    # (T, 6) oldest → newest
-        "medium": SequenceInput(values=bars_5s),    # (T, 6)
-        "slow":   SequenceInput(values=bars_30s,    # (T, 7), optional
-                                time_deltas=ages_30s, mask=observed_30s),
+        "fast": SequenceInput(values=bars_1s),  # (T, 6) oldest → newest
+        "medium": SequenceInput(values=bars_5s),  # (T, 6)
+        "slow": SequenceInput(
+            values=bars_30s,  # (T, 7), optional
+            time_deltas=ages_30s,
+            mask=observed_30s,
+        ),
     },
 )
 ```
@@ -47,11 +50,11 @@ obs = NeuralObservation(
 ```python
 from nardis_neural import NeuralEngine
 
-engine = NeuralEngine.load("workspaces/prod")   # registry root → loads current champion
-pred = engine.predict(obs)                      # or engine.predict_batch([...])
+engine = NeuralEngine.load("workspaces/prod")  # registry root → loads current champion
+pred = engine.predict(obs)  # or engine.predict_batch([...])
 
 pred.expected_returns["2m"], pred.return_std["2m"]
-pred.upside_probabilities["30s"], pred.downside_probabilities["5m"]   # calibrated
+pred.upside_probabilities["30s"], pred.downside_probabilities["5m"]  # calibrated
 pred.maximum_upside, pred.maximum_drawdown, pred.predicted_volatility
 pred.epistemic_uncertainty, pred.aleatoric_uncertainty, pred.total_uncertainty
 pred.confidence, pred.ood_score, pred.member_disagreement
@@ -72,22 +75,25 @@ from nardis_neural import ContinualLearner, NeuralOutcome
 
 trainer = ContinualLearner("workspaces/prod")
 
-pred = trainer.predict(obs)                     # champion output; challenger shadows silently
+pred = trainer.predict(obs)  # champion output; challenger shadows silently
 
 # ... once the longest horizon has elapsed (partial horizons are fine):
-trainer.add_experience(obs, NeuralOutcome(
-    observation_id=obs.observation_id,
-    returns={"30s": 0.012, "2m": -0.004, "5m": 0.031},          # log returns
-    max_upside={"30s": 0.02, "2m": 0.02, "5m": 0.05},
-    max_drawdown={"30s": 0.004, "2m": 0.015, "5m": 0.015},      # positive magnitudes
-    volatility={"30s": 0.006, "2m": 0.011, "5m": 0.019},
-))
+trainer.add_experience(
+    obs,
+    NeuralOutcome(
+        observation_id=obs.observation_id,
+        returns={"30s": 0.012, "2m": -0.004, "5m": 0.031},  # log returns
+        max_upside={"30s": 0.02, "2m": 0.02, "5m": 0.05},
+        max_drawdown={"30s": 0.004, "2m": 0.015, "5m": 0.015},  # positive magnitudes
+        volatility={"30s": 0.006, "2m": 0.011, "5m": 0.019},
+    ),
+)
 
 # maintenance — on a timer or background worker, never on the hot path:
-trainer.adapt_if_needed()          # clone champion → fine-tune → challenger
-trainer.full_retrain_if_needed()   # fresh ensemble on weighted replay (+ drift trigger)
-trainer.promote_if_ready()         # multi-gate decision on shadow outcomes
-trainer.save()                     # persist replay buffer, shadow records, counters
+trainer.adapt_if_needed()  # clone champion → fine-tune → challenger
+trainer.full_retrain_if_needed()  # fresh ensemble on weighted replay (+ drift trigger)
+trainer.promote_if_ready()  # multi-gate decision on shadow outcomes
+trainer.save()  # persist replay buffer, shadow records, counters
 ```
 
 `examples/nardis_integration.py` is a complete runnable version of this, including a

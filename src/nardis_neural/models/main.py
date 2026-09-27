@@ -80,7 +80,9 @@ class NardisNeuralNetwork(nn.Module):
 
     def forward(self, batch: Batch) -> ModelOutput:
         if not batch.normalized:
-            raise ValueError("NardisNeuralNetwork expects a normalised batch (FeatureNormalizer.transform_batch)")
+            raise ValueError(
+                "NardisNeuralNetwork expects a normalised batch (FeatureNormalizer.transform_batch)"
+            )
         latents, available, ts_weights = self.run_experts(batch)
         return self.decode(latents, available, ts_weights)
 

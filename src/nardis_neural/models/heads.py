@@ -60,14 +60,18 @@ class MultiTaskHeads(nn.Module):
             {t: HorizonHeads(latent_dim, hidden, n_horizons, 1, dropout) for t in CLASSIFICATION_TASKS}
         )
         self.n_quantiles = n_quantiles
-        self.quantiles = HorizonHeads(latent_dim, hidden, n_horizons, n_quantiles, dropout) if n_quantiles else None
+        self.quantiles = (
+            HorizonHeads(latent_dim, hidden, n_horizons, n_quantiles, dropout) if n_quantiles else None
+        )
         for task in POSITIVE_TASKS:
             head = self.regression[task]
             assert isinstance(head, HorizonHeads)
             with torch.no_grad():
                 head.b2[:, 0].fill_(0.5)  # softplus(0.5) ≈ 0.97 ≈ unit-scale magnitude
 
-    def forward(self, z: Tensor) -> tuple[dict[str, Tensor], dict[str, Tensor], dict[str, Tensor], Tensor | None]:
+    def forward(
+        self, z: Tensor
+    ) -> tuple[dict[str, Tensor], dict[str, Tensor], dict[str, Tensor], Tensor | None]:
         means: dict[str, Tensor] = {}
         logvars: dict[str, Tensor] = {}
         for task, head in self.regression.items():

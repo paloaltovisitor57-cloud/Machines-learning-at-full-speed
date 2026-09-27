@@ -121,7 +121,9 @@ class GraphEncoder(nn.Module):
         edge_type = edge_type.clamp(0, self.num_relations - 1)
         for layer in self.layers:
             h = layer(h, edge_index, edge_type)
-        pooled = scatter_mean(h, node_batch, batch_size) if h.shape[0] else h.new_zeros(batch_size, h.shape[1])
+        pooled = (
+            scatter_mean(h, node_batch, batch_size) if h.shape[0] else h.new_zeros(batch_size, h.shape[1])
+        )
         has = target_node >= 0
         target = torch.zeros(batch_size, h.shape[1], dtype=h.dtype, device=h.device)
         if bool(has.any()):

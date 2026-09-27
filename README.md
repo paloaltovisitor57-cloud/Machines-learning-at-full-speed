@@ -107,8 +107,9 @@ In Python:
 
 ```python
 from nardis_neural import NeuralEngine
+
 engine = NeuralEngine.load("workspaces/demo")
-prediction = engine.predict(observation)       # observation: NeuralObservation
+prediction = engine.predict(observation)  # observation: NeuralObservation
 ```
 
 ## Architecture
@@ -258,13 +259,16 @@ flowchart LR
 ```python
 from nardis_neural import NeuralEngine, NeuralObservation, SequenceInput
 
-engine = NeuralEngine.load("workspaces/prod")        # workspace → current champion
-p = engine.predict(NeuralObservation(
-    observation_id="tok:1718000000", timestamp=1718000000.0,
-    current_features=current_vec,
-    sequences={"fast": SequenceInput(values=bars_1s), "medium": SequenceInput(values=bars_5s)},
-))
-p.expected_returns   # {"30s": …, "2m": …, "5m": …}
+engine = NeuralEngine.load("workspaces/prod")  # workspace → current champion
+p = engine.predict(
+    NeuralObservation(
+        observation_id="tok:1718000000",
+        timestamp=1718000000.0,
+        current_features=current_vec,
+        sequences={"fast": SequenceInput(values=bars_1s), "medium": SequenceInput(values=bars_5s)},
+    )
+)
+p.expected_returns  # {"30s": …, "2m": …, "5m": …}
 p.upside_probabilities, p.downside_probabilities, p.maximum_upside, p.maximum_drawdown
 p.predicted_volatility, p.epistemic_uncertainty, p.aleatoric_uncertainty, p.total_uncertainty
 p.confidence, p.ood_score, p.market_embedding, p.expert_weights, p.regime_cluster
@@ -274,8 +278,9 @@ The continual-learning API:
 
 ```python
 from nardis_neural import ContinualLearner
+
 trainer = ContinualLearner("workspaces/prod")
-trainer.predict(observation)               # champion; challenger shadows
+trainer.predict(observation)  # champion; challenger shadows
 trainer.add_experience(observation, outcome)
 trainer.adapt_if_needed()
 trainer.full_retrain_if_needed()
