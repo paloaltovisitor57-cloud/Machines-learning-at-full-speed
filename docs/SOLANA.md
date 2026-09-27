@@ -182,10 +182,63 @@ nardis-neural solana replay --workspace workspaces/sol --events sim/live --out s
 nardis-neural solana assess --workspace workspaces/sol
 ```
 
-## 10. Connecting real data
+## 10. Connecting real chain data (`solana/ingest/`)
 
-Decode chain activity into the five event types. You need, per swap, the pool's reserves
-*after* the swap (virtual reserves on pump.fun), the priority fee, the Jito tip and the
-slot. You also need SOL transfers between wallets for funding analysis. Stream them in
-order into `SolanaBrain.ingest`. Every threshold, horizon, bar spec and window lives in
-`SolanaConfig` (`nardis-neural solana init-config`).
+```mermaid
+flowchart LR
+    RPC[(Solana RPC<br/>read-only)] -->|getSignaturesForAddress<br/>pump.fun · PumpSwap| CS[ChainStreamer<br/>cursor · backlog paging · dedupe]
+    CS -->|getTransaction jsonParsed| TD[TransactionDecoder]
+    GEY[(Geyser / provider webhook)] -.->|same JSON| TD
+    TD -->|TokenLaunch · Swap · Migration<br/>LiquidityChange · Transfer| SB[SolanaBrain.ingest]
+    SB --> RL[run_live: assess → JSONL · resolve · maintenance]
+```
+
+**Decoding (`decoder.py`)**
+* **pump.fun**: Anchor events are read from `Program data:` logs.
+  `CreateEvent` → launch, `TradeEvent` → swap (with the virtual reserves after the
+  trade), `CompleteEvent` → migration. Discriminators are `sha256("event:<Name>")[:8]`.
+  Only the stable leading fields are read, so program upgrades that append fields keep
+  working.
+* **AMMs** (PumpSwap, Raydium AMM v4 / CPMM, Meteora, Orca) are handled without
+  per-venue layouts. A pool is a WSOL vault plus a token vault owned by the same non-signer
+  authority in a transaction that invokes a known AMM program. Vault balance deltas give
+  the event: SOL in + tokens out is a buy, the reverse a sell, both in a liquidity add,
+  both out a removal. Post-transaction vault balances are the reserves. For
+  concentrated-liquidity venues the reserves are re-expressed so that price equals the
+  execution price. Tokens first seen on an AMM get an implicit launch, with mint and
+  freeze authority looked up via `getAccountInfo`.
+* **SOL transfers** of at least `min_transfer_sol` become funding edges.
+  **Jito tips** (transfers to the eight tip accounts) and **priority fees**
+  (`fee − 5000 × signatures`) are attached to the transaction's first swap.
+* Failed transactions are skipped. Timestamps are `blockTime` plus a microsecond sequence,
+  so events stay strictly ordered.
+
+**Streaming (`stream.py`, `rpc.py`)**
+* `SolanaRpc` is a standard-library JSON-RPC client that only allows query methods
+  (`sendTransaction`, airdrops and so on raise `PermissionError`). It retries 429 and
+  5xx responses with exponential backoff.
+* `ChainStreamer` keeps a persisted per-program cursor and pages back to it on every
+  poll, so bursts are never dropped. A backlog above `max_backlog` is counted in `gaps`.
+  It de-duplicates signatures seen by several programs and decodes in slot order.
+* `run_live` ingests, assesses every `assess_every` seconds (writing JSONL), resolves
+  matured outcomes and runs maintenance periodically. Malformed or out-of-order events are
+  counted and skipped, never crashing the loop.
+
+**Verification.** `encode.py` renders market events back into realistic transaction JSON.
+The test suite round-trips a whole simulated market through transactions and gets
+identical swaps, reserves, tips, fees, holder statistics and insider features. It also
+checks the streamer against a fake chain (bursts larger than a page, restarts, duplicate
+programs) and runs chain → decoder → brain → assessments end to end. The event layouts
+and program IDs follow the public pump.fun IDL and have not been re-checked here against
+live mainnet transactions. Run `solana backfill --raw` on a real endpoint once to confirm.
+
+```bash
+export SOLANA_RPC_URL=https://your-provider.example/?api-key=…   # any standard Solana RPC
+nardis-neural solana backfill --out history/ --limit 5000 --raw history/raw.jsonl
+nardis-neural solana bootstrap --events history/ --workspace workspaces/sol
+nardis-neural solana stream --workspace workspaces/sol --out assessments.jsonl
+nardis-neural solana decode --input dump.jsonl --out events/   # offline: provider exports / archives
+```
+
+Every threshold, horizon, bar spec and window lives in `SolanaConfig`
+(`nardis-neural solana init-config`).

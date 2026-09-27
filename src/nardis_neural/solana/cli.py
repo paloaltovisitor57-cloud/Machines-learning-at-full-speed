@@ -170,3 +170,89 @@ def assess(
     reports = [brain.assess(mint)] if mint else brain.assess_active(max_idle_seconds=1e9)
     for r in reports:
         typer.echo(r.model_dump_json(exclude={"features", "prediction"}))
+
+
+RpcOpt = Annotated[
+    str | None, typer.Option("--rpc", envvar="SOLANA_RPC_URL", help="read-only RPC endpoint URL")
+]
+
+
+@app.command()
+def decode(
+    input_file: Annotated[Path, typer.Option("--input", "-i", help="JSONL of getTransaction results")],
+    out: Annotated[Path, typer.Option("--out", "-o", help="event directory (Parquet tables)")],
+    min_transfer_sol: Annotated[float, typer.Option("--min-transfer-sol")] = 0.05,
+) -> None:
+    """Decode raw Solana transactions (pump.fun, AMMs, SOL transfers) into market events."""
+    from nardis_neural.solana.ingest import TransactionDecoder, decode_transactions
+    from nardis_neural.solana.market import EventStore
+
+    txs = [json.loads(line) for line in input_file.read_text().splitlines() if line.strip()]
+    decoder = TransactionDecoder(min_transfer_sol=min_transfer_sol)
+    store = EventStore(decode_transactions(txs, decoder))
+    store.save(out)
+    _echo(
+        {
+            "transactions": decoder.stats.transactions,
+            "failed": decoder.stats.failed,
+            "events": decoder.stats.events,
+            "out": str(out),
+        }
+    )
+
+
+@app.command()
+def backfill(
+    out: Annotated[Path, typer.Option("--out", "-o", help="event directory (Parquet tables)")],
+    rpc: RpcOpt = None,
+    limit: Annotated[int, typer.Option("--limit", help="max signatures per program")] = 1000,
+    raw: Annotated[Path | None, typer.Option("--raw", help="also save raw transactions as JSONL")] = None,
+) -> None:
+    """Fetch recent pump.fun / PumpSwap history over RPC (read-only) and decode it."""
+    from nardis_neural.solana.ingest import ChainStreamer, SolanaRpc
+    from nardis_neural.solana.market import EventStore
+
+    if rpc is None:
+        raise typer.BadParameter("pass --rpc or set SOLANA_RPC_URL")
+    client = SolanaRpc(rpc)
+    streamer = ChainStreamer(client, initial_limit=limit)
+    raw_fh = raw.open("a") if raw is not None else None
+    if raw_fh is not None:
+        streamer.raw_sink = lambda tx: raw_fh.write(json.dumps(tx) + "\n")
+    try:
+        store = EventStore(streamer.poll())
+    finally:
+        if raw_fh is not None:
+            raw_fh.close()
+    store.save(out)
+    _echo({"events": len(store), "decoded": streamer.decoder.stats.events, "out": str(out)})
+
+
+@app.command()
+def stream(
+    workspace: Annotated[Path, typer.Option("--workspace", "-w")],
+    rpc: RpcOpt = None,
+    out: Annotated[Path | None, typer.Option("--out", "-o", help="append assessments as JSONL")] = None,
+    polls: Annotated[
+        int | None, typer.Option("--polls", help="stop after N polls (default: run forever)")
+    ] = None,
+    poll_interval: Annotated[float, typer.Option("--poll-interval")] = 2.0,
+    assess_every: Annotated[float, typer.Option("--assess-every")] = 10.0,
+    maintenance_every: Annotated[float, typer.Option("--maintenance-every")] = 600.0,
+    device: DeviceOpt = None,
+) -> None:
+    """Stream live chain activity into a Solana workspace (read-only) and emit assessments."""
+    from nardis_neural.solana.brain import SolanaBrain
+    from nardis_neural.solana.ingest import ChainStreamer, SolanaRpc, run_live
+
+    if rpc is None:
+        raise typer.BadParameter("pass --rpc or set SOLANA_RPC_URL")
+    brain = SolanaBrain(workspace, device=device)
+    streamer = ChainStreamer(SolanaRpc(rpc), state_file=workspace / "stream_cursor.json")
+    fh = out.open("a") if out is not None else None
+    try:
+        stats = run_live(brain, streamer, assess_every, maintenance_every, poll_interval, fh, max_polls=polls)
+    finally:
+        if fh is not None:
+            fh.close()
+    _echo(stats)
