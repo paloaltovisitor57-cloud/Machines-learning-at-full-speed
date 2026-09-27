@@ -87,7 +87,7 @@ flowchart TB
 | Continual learning | 3-pool replay (recent FIFO, historical reservoir, protected rare events), 5 sampling strategies, candidate cloning, distillation, EWC, full retraining with configurable weights |
 | Lifecycle | immutable checkpoints, champion/candidate/challenger/retired/failed registry with audit log, shadow mode, 10-gate promotion, manual and optional automatic rollback |
 | Representation | self-supervised pretraining (masked timestep, masked feature, contrastive), embedding export to Parquet/NumPy, KMeans / GMM / HDBSCAN regime discovery |
-| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 197 tests |
+| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 199 tests |
 
 ## Quick start
 
@@ -351,7 +351,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │   ├── monitoring/          drift
 │   └── solana/              amm · events · market · wallets · features · labels · dataset ·
 │                            risk · simulator · brain · config · cli · ingest/ · edge/
-└── tests/                   197 tests incl. synthetic end-to-end pipeline
+└── tests/                   199 tests incl. synthetic end-to-end pipeline
 ```
 
 ## Testing & quality gates
@@ -360,7 +360,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 ruff check .        # lint
 ruff format --check .
 mypy                # strict mode: src, tests and examples
-pytest              # 197 tests; CUDA / MPS tests auto-skip when unavailable
+pytest              # 199 tests; CUDA / MPS tests auto-skip when unavailable
 ```
 
 The suite covers:
@@ -477,6 +477,11 @@ that runs 100x to 1000x. See [docs/MOONSHOT.md](docs/MOONSHOT.md).
   tail index and epistemic spread;
 - **decision helpers**: expected payoff of a take-profit ladder with a trailing moon bag,
   and a **lottery-Kelly** fraction that maximises expected log-wealth;
+- **hard to fool**: per-level tail calibration on held-out tokens, inputs clamped to the
+  training range, and a manipulation guard (rug risk, authorities, wash trading, bundles,
+  creator clusters, OOD, ensemble disagreement) whose `trust` score and hard vetoes only
+  ever lower the output. `SolanaBrain.moonshot_ranking()` returns active tokens by
+  `chase_score`, best first;
 - **honest research**: train on earlier tokens with labels truncated at the cutoff, score
   once on later tokens against every-launch, random and momentum tickets;
 - `runner` launches in the simulator (`solana simulate --market degen`) so there are real

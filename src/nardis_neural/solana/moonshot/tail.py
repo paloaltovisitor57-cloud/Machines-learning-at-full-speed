@@ -118,11 +118,33 @@ class TailModel:
             self.members.append(_TailNet(d_in, hidden, components, dropout))
         self.mean = np.zeros(d_in, dtype=np.float32)
         self.std = np.ones(d_in, dtype=np.float32)
+        self.lo = np.full(d_in, -np.inf, dtype=np.float32)
+        self.hi = np.full(d_in, np.inf, dtype=np.float32)
+        """Training range of every input; anything beyond it is clamped before the network."""
+        self.calibration = np.ones(len(self.spec.levels), dtype=np.float64)
+        """Per-level ratio observed / predicted P(M ≥ k) on held-out tokens."""
         self.report: dict[str, Any] = {}
 
     def _x(self, x: npt.NDArray[Any]) -> torch.Tensor:
-        z = (np.nan_to_num(np.asarray(x, dtype=np.float32)) - self.mean) / self.std
+        raw = np.clip(np.nan_to_num(np.asarray(x, dtype=np.float32)), self.lo, self.hi)
+        z = (raw - self.mean) / self.std
         return torch.from_numpy(np.clip(z, -8, 8).astype(np.float32))
+
+    def out_of_range_share(self, x: npt.NDArray[Any]) -> F64:
+        """Share of each row's inputs outside the training range (a crafted-input alarm)."""
+        v = np.nan_to_num(np.asarray(x, dtype=np.float32))
+        margin = 0.05 * np.where(np.isfinite(self.hi - self.lo), self.hi - self.lo, 0.0)
+        out = (v < self.lo - margin) | (v > self.hi + margin)
+        return np.asarray(out.mean(axis=1), dtype=np.float64)
+
+    def _calibrate(self, sf: F64, k: F64) -> F64:
+        """Apply the per-level calibration to survival values at multiples ``k`` (last axis)."""
+        levels = np.log(np.asarray(self.spec.levels, dtype=np.float64))
+        lk = np.log(np.maximum(k, MIN_MULTIPLE))
+        ratio = np.interp(lk, np.concatenate([[0.0], levels]), np.concatenate([[1.0], self.calibration]))
+        ratio = np.where(lk <= 0, 1.0, ratio)
+        out = np.clip(sf * ratio, 0.0, 1.0)
+        return np.asarray(np.minimum.accumulate(out, axis=-1), dtype=np.float64)
 
     # ------------------------------------------------------------------ training
     def fit(
@@ -151,6 +173,8 @@ class TailModel:
         if len(tr) < 20:
             raise ValueError("not enough rows to fit the tail model")
         xs = np.nan_to_num(np.asarray(x, dtype=np.float32)[tr])
+        self.lo = np.quantile(xs, 0.001, axis=0).astype(np.float32)
+        self.hi = np.quantile(xs, 0.999, axis=0).astype(np.float32)
         self.mean = xs.mean(axis=0).astype(np.float32)
         self.std = (xs.std(axis=0) + 1e-6).astype(np.float32)
         y = np.log(np.maximum(peak, MIN_MULTIPLE)).astype(np.float32)
@@ -201,7 +225,32 @@ class TailModel:
             with torch.no_grad():
                 nll = [float(loss_on(m.eval(), val_idx)) for m in self.members]
             self.report["validation_nll"] = float(np.mean(nll))
+            self.calibration = self._fit_calibration(x[va], peak[va], censored[va], w[va])
+            self.report["calibration_ratio"] = dict(
+                zip([f"{k:g}x" for k in self.spec.levels], self.calibration.tolist(), strict=True)
+            )
         return self.report
+
+    def _fit_calibration(
+        self,
+        x: npt.NDArray[Any],
+        peak: F64,
+        censored: npt.NDArray[np.bool_],
+        w: npt.NDArray[Any],
+        prior: float = 0.5,
+    ) -> F64:
+        """Observed / predicted hit count per level on held-out tokens (token-weighted), shrunk to 1."""
+        pi, mu, s = self._params(x)
+        levels = np.asarray(self.spec.levels, dtype=np.float64)
+        p = self._survival(pi, mu, s, levels).mean(0)
+        ratio = np.ones(len(levels))
+        for j, k in enumerate(levels):
+            reached = peak >= k
+            known = reached | ~censored  # censored rows below k are unresolved
+            hits = float((w * reached)[known].sum())
+            pred = float((w * p[:, j])[known].sum())
+            ratio[j] = (hits + prior) / (pred + prior)  # a pseudo-token of prior agreement
+        return np.asarray(np.clip(ratio, 0.05, 2.0), dtype=np.float64)
 
     # ------------------------------------------------------------------ inference
     @torch.no_grad()
@@ -220,9 +269,11 @@ class TailModel:
         sig = 0.5 * (1 + np.tanh(0.5 * z))
         return np.asarray((pi[..., None, :] * sig).sum(-1), dtype=np.float64)
 
-    def survival(self, x: npt.NDArray[Any], k: list[float] | F64) -> F64:
+    def survival(self, x: npt.NDArray[Any], k: list[float] | F64, calibrated: bool = True) -> F64:
+        kk = np.asarray(k, dtype=np.float64)
         pi, mu, s = self._params(x)
-        return np.asarray(self._survival(pi, mu, s, np.asarray(k, dtype=np.float64)).mean(0))
+        sf = np.asarray(self._survival(pi, mu, s, kk).mean(0))
+        return self._calibrate(sf, kk) if calibrated else sf
 
     def nll(self, x: npt.NDArray[Any], peak: F64, censored: npt.NDArray[np.bool_]) -> F64:
         """Per-row NLL of the ensemble mixture (members averaged in probability space)."""
@@ -236,8 +287,8 @@ class TailModel:
     def predict(self, x: npt.NDArray[Any]) -> TailPrediction:
         pi, mu, s = self._params(x)
         levels = np.asarray(self.spec.levels, dtype=np.float64)
-        member_sf = self._survival(pi, mu, s, levels)
-        grid_sf = self._survival(pi, mu, s, GRID).mean(0)  # (N, G)
+        member_sf = self._calibrate(self._survival(pi, mu, s, levels), levels)
+        grid_sf = self._calibrate(self._survival(pi, mu, s, GRID).mean(0), GRID)  # (N, G)
         mass = np.concatenate(
             [1 - grid_sf[:, :1], grid_sf[:, :-1] - grid_sf[:, 1:], grid_sf[:, -1:]], axis=1
         ).clip(0, None)
@@ -266,7 +317,14 @@ class TailModel:
         d = Path(directory)
         d.mkdir(parents=True, exist_ok=True)
         torch.save({f"m{i}": m.state_dict() for i, m in enumerate(self.members)}, d / "tail.pt")
-        np.savez(d / "tail_scaler.npz", mean=self.mean, std=self.std)
+        np.savez(
+            d / "tail_scaler.npz",
+            mean=self.mean,
+            std=self.std,
+            lo=self.lo,
+            hi=self.hi,
+            calibration=self.calibration,
+        )
         meta = {
             "d_in": self.d_in,
             "members": len(self.members),
@@ -305,5 +363,7 @@ class TailModel:
             m.load_state_dict(states[f"m{i}"])
         with np.load(d / "tail_scaler.npz") as z:
             model.mean, model.std = z["mean"], z["std"]
+            if "lo" in z:
+                model.lo, model.hi, model.calibration = z["lo"], z["hi"], z["calibration"]
         model.report = dict(meta.get("report", {}))
         return model

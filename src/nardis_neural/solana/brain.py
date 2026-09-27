@@ -38,6 +38,7 @@ from nardis_neural.solana.features import SolanaFeatureBuilder
 from nardis_neural.solana.labels import SolanaLabeler
 from nardis_neural.solana.market import EventStore, SolanaMarket
 from nardis_neural.solana.moonshot import MoonshotSpec, TailModel, moonshot_markdown, run_moonshot_research
+from nardis_neural.solana.moonshot.guard import GuardConfig, assess_manipulation
 from nardis_neural.solana.risk import SolanaRiskModel
 from nardis_neural.training.continual import ContinualLearner
 from nardis_neural.training.pipeline import train_engine
@@ -69,9 +70,11 @@ class SolanaAssessment(BaseModel):
     p_win, expected_net, uncertainty, edge_score (lower confidence bound), kelly_fraction,
     threshold and above_threshold (1.0 / 0.0).  Empty until ``fit_edge`` has been run."""
     moonshot: dict[str, float] = Field(default_factory=dict)
-    """Fat-tail view of a ticket bought now: P(peak ≥ k) for every level (``p_ge_10x`` …),
-    median and expected ladder multiple, lottery-Kelly fraction, tail index, epistemic spread
-    and ``in_entry_window``.  Empty until ``fit_moonshot`` has been run."""
+    """Fat-tail view of a ticket bought now: calibrated P(peak ≥ k) for every level
+    (``p_ge_10x`` …), median and expected ladder multiple, lottery-Kelly fraction, tail
+    index, epistemic spread, ``in_entry_window``, and the manipulation guard's ``trust``,
+    ``vetoed`` (1.0 / 0.0), ``chase_score`` (trust-adjusted expected multiple, 0 when vetoed)
+    and ``chase_rank`` within the assessed batch (1 = best).  Empty until ``fit_moonshot``."""
 
 
 def _normal_sf(z: float) -> float:
@@ -144,9 +147,12 @@ class SolanaBrain:
             self.edge = EdgeModel.load(self.root / "edge")
             self.edge_meta = json.loads((self.root / "edge" / "research.json").read_text())
         self.moonshot: TailModel | None = None
+        self.guard = GuardConfig()
+        """Thresholds of the moonshot manipulation guard (hard vetoes)."""
         if (self.root / "moonshot" / "tail.json").exists():
             self.moonshot = TailModel.load(self.root / "moonshot")
         self.pending: list[_Pending] = []
+        self._vetoes: dict[str, list[str]] = {}
         self.risk_x: list[F32] = []
         self.risk_y: list[F32] = []
         self.risk_t: list[float] = []
@@ -251,7 +257,8 @@ class SolanaBrain:
                     round_trip_cost=cost,
                     expected_net_return=exp_net,
                     prob_net_positive=p_net,
-                    flags=red_flags(feats, pred, risk),
+                    flags=red_flags(feats, pred, risk)
+                    + [f"moonshot veto: {r}" for r in self._vetoes.pop(mint, [])],
                     edge={}
                     if edge is None
                     else {
@@ -286,20 +293,43 @@ class SolanaBrain:
         else:
             x = np.nan_to_num(current).astype(np.float32)
         tp = model.predict(x)
+        oor = model.out_of_range_share(x)
+        ood = np.asarray(out.get("ood_score", np.zeros(len(mints))), dtype=np.float64).reshape(-1)
+        rug_col = RISK_LABELS.index("rug")
         spec = model.spec
         views = []
         for i, mint in enumerate(mints):
             age = now - self.market.token(mint).launch.t
+            feats = SolanaFeatureBuilder.explain(current[i].astype(np.float64))
+            epistemic = float(tp.survival_std[i].max())
+            verdict = assess_manipulation(
+                feats,
+                float(probs[i, rug_col]) if probs is not None else None,
+                float(ood[i]),
+                epistemic,
+                float(oor[i]),
+                self.guard,
+            )
+            vetoed = bool(verdict.vetoes)
             v = {f"p_ge_{k:g}x": float(tp.survival[i, j]) for j, k in enumerate(spec.levels)}
             v |= {
                 "median_multiple": float(tp.median_multiple[i]),
                 "expected_multiple": float(tp.expected_multiple[i]),
-                "lottery_kelly": float(tp.lottery_kelly[i]),
+                "lottery_kelly": 0.0 if vetoed else float(tp.lottery_kelly[i]) * verdict.trust,
                 "tail_index": float(tp.tail_index[i]),
-                "epistemic": float(tp.survival_std[i].max()),
+                "epistemic": epistemic,
+                "out_of_range_share": float(oor[i]),
                 "in_entry_window": float(spec.min_entry_age_seconds <= age <= spec.max_entry_age_seconds),
+                "trust": verdict.trust,
+                "vetoed": float(vetoed),
+                "chase_score": 0.0 if vetoed else verdict.trust * float(tp.expected_multiple[i]),
             }
+            v |= {f"guard.{name}": value for name, value in verdict.factors.items()}
             views.append(v)
+            self._vetoes[mint] = verdict.vetoes
+        order = sorted(range(len(views)), key=lambda j: -views[j]["chase_score"])
+        for rank, j in enumerate(order, start=1):
+            views[j]["chase_rank"] = float(rank)
         return views
 
     def assess_active(
@@ -313,6 +343,27 @@ class SolanaBrain:
             if now - self.market.token(m).launch.t >= min_age
         ]
         return self.assess_many(mints)
+
+    def moonshot_ranking(
+        self, max_idle_seconds: float = 120.0, include_vetoed: bool = False
+    ) -> list[SolanaAssessment]:
+        """Active tokens inside the moonshot entry window, best ``chase_score`` first.
+
+        A ranking for the trading system to consume — not an order.  Vetoed tokens are left
+        out unless ``include_vetoed``.
+        """
+        if self.moonshot is None:
+            raise RuntimeError("no tail model installed: run fit_moonshot / solana moonshot-research")
+        spec = self.moonshot.spec
+        now = self.market.now
+        mints = [
+            m
+            for m in self.market.active_tokens(now, max_idle_seconds)
+            if spec.min_entry_age_seconds <= now - self.market.token(m).launch.t <= spec.max_entry_age_seconds
+        ]
+        found = self.assess_many(mints)
+        keep = [a for a in found if include_vetoed or not a.moonshot["vetoed"]]
+        return sorted(keep, key=lambda a: -a.moonshot["chase_score"])
 
     def resolve(self) -> int:
         """Label every assessment whose longest horizon has elapsed and learn from it."""

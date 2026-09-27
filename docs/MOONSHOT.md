@@ -145,17 +145,52 @@ nardis-neural solana moonshot-research --workspace ws --archetypes sim/degen/arc
 cat ws/moonshot/REPORT.md
 ```
 
-## 5. Using it live
+## 5. Hardening: calibration, input clamping, manipulation guard
+
+A tail model is exactly what manipulators aim at. Fake volume, bundled supply and staged
+"smart money" all look like the early footprint of a runner. Three layers keep the model
+from being walked into a trap, and each of them can only **lower** its optimism:
+
+1. **Tail calibration** (`TailModel.calibration`). After training, the predicted hit
+   counts for each level (2x … 1000x) are compared with what actually happened on the
+   held-out, most recent tokens. Each level gets a ratio, observed ÷ predicted, shrunk
+   towards 1 by one pseudo-token and clipped to [0.05, 2]. Probabilities are then
+   rescaled and kept non-increasing in `k`. This targets the far-tail overestimate
+   measured in section 4. The results table there was produced before this step.
+2. **Input clamping**. Each input is clamped to its training range (0.1 to 99.9 %
+   quantiles) before the network, so a crafted extreme feature cannot push the
+   prediction off a cliff. `out_of_range_share` reports how many inputs were clamped.
+3. **Manipulation guard** (`moonshot/guard.py`). A `trust` score in [0, 1] multiplies the
+   chase score and the Kelly hint. It combines:
+   * P(rug) from the risk model;
+   * live mint or freeze authority, and unburned LP;
+   * wash trading, bundled supply, creator-cluster supply and rug-linked wallets;
+   * holder concentration and dev selling;
+   * the neural OOD score, clamped inputs and ensemble disagreement.
+
+   **Hard vetoes** zero the chase score. They fire on P(rug) ≥ 60 %, a live mint or freeze
+   authority, bundled supply ≥ 20 %, a creator cluster holding ≥ 30 %, bots making up
+   ≥ 80 % of volume, OOD ≥ 4, or ≥ 25 % of inputs outside the training range. Each veto
+   appears in `flags` as a readable reason. The factors are hand-set and monotone: more red
+   flags never raise trust. Thresholds are in `GuardConfig` (`brain.guard`).
+
+## 6. Using it from the trading algorithm
 
 ```python
 brain = SolanaBrain("workspaces/sol")  # the tail model loads if moonshot-research was run
-for a in brain.assess_active():
+for a in brain.moonshot_ranking():  # active tokens in the entry window, best first, vetoes removed
     m = a.moonshot
+    m["chase_score"], m["chase_rank"]  # trust × expected ladder multiple; 1 = best
     m["p_ge_10x"], m["p_ge_100x"], m["p_ge_1000x"]  # calibrated survival probabilities
-    m["expected_multiple"], m["lottery_kelly"]  # ladder-payoff expectation, sizing hint
-    m["tail_index"], m["epistemic"], m["in_entry_window"]
+    m["expected_multiple"], m["lottery_kelly"]  # payoff expectation; sizing hint (× trust)
+    m["trust"], m["vetoed"], m["tail_index"], m["epistemic"], m["out_of_range_share"]
+    a.flags  # human-readable red flags, including "moonshot veto: …"
 ```
 
-Nothing here guarantees 1000x, and no model can promise it. What the module gives you is
-a disciplined estimate of *how likely* a large run is, how uncertain that estimate is, and
-how much of a bankroll such a lottery ticket can justify. The module never places orders.
+Every assessment from `assess` / `assess_many` / `assess_active` carries the same
+`moonshot` block, with `chase_rank` computed within the batch. The trading system decides
+what to do with it. This module never places orders.
+
+Nothing here guarantees 1000x, and no model can promise it. What it gives you is a ranked,
+manipulation-aware estimate of *how likely* a large run is, how uncertain that estimate is,
+and how much of a bankroll such a lottery ticket can justify.

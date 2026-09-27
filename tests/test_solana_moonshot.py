@@ -95,6 +95,59 @@ def test_tail_model_learns_heavy_tails_and_roundtrips(tmp_path: Path) -> None:
     back = TailModel.load(tmp_path / "tail")
     np.testing.assert_allclose(back.predict(probe).survival, pred.survival, rtol=1e-6)
     assert back.feature_names == model.feature_names and back.inputs == "raw"
+    # crafted extreme inputs are clamped to the training range and flagged
+    crafted = np.array([[0.0, 1e6]], dtype=np.float32)
+    clamped = np.array([[0.0, float(model.hi[1])]], dtype=np.float32)
+    np.testing.assert_allclose(model.survival(crafted, [10.0]), model.survival(clamped, [10.0]))
+    assert model.out_of_range_share(crafted)[0] == 0.5 and model.out_of_range_share(probe).max() == 0.0
+    assert set(rep["calibration_ratio"]) == {"2x", "5x", "10x", "100x", "1000x"}
+    np.testing.assert_allclose(back.calibration, model.calibration)
+
+
+def test_calibration_shrinks_an_overconfident_tail() -> None:
+    x, m, groups, ts = _tail_data(400, 3)
+    model = TailModel(2, members=1, hidden=16)
+    model.fit(x, m, np.zeros(len(m), dtype=bool), ts, groups, epochs=5)
+    probe = x[:50]
+    raw = model.survival(probe, [10.0], calibrated=False)[:, 0]
+    heavy = np.full(len(m), 1e4)  # held-out outcomes far above the model: ratio must go up
+    model.calibration = model._fit_calibration(
+        x, np.full(len(m), 0.5), np.zeros(len(m), dtype=bool), np.ones(len(m))
+    )
+    assert (model.calibration < 1).all(), "no held-out token ever reached 2x → every level shrinks"
+    assert (model.survival(probe, [10.0])[:, 0] <= raw + 1e-12).all()
+    model.calibration = model._fit_calibration(x, heavy, np.zeros(len(m), dtype=bool), np.ones(len(m)))
+    assert (model.calibration > 1).any()
+    sf = model.survival(probe, [2.0, 5.0, 10.0, 100.0, 1000.0])
+    assert (np.diff(sf, axis=1) <= 1e-12).all() and (sf <= 1).all()
+
+
+def test_manipulation_guard_only_lowers_trust() -> None:
+    from nardis_neural.solana.moonshot.guard import assess_manipulation
+
+    clean = dict.fromkeys(CURRENT_FEATURES, 0.0) | {
+        "mint_authority_revoked": 1.0,
+        "freeze_authority_revoked": 1.0,
+        "lp_burned_fraction": 1.0,
+    }
+    ok = assess_manipulation(clean, 0.05, 0.2, 0.02, 0.0)
+    assert ok.trust > 0.9 and ok.vetoes == []
+    worse = [
+        {"bot_share_60s": 0.6},
+        {"bundle_share": 0.1},
+        {"creator_cluster_share": 0.2},
+        {"top10_share": 0.6},
+        {"dev_sold_fraction": 0.5},
+        {"lp_burned_fraction": 0.0},
+    ]
+    for change in worse:
+        v = assess_manipulation(clean | change, 0.05, 0.2, 0.02, 0.0)
+        assert v.trust < ok.trust, change
+    assert assess_manipulation(clean, 0.05, 3.0, 0.02, 0.0).trust < ok.trust, "out of distribution"
+    assert assess_manipulation(clean, 0.05, 0.2, 0.3, 0.0).trust < ok.trust, "ensemble disagreement"
+    trap = clean | {"mint_authority_revoked": 0.0, "bundle_share": 0.3, "bot_share_60s": 0.9}
+    bad = assess_manipulation(trap, 0.7, 5.0, 0.02, 0.5)
+    assert len(bad.vetoes) == 6 and bad.trust < 0.01
 
 
 def test_censoring_is_not_mistaken_for_the_outcome() -> None:
@@ -152,6 +205,11 @@ def test_runners_and_moonshot_brain_integration(tmp_path: Path) -> None:
         a.moonshot
     )
     assert 0 <= a.moonshot["p_ge_1000x"] <= a.moonshot["p_ge_2x"] <= 1
+    assert 0 <= a.moonshot["trust"] <= 1 and a.moonshot["chase_rank"] == 1
+    assert a.moonshot["chase_score"] == 0 or not a.moonshot["vetoed"]
+    ranking = reloaded.moonshot_ranking(max_idle_seconds=1e9, include_vetoed=True)
+    scores = [r.moonshot["chase_score"] for r in ranking]
+    assert scores == sorted(scores, reverse=True)
     # the neural stack as tail-model inputs: walk-forward OOF forecasts, risk and raw features
     neural = reloaded.fit_moonshot(MoonshotSpec(horizon_seconds=3600), inputs="neural", n_folds=2)
     assert neural["inputs"] == "neural" and neural["rows"]["test"] > 0
