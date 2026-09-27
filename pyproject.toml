@@ -1,0 +1,90 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nardis-neural"
+version = "0.1.0"
+description = "Continually-learning multi-expert neural market-state brain (ML only, no execution)."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+dependencies = [
+    "torch>=2.2",
+    "numpy>=1.26",
+    "polars>=1.0",
+    "pyarrow>=15",
+    "scikit-learn>=1.4",
+    "scipy>=1.11",
+    "pydantic>=2.6",
+    "typer>=0.12",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-timeout>=2.2",
+    "hypothesis>=6.100",
+    "mypy>=1.10",
+    "ruff>=0.5",
+    "types-PyYAML",
+]
+
+[project.scripts]
+nardis-neural = "nardis_neural.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+nardis_neural = ["py.typed", "configs/*.yaml"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N", "SIM", "RUF", "PTH", "NPY", "PL", "C4"]
+ignore = [
+    "PLR0913",  # ML constructors legitimately take many hyper-parameters
+    "PLR0917",
+    "PLR0915",
+    "PLR0912",
+    "PLR2004",  # magic numbers are fine in numerical code
+    "PLR0911",
+    "N812",     # torch.nn.functional as F
+    "N806",     # math-style uppercase locals (B, T, F)
+    "N803",
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    "PLC0415",  # lazy imports keep CLI start-up fast
+    "PLW2901",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["PLR2004", "S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = "src"
+packages = ["nardis_neural"]
+warn_unreachable = false
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["sklearn.*", "scipy.*", "pyarrow.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+timeout = 900
+markers = [
+    "slow: longer integration tests",
+    "cuda: requires CUDA",
+    "mps: requires Apple MPS",
+]

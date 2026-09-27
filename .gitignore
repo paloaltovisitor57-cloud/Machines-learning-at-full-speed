@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Environments
+.venv/
+venv/
+env/
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+
+# ML artifacts (never commit)
+models/
+runs/
+workspaces/
+checkpoints/
+data/
+!src/nardis_neural/data/
+*.pt
+*.pth
+*.ckpt
+*.npy
+*.npz
+*.parquet
+*.safetensors
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
