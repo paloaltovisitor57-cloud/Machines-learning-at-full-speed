@@ -358,3 +358,80 @@ def moonshot_research(
     )
     typer.echo(moonshot_markdown(report))
     typer.echo(f"tail model installed in {workspace / 'moonshot'}")
+
+
+def _when(value: str) -> float:
+    """Unix seconds or an ISO date / datetime (UTC when no zone is given)."""
+    from datetime import UTC, datetime
+
+    try:
+        return float(value)
+    except ValueError:
+        dt = datetime.fromisoformat(value)
+        return (dt if dt.tzinfo else dt.replace(tzinfo=UTC)).timestamp()
+
+
+@app.command("stream-train")
+def stream_train_cmd(
+    workspace: Annotated[Path, typer.Option("--workspace", "-w")],
+    events: Annotated[
+        Path | None, typer.Option("--events", "-e", help="stream a saved event directory instead of RPC")
+    ] = None,
+    rpc: RpcOpt = None,
+    start: Annotated[str | None, typer.Option("--start", help="unix seconds or ISO date (RPC mode)")] = None,
+    end: Annotated[str | None, typer.Option("--end", help="unix seconds or ISO date (RPC mode)")] = None,
+    segment_minutes: Annotated[float, typer.Option("--segment-minutes")] = 60.0,
+    workers: Annotated[int, typer.Option("--workers", help="parallel getTransaction calls")] = 8,
+    warmup_hours: Annotated[float, typer.Option("--warmup-hours")] = 6.0,
+    evict_idle_hours: Annotated[float, typer.Option("--evict-idle-hours")] = 2.0,
+    solana_config: SolCfg = None,
+    config: BaseCfg = None,
+    profile: Annotated[
+        str | None, typer.Option("--profile", help="auto | cpu-lite | cpu | gpu | gpu-frontier")
+    ] = "auto",
+    device: DeviceOpt = None,
+) -> None:
+    """Learn by streaming history through the brain — nothing is downloaded to disk.
+
+    RPC mode walks an archival endpoint (e.g. Old Faithful) from --start to --end, fetching
+    only pump.fun / PumpSwap transactions. A new workspace bootstraps from the first
+    --warmup-hours; an existing one resumes after its last checkpoint."""
+    from nardis_neural.config import load_config
+    from nardis_neural.solana.ingest.history import HistoryWalker
+    from nardis_neural.solana.ingest.rpc import SolanaRpc
+    from nardis_neural.solana.market import EventStore
+    from nardis_neural.solana.streaming import stream_train
+
+    base = load_config(config)
+    if profile is not None:
+        from nardis_neural.hardware import apply_profile
+
+        base = apply_profile(base, profile)
+    if device is not None:
+        base.training.device = device
+    source: Any
+    decoder = None
+    if events is not None:
+        source = iter(EventStore.load(events).sorted())
+    else:
+        if rpc is None:
+            raise typer.BadParameter("pass --events, or --rpc (or set SOLANA_RPC_URL)")
+        if start is None or end is None:
+            raise typer.BadParameter("RPC mode needs --start and --end")
+        walker = HistoryWalker(
+            SolanaRpc(rpc), _when(start), _when(end), segment_seconds=segment_minutes * 60, workers=workers
+        )
+        decoder = walker.decoder
+        source = walker.events()
+    stats = stream_train(
+        workspace,
+        source,
+        _sol_cfg(solana_config),
+        base,
+        warmup_seconds=warmup_hours * 3600,
+        evict_idle_seconds=evict_idle_hours * 3600,
+        decoder=decoder,
+        device=device,
+        log=typer.echo,
+    )
+    _echo(stats)

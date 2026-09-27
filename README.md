@@ -87,7 +87,7 @@ flowchart TB
 | Continual learning | 3-pool replay (recent FIFO, historical reservoir, protected rare events), 5 sampling strategies, candidate cloning, distillation, EWC, full retraining with configurable weights |
 | Lifecycle | immutable checkpoints, champion/candidate/challenger/retired/failed registry with audit log, shadow mode, 10-gate promotion, manual and optional automatic rollback |
 | Representation | self-supervised pretraining (masked timestep, masked feature, contrastive), embedding export to Parquet/NumPy, KMeans / GMM / HDBSCAN regime discovery |
-| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 199 tests |
+| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 203 tests |
 
 ## Quick start
 
@@ -351,7 +351,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │   ├── monitoring/          drift
 │   └── solana/              amm · events · market · wallets · features · labels · dataset ·
 │                            risk · simulator · brain · config · cli · ingest/ · edge/
-└── tests/                   199 tests incl. synthetic end-to-end pipeline
+└── tests/                   203 tests incl. synthetic end-to-end pipeline
 ```
 
 ## Testing & quality gates
@@ -360,7 +360,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 ruff check .        # lint
 ruff format --check .
 mypy                # strict mode: src, tests and examples
-pytest              # 199 tests; CUDA / MPS tests auto-skip when unavailable
+pytest              # 203 tests; CUDA / MPS tests auto-skip when unavailable
 ```
 
 The suite covers:
@@ -434,7 +434,12 @@ The trading system never touches model internals.
   (`solana backfill`, `solana stream`, `solana decode`);
 - an **agent-based launch simulator** (retail, smart money, snipers, bots, loud and stealth
   rug crews, decoys, graduations, LP pulls) and the `nardis-neural solana …` CLI
-  (`simulate`, `build-dataset`, `bootstrap`, `replay`, `assess`, `decode`, `backfill`, `stream`, `init-config`).
+  (`simulate`, `build-dataset`, `bootstrap`, `replay`, `assess`, `decode`, `backfill`, `stream`,
+  `stream-train`, `init-config`);
+- **training by streaming history** (`solana stream-train`): walks an archival RPC such as
+  Old Faithful oldest → newest, fetching only pump.fun / PumpSwap transactions, and learns
+  online with bounded memory (token eviction, compact wallet state, rolling buffers),
+  gated online refits of the tail model and resumable checkpoints. Nothing is stored.
 
 ```python
 from nardis_neural.solana import SolanaBrain, EventStore

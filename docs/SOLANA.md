@@ -245,5 +245,61 @@ nardis-neural solana stream --workspace workspaces/sol --out assessments.jsonl
 nardis-neural solana decode --input dump.jsonl --out events/   # offline: provider exports / archives
 ```
 
+## 11. Training by streaming history (`ingest/history.py`, `streaming.py`)
+
+The model can learn from weeks or months of chain history **without storing it**. Events
+are streamed, decoded, fed through the brain and thrown away:
+
+```mermaid
+flowchart LR
+    RPC[(archival RPC<br/>e.g. Old Faithful)] -->|signatures of watched programs| HW[HistoryWalker<br/>boundary pass, then<br/>segments oldest → newest]
+    HW -->|parallel getTransaction| DEC[decoder]
+    DEC -->|events, time order| B[SolanaBrain<br/>streaming mode]
+    B --> A[assess every 10 s<br/>market time]
+    A --> NQ[neural continual learning]
+    A --> MT[moonshot tracker<br/>rows → labels → buffer]
+    B --> EV[evict finished tokens<br/>decoder forgets them too]
+    B --> M[maintenance: adapt · retrain · promote ·<br/>risk refit · gated tail refit]
+    B --> CK[checkpoint: compact state<br/>resume after a restart]
+```
+
+* **Only the watched programs are fetched** (pump.fun and PumpSwap by default), never whole
+  blocks. The walker first pages each program's signature listing backwards once, keeping
+  only the cursors at every segment edge (one hour by default). It then replays the
+  segments oldest first. Only one segment's signatures are ever held in memory.
+* **No look-ahead from today's chain state**: historical replays do not look up mint
+  accounts, since their current authorities would leak the future.
+* **Bounded memory**: tokens quiet for `--evict-idle-hours` (2 h by default) are
+  forgotten after their moonshot rows are labelled, and the decoder drops their state too.
+  What was learned stays in the wallet intelligence: reputations, rug marks and funding
+  clusters. A later relaunch of an evicted mint is rejected rather than treated as a new
+  token. Per-wallet state is stored in compact typed arrays. Risk samples and moonshot rows
+  are rolling windows (50 k and 200 k rows).
+* **Learning while streaming**:
+  * the neural ensemble keeps using its continual-learning loop (replay, adaptation, full
+    retraining, shadow and promotion gates);
+  * the risk model refits on newly resolved samples;
+  * the moonshot tail model is retrained from the tracker's buffer every 6 h of market
+    time. Still-running tokens enter as right-censored rows. A candidate replaces the
+    installed model only if it matches it on the most recent 20 % of tokens.
+* **Resumable**: `stream/market.pkl` (written atomically) and `moonshot/online.npz`
+  checkpoint the state. A restarted run skips everything up to the checkpointed market
+  time.
+* **A fresh workspace bootstraps itself** from the first `--warmup-hours` after the first
+  launch.
+
+```bash
+export SOLANA_RPC_URL=https://…   # an endpoint that serves old slots (Old Faithful / archival)
+nardis-neural solana stream-train --workspace workspaces/sol \
+    --start 2025-09-01 --end 2025-09-22 --workers 16 --profile auto
+# or replay a saved event directory through the same loop
+nardis-neural solana stream-train --workspace workspaces/sol --events history/
+```
+
+Throughput is set by the RPC endpoint. There is one `getTransaction` per watched
+transaction, run in parallel across `--workers`, so busy weeks of pump.fun take hours of
+streaming per day of history. Model work is small by comparison with the `cpu-lite`
+profile.
+
 Every threshold, horizon, bar spec and window lives in `SolanaConfig`
 (`nardis-neural solana init-config`).

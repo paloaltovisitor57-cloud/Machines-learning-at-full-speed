@@ -124,6 +124,13 @@ class TransactionDecoder:
         self.stats = DecodeStats()
         self._last_t = 0.0
 
+    def forget(self, mints: Iterable[str]) -> None:
+        """Drop per-token decoding state (bounded memory for long streams)."""
+        for m in mints:
+            self.venue.pop(m, None)
+            self.pools.pop(m, None)
+            self.virtual.pop(m, None)
+
     # ------------------------------------------------------------------ helpers
     def _clock(self, block_time: float) -> float:
         self._last_t = max(float(block_time), self._last_t + 1e-6)

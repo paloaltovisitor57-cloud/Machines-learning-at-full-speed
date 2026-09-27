@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import pickle
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,7 +29,7 @@ from nardis_neural.config import NeuralConfig
 from nardis_neural.data.datasets import MarketDataset
 from nardis_neural.data.sequences import observations_to_arrays
 from nardis_neural.schemas import NeuralObservation, NeuralPrediction
-from nardis_neural.solana.config import RISK_LABELS, SolanaConfig
+from nardis_neural.solana.config import CURRENT_FEATURES, RISK_LABELS, SolanaConfig
 from nardis_neural.solana.dataset import SolanaDataset, build_solana_dataset
 from nardis_neural.solana.edge.barriers import BarrierSpec
 from nardis_neural.solana.edge.model import EdgeModel
@@ -39,6 +40,7 @@ from nardis_neural.solana.labels import SolanaLabeler
 from nardis_neural.solana.market import EventStore, SolanaMarket
 from nardis_neural.solana.moonshot import MoonshotSpec, TailModel, moonshot_markdown, run_moonshot_research
 from nardis_neural.solana.moonshot.guard import GuardConfig, assess_manipulation
+from nardis_neural.solana.moonshot.online import MoonshotTracker
 from nardis_neural.solana.risk import SolanaRiskModel
 from nardis_neural.training.continual import ContinualLearner
 from nardis_neural.training.pipeline import train_engine
@@ -131,8 +133,19 @@ class SolanaBrain:
         self.learner = ContinualLearner(self.root, device=device)
         self.market = SolanaMarket(self.cfg)
         self.history = EventStore()
+        self.streaming = False
+        """Streaming mode: no event history is kept; the compact market state is checkpointed."""
+        self.evict_idle_seconds = 2 * 3600.0
+        self.max_risk_samples = 50_000
+        state = self._state()
+        market_file = self.root / "stream" / "market.pkl"
         hist = self.root / "events"
-        if hist.exists():
+        if market_file.exists():
+            with market_file.open("rb") as fh:  # our own checkpoint, written by save()
+                self.market = pickle.load(fh)
+            self.streaming = True
+            self.evict_idle_seconds = float(state.get("evict_idle_seconds", self.evict_idle_seconds))
+        elif hist.exists():
             loaded = EventStore.load(hist)
             self.market.ingest_many(loaded.sorted())
             self.history = loaded
@@ -151,6 +164,11 @@ class SolanaBrain:
         """Thresholds of the moonshot manipulation guard (hard vetoes)."""
         if (self.root / "moonshot" / "tail.json").exists():
             self.moonshot = TailModel.load(self.root / "moonshot")
+        spec = self.moonshot.spec if self.moonshot is not None else MoonshotSpec()
+        online = self.root / "moonshot" / "online.npz"
+        self.tracker = MoonshotTracker.load(online, spec) if online.exists() else MoonshotTracker(spec)
+        """Samples, labels and buffers moonshot rows as events stream past (online learning)."""
+        self.moonshot_last_refit = float(state.get("moonshot_last_refit", -np.inf))
         self.pending: list[_Pending] = []
         self._vetoes: dict[str, list[str]] = {}
         self.risk_x: list[F32] = []
@@ -195,9 +213,33 @@ class SolanaBrain:
         return cls(root, device=device)
 
     # ------------------------------------------------------------------ streaming
+    def _state(self) -> dict[str, Any]:
+        f = self.root / "solana_state.json"
+        return dict(json.loads(f.read_text())) if f.exists() else {}
+
+    def enable_streaming(self, evict_idle_seconds: float = 2 * 3600.0) -> None:
+        """Bounded-memory mode for long streams (months of history or live).
+
+        Events are no longer accumulated; tokens quiet for ``evict_idle_seconds`` are
+        forgotten (after their moonshot rows are labelled); :meth:`save` checkpoints the
+        compact market state instead of the event history.
+        """
+        self.streaming = True
+        self.evict_idle_seconds = evict_idle_seconds
+        self.history = EventStore()
+
     def ingest(self, event: Event) -> None:
         self.market.ingest(event)
-        self.history.add(event)
+        if not self.streaming:
+            self.history.add(event)
+
+    def evict(self) -> list[str]:
+        """Label finished moonshot rows, then drop tokens idle for ``evict_idle_seconds``."""
+        now = self.market.now
+        self.tracker.resolve(self.market, now)
+        busy = {p.mint for p in self.pending} | set(self.tracker.pending)
+        idle = max(self.evict_idle_seconds, self.market.reputation_seconds + 1.0)
+        return self.market.evict(now, idle, keep=busy.__contains__)
 
     def ingest_many(self, events: Iterable[Event]) -> None:
         for e in events:
@@ -221,6 +263,8 @@ class SolanaBrain:
             chall = challenger.predict_arrays(observations_to_arrays(observations, challenger.config))
             self.learner.shadow.record(out, chall, engine.version, challenger.version)
         current = np.stack([o.current_features for o in observations])
+        ages = np.asarray([now - self.market.token(m).launch.t for m in mints], dtype=np.float64)
+        self.tracker.observe(mints, current, ages, now)
         x = SolanaRiskModel.inputs(out["embedding"], current)
         probs, unc = self.risk.predict(x) if self.risk is not None else (None, None)
         edge = None
@@ -374,6 +418,8 @@ class SolanaBrain:
             if p.t + max(horizon, self.cfg.risk_horizon_seconds) > now:
                 still.append(p)
                 continue
+            if p.mint not in self.market.tokens:
+                continue  # evicted: nothing left to label it with
             labels = self.labeler.label(self.market.token(p.mint), p.t, now)
             if labels is None:
                 continue
@@ -384,6 +430,10 @@ class SolanaBrain:
                 self.risk_t.append(p.t)
             done += 1
         self.pending = still
+        if len(self.risk_y) > self.max_risk_samples:  # rolling window for long streams
+            cut = len(self.risk_y) - self.max_risk_samples
+            del self.risk_x[:cut], self.risk_y[:cut], self.risk_t[:cut]
+            self.risk_fitted_n = max(0, self.risk_fitted_n - cut)
         return done
 
     def maintenance(self, risk_refit_min_new: int = 200) -> dict[str, Any]:
@@ -400,14 +450,75 @@ class SolanaBrain:
                 model.save(self.root / "risk")
                 self.risk_fitted_n = len(self.risk_y)
                 refit = True
+        moon = self.refit_moonshot_online()
         self.save()
         return {
+            "moonshot_online": moon,
             "adapted": None if adapted is None else adapted.status,
             "full_retrain": None if retrained is None else retrained.status,
             "promoted": None if decision is None else decision.promote,
             "risk_refit": refit,
             "champion": self.learner.registry.champion_version,
             "pending": len(self.pending),
+        }
+
+    def refit_moonshot_online(
+        self,
+        every_seconds: float = 6 * 3600.0,
+        min_tokens: int = 40,
+        members: int = 3,
+        epochs: int = 60,
+        tolerance: float = 0.02,
+    ) -> dict[str, Any] | None:
+        """Retrain the raw-input tail model from the streamed buffer, behind a hold-out gate.
+
+        The candidate is fitted on the earliest 80 % of buffered tokens and must match the
+        installed model's NLL (within ``tolerance``) on the latest 20 %; open rows enter as
+        right-censored.  A model fitted by ``moonshot-research`` on neural inputs is left alone.
+        """
+        now = self.market.now
+        if self.moonshot is not None and self.moonshot.inputs != "raw":
+            return {"status": "skipped", "reason": "neural-input model is managed by moonshot-research"}
+        if now - self.moonshot_last_refit < every_seconds:
+            return None
+        self.tracker.resolve(self.market, now)
+        data = self.tracker.training_set(self.market, now)
+        if data is None or data.tokens < min_tokens:
+            return {"status": "waiting", "tokens": 0 if data is None else data.tokens}
+        self.moonshot_last_refit = now
+        first: dict[str, float] = {}
+        for m, t in zip(data.mints.tolist(), data.t.tolist(), strict=True):
+            first[m] = min(first.get(m, np.inf), t)
+        ordered = sorted(first, key=first.__getitem__)
+        recent = set(ordered[int(len(ordered) * 0.8) :])
+        hold = np.array([m in recent for m in data.mints.tolist()])
+        tr = np.flatnonzero(~hold)
+        ho = np.flatnonzero(hold)
+        cand = TailModel(
+            data.x.shape[1],
+            self.tracker.spec,
+            members=members,
+            feature_names=list(CURRENT_FEATURES),
+            inputs="raw",
+        )
+        cand.fit(data.x[tr], data.peak[tr], data.censored[tr], data.t[tr], data.mints[tr], epochs=epochs)
+        new = float(cand.nll(data.x[ho], data.peak[ho], data.censored[ho]).mean())
+        old = (
+            float(self.moonshot.nll(data.x[ho], data.peak[ho], data.censored[ho]).mean())
+            if self.moonshot is not None and self.moonshot.d_in == data.x.shape[1]
+            else float("inf")
+        )
+        accepted = new <= old + tolerance
+        if accepted:
+            cand.report |= {"online": True, "holdout_nll": new, "previous_holdout_nll": old}
+            cand.save(self.root / "moonshot")
+            self.moonshot = cand
+        return {
+            "status": "promoted" if accepted else "rejected",
+            "tokens": data.tokens,
+            "rows": len(data),
+            "holdout_nll": new,
+            "previous_holdout_nll": old,
         }
 
     # ------------------------------------------------------------------ edge research
@@ -482,7 +593,17 @@ class SolanaBrain:
 
     def save(self) -> None:
         self.learner.save()
-        self.history.save(self.root / "events")
+        if self.streaming:
+            target = self.root / "stream" / "market.pkl"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_suffix(".tmp")
+            with tmp.open("wb") as fh:
+                pickle.dump(self.market, fh, protocol=pickle.HIGHEST_PROTOCOL)
+            tmp.replace(target)  # atomic: a crash never leaves a torn checkpoint
+        else:
+            self.history.save(self.root / "events")
+        (self.root / "moonshot").mkdir(exist_ok=True)
+        self.tracker.save(self.root / "moonshot" / "online.npz")
         if self.risk_y:
             np.savez(
                 self.root / "risk_samples.npz",
@@ -492,7 +613,17 @@ class SolanaBrain:
             )
         (self.root / "solana_state.json").write_text(
             json.dumps(
-                {"market_now": self.market.now, "events": len(self.history), "pending": len(self.pending)}
+                {
+                    "market_now": self.market.now,
+                    "events": len(self.history),
+                    "pending": len(self.pending),
+                    "streaming": self.streaming,
+                    "evict_idle_seconds": self.evict_idle_seconds,
+                    "moonshot_last_refit": self.moonshot_last_refit,
+                    "tokens_in_memory": len(self.market.tokens),
+                    "wallets": len(self.market.wallets),
+                    "evicted": self.market.evicted,
+                }
             )
         )
 

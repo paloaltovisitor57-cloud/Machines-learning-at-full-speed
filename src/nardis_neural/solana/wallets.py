@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+from array import array
 from pathlib import Path
 from typing import Any
 
@@ -36,14 +37,15 @@ class WalletIntel:
         self.hub_threshold = hub_threshold
         self.ids: dict[str, int] = {}
         self.names: list[str] = []
-        self.parent: list[int] = []
-        self.size: list[int] = []
-        self.alpha: list[float] = []
-        self.beta: list[float] = []
-        self.trades: list[int] = []
-        self.first_seen: list[float] = []
-        self.last_seen: list[float] = []
-        self.rugs: list[int] = []
+        # compact typed arrays: millions of wallets stream through a long replay
+        self.parent: array[int] = array("q")
+        self.size: array[int] = array("q")
+        self.alpha: array[float] = array("d")
+        self.beta: array[float] = array("d")
+        self.trades: array[int] = array("q")
+        self.first_seen: array[float] = array("d")
+        self.last_seen: array[float] = array("d")
+        self.rugs: array[int] = array("q")
         self.funder: dict[int, int] = {}
         self.funded_at: dict[int, float] = {}
         self.funded_count: dict[int, int] = {}
@@ -135,14 +137,14 @@ class WalletIntel:
         return float(np.clip((self.score(wid) - prior) * 2.0 * ev / (ev + 5.0), -1.0, 1.0))
 
     def scores(self, wids: np.ndarray[Any, np.dtype[np.int64]]) -> np.ndarray[Any, np.dtype[np.float64]]:
-        a = np.asarray(self.alpha)[wids]
-        b = np.asarray(self.beta)[wids]
+        a = np.frombuffer(self.alpha, dtype=np.float64)[wids]  # zero-copy view, indexed at once
+        b = np.frombuffer(self.beta, dtype=np.float64)[wids]
         return np.asarray(a / (a + b), dtype=np.float64)
 
     def skills(self, wids: np.ndarray[Any, np.dtype[np.int64]]) -> np.ndarray[Any, np.dtype[np.float64]]:
         """Vectorised :meth:`skill`."""
-        a = np.asarray(self.alpha, dtype=np.float64)[wids]
-        b = np.asarray(self.beta, dtype=np.float64)[wids]
+        a = np.frombuffer(self.alpha, dtype=np.float64)[wids]
+        b = np.frombuffer(self.beta, dtype=np.float64)[wids]
         prior = self.prior_alpha / (self.prior_alpha + self.prior_beta)
         ev = a + b - self.prior_alpha - self.prior_beta
         return np.asarray(np.clip((a / (a + b) - prior) * 2.0 * ev / (ev + 5.0), -1.0, 1.0), dtype=np.float64)
@@ -152,14 +154,14 @@ class WalletIntel:
         return {
             "params": [self.prior_alpha, self.prior_beta, self.funding_min_sol, self.hub_threshold],
             "names": self.names,
-            "parent": self.parent,
-            "size": self.size,
-            "alpha": self.alpha,
-            "beta": self.beta,
-            "trades": self.trades,
-            "first_seen": self.first_seen,
-            "last_seen": self.last_seen,
-            "rugs": self.rugs,
+            "parent": self.parent.tolist(),
+            "size": self.size.tolist(),
+            "alpha": self.alpha.tolist(),
+            "beta": self.beta.tolist(),
+            "trades": self.trades.tolist(),
+            "first_seen": self.first_seen.tolist(),
+            "last_seen": self.last_seen.tolist(),
+            "rugs": self.rugs.tolist(),
             "funder": [[k, v] for k, v in self.funder.items()],
             "funded_at": [[k, v] for k, v in self.funded_at.items()],
             "funded_count": [[k, v] for k, v in self.funded_count.items()],
@@ -171,10 +173,10 @@ class WalletIntel:
         w = cls(float(pa), float(pb), float(fmin), int(hub))
         w.names = list(d["names"])
         w.ids = {n: i for i, n in enumerate(w.names)}
-        w.parent, w.size = list(d["parent"]), list(d["size"])
-        w.alpha, w.beta = list(d["alpha"]), list(d["beta"])
-        w.trades, w.rugs = list(d["trades"]), list(d["rugs"])
-        w.first_seen, w.last_seen = list(d["first_seen"]), list(d["last_seen"])
+        w.parent, w.size = array("q", d["parent"]), array("q", d["size"])
+        w.alpha, w.beta = array("d", d["alpha"]), array("d", d["beta"])
+        w.trades, w.rugs = array("q", d["trades"]), array("q", d["rugs"])
+        w.first_seen, w.last_seen = array("d", d["first_seen"]), array("d", d["last_seen"])
         w.funder = {int(k): int(v) for k, v in d["funder"]}
         w.funded_at = {int(k): float(v) for k, v in d["funded_at"]}
         w.funded_count = {int(k): int(v) for k, v in d["funded_count"]}

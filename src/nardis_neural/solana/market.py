@@ -9,7 +9,8 @@ at ``t``.  :class:`EventStore` is the durable, Parquet-backed event history.
 from __future__ import annotations
 
 import heapq
-from collections.abc import Iterable, Iterator
+from collections import OrderedDict
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -123,6 +124,9 @@ class SolanaMarket:
         self._seq = 0
         self._rugged: set[str] = set()
         self.reputation_updates = 0
+        self.evicted = 0
+        self._gone: OrderedDict[str, None] = OrderedDict()
+        """Recently evicted mints: a later 'launch' of one is rejected, not treated as new."""
 
     # ------------------------------------------------------------------ reputation
     def _log_price_at(self, log: TokenEventLog, t: float) -> float:
@@ -165,7 +169,7 @@ class SolanaMarket:
     def ingest(self, e: Event) -> None:
         self.advance(e.t)
         if isinstance(e, TokenLaunch):
-            if e.mint in self.tokens:
+            if e.mint in self.tokens or e.mint in self._gone:
                 raise ValueError(f"token {e.mint} launched twice")
             creator = self.wallets.id(e.creator, e.t)
             self.tokens[e.mint] = TokenEventLog(e, creator, slot_of(e.t, e.slot), venue=e.venue, last_t=e.t)
@@ -206,6 +210,31 @@ class SolanaMarket:
         if mint not in self.tokens:
             raise KeyError(f"unknown token {mint}")
         return self.tokens[mint]
+
+    def evict(self, now: float, idle_seconds: float, keep: Callable[[str], bool] | None = None) -> list[str]:
+        """Forget tokens that have been quiet for ``idle_seconds`` (bounded memory for long streams).
+
+        What the market learned from them stays: wallet reputations, rug marks and funding
+        clusters live in :class:`WalletIntel`.  Their pending reputation entries have already
+        resolved (the idle period exceeds the reputation horizon).  Later events for an
+        evicted token are rejected like any unknown token.
+        """
+        if idle_seconds <= self.reputation_seconds:
+            raise ValueError("idle_seconds must exceed the reputation horizon")
+        self.advance(now)
+        gone = [
+            m
+            for m, log in self.tokens.items()
+            if now - log.last_t > idle_seconds and (keep is None or not keep(m))
+        ]
+        for m in gone:
+            del self.tokens[m]
+            self._rugged.discard(m)
+            self._gone[m] = None
+        while len(self._gone) > 2_000_000:
+            self._gone.popitem(last=False)
+        self.evicted += len(gone)
+        return gone
 
     def active_tokens(self, now: float, max_idle_seconds: float = 600.0) -> list[str]:
         """Tokens that traded recently — candidates for assessment."""

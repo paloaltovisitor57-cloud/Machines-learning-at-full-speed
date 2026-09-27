@@ -1,0 +1,123 @@
+"""Stream historical chain activity forward in time, storing nothing.
+
+Works against any endpoint that serves ``getSignaturesForAddress`` and ``getTransaction``
+for old slots, for example an Old Faithful RPC or an archival RPC provider.  Only the
+watched programs' transactions are fetched, never whole blocks.
+
+Signature listings run newest → oldest, but replay must run oldest → newest.  So:
+
+1. **Boundary pass**: page each program's signatures backwards once, from ``end_time``
+   to ``start_time``, and remember only the cursors at every ``segment_seconds`` edge.
+   Memory is a few signatures per segment.
+2. **Replay pass**: for each segment, oldest first, list its signatures between the two
+   cursors, order them by slot, fetch the transactions with a small worker pool, decode
+   them and yield the events.  A segment's signatures are the only thing ever held.
+
+Historical replays use no mint-account lookups (``mint_info=None``): today's authority
+state would leak the future into old snapshots.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import Any
+
+from nardis_neural.solana.events import Event
+from nardis_neural.solana.ingest.decoder import TransactionDecoder
+from nardis_neural.solana.ingest.rpc import SolanaRpc
+from nardis_neural.solana.ingest.stream import DEFAULT_PROGRAMS
+from nardis_neural.solana.market import event_sort_key
+
+
+@dataclass
+class _Edge:
+    t: float
+    newer: str | None = None
+    """Oldest signature at or after the edge (listing ``before`` it starts below the edge)."""
+    older: str | None = None
+    """Newest signature before the edge (listing ``until`` it stops at the edge)."""
+
+
+@dataclass
+class HistoryWalker:
+    rpc: SolanaRpc
+    start_time: float
+    end_time: float
+    programs: list[str] = field(default_factory=lambda: list(DEFAULT_PROGRAMS))
+    segment_seconds: float = 3600.0
+    workers: int = 8
+    page_size: int = 1000
+    decoder: TransactionDecoder = field(default_factory=TransactionDecoder)
+    stats: dict[str, int] = field(
+        default_factory=lambda: {"segments": 0, "signatures": 0, "transactions": 0, "events": 0}
+    )
+
+    def __post_init__(self) -> None:
+        if self.end_time <= self.start_time:
+            raise ValueError("end_time must be after start_time")
+
+    def _edges(self) -> list[float]:
+        edges, t = [], self.start_time
+        while t < self.end_time:
+            edges.append(t)
+            t += self.segment_seconds
+        return [*edges, self.end_time]
+
+    def _boundaries(self, program: str, edges: list[float]) -> list[_Edge]:
+        """Cursor signatures around every edge, from one backwards pass over the listing."""
+        marks = [_Edge(t) for t in edges]
+        k = len(marks) - 1  # next edge to cross, walking backwards in time
+        prev: str | None = None
+        before: str | None = None
+        while k >= 0:
+            page = self.rpc.get_signatures(program, before=before, limit=self.page_size)
+            for s in page:
+                bt = float(s.get("blockTime") or 0.0)
+                while k >= 0 and bt < marks[k].t:
+                    marks[k].newer, marks[k].older = prev, s["signature"]
+                    k -= 1
+                if k < 0:
+                    break
+                prev = s["signature"]
+            if len(page) < self.page_size:
+                break  # reached the beginning of the program's history
+            before = page[-1]["signature"]
+        return marks
+
+    def _segment_signatures(self, program: str, lo: _Edge, hi: _Edge) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        before = hi.newer
+        while True:
+            page = self.rpc.get_signatures(program, before=before, until=lo.older, limit=self.page_size)
+            out.extend(s for s in page if lo.t <= float(s.get("blockTime") or 0.0) < hi.t)
+            if len(page) < self.page_size:
+                return out
+            before = page[-1]["signature"]
+
+    def events(self) -> Iterator[Event]:
+        edges = self._edges()
+        bounds = {p: self._boundaries(p, edges) for p in self.programs}
+        with ThreadPoolExecutor(max_workers=self.workers) as pool:
+            for k in range(len(edges) - 1):
+                seen: set[str] = set()
+                sigs: list[dict[str, Any]] = []
+                for p in self.programs:
+                    for s in self._segment_signatures(p, bounds[p][k], bounds[p][k + 1]):
+                        if s.get("err") is None and s["signature"] not in seen:
+                            seen.add(s["signature"])
+                            sigs.append(s)
+                sigs.sort(key=lambda s: (int(s.get("slot", 0)), float(s.get("blockTime") or 0.0)))
+                txs = [tx for tx in pool.map(lambda s: self.rpc.get_transaction(s["signature"]), sigs) if tx]
+                events = sorted((e for tx in txs for e in self.decoder.decode(tx)), key=event_sort_key)
+                self.stats["segments"] += 1
+                self.stats["signatures"] += len(sigs)
+                self.stats["transactions"] += len(txs)
+                self.stats["events"] += len(events)
+                yield from events
+
+
+def chain(*sources: Iterable[Event]) -> Iterator[Event]:
+    for src in sources:
+        yield from src
