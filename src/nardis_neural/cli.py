@@ -435,6 +435,7 @@ def benchmark(
     model: ModelOpt,
     data: DataOpt,
     batch_sizes: Annotated[str, typer.Option("--batch-sizes")] = "1,32,256",
+    mc_samples: Annotated[int | None, typer.Option("--mc-samples", help="override MC-dropout passes")] = None,
     out: Annotated[Path | None, typer.Option("--out", "-o")] = None,
     device: DeviceOpt = None,
 ) -> None:
@@ -445,6 +446,8 @@ def benchmark(
     engine = _load_engine(model, device)
     ds = _dataset(data, engine.config)
     obs = arrays_to_observations(ds.store.select(ds.indices[: min(256, len(ds))]), engine.config)
+    if mc_samples is not None:
+        engine.config.ensemble.mc_dropout_samples = mc_samples
     res = benchmark_engine(engine, obs, tuple(int(b) for b in batch_sizes.split(",")))
     _write(out, res)
     _echo(res)

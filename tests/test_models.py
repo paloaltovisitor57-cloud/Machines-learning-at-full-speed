@@ -302,3 +302,17 @@ def test_model_without_graph_ignores_graph_inputs() -> None:
     store = ArrayStore(arrays)
     batch = MarketDataset(store, cfg)[np.arange(10)]
     assert batch.graph is None
+
+
+def test_batched_timescales_match_per_timescale_encoding(
+    norm_batch: Batch, tiny_config: NeuralConfig
+) -> None:
+    """The shared core encodes all timescales in one call; this must equal separate calls."""
+    model = NardisNeuralNetwork(tiny_config).eval()
+    for name, expert in model.sequence_experts().items():
+        tokens, avail = expert.encode_timescales(norm_batch)
+        for i, ts in enumerate(expert.timescales):
+            seq = norm_batch.sequences[ts]
+            ref = expert.summarize(expert.encode_timesteps(ts, seq), seq.mask)
+            a = avail[:, i]
+            assert torch.allclose(tokens[a, i], ref[a], atol=1e-5), f"{name}/{ts}"
