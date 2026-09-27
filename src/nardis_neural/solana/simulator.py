@@ -45,7 +45,12 @@ from nardis_neural.solana.events import (
 )
 from nardis_neural.solana.market import EventStore
 
-ARCHETYPES: tuple[str, ...] = ("organic", "graduate", "rug", "dud", "wash")
+ARCHETYPES: tuple[str, ...] = ("organic", "graduate", "rug", "dud", "wash", "runner")
+MARKET_PRESETS: dict[str, dict[str, float]] = {
+    "default": {"organic": 0.3, "graduate": 0.15, "rug": 0.3, "dud": 0.15, "wash": 0.1, "runner": 0.0},
+    # most launches go nowhere, a few percent become multi-hour runners
+    "degen": {"organic": 0.12, "graduate": 0.06, "rug": 0.3, "dud": 0.42, "wash": 0.04, "runner": 0.06},
+}
 
 
 @dataclass
@@ -59,16 +64,16 @@ class LaunchSimSpec:
     n_snipers: int = 15
     n_bots: int = 8
     mint_prefix: str = "Mint"
+    """Distinct prefixes let several simulated eras share one wallet population."""
     stealth_rug_fraction: float = 0.4
     """Rugs run from aged, hub-funded wallets that buy over the first minute with authorities
     revoked — no obvious bundle / fresh-wallet / mint-authority footprint."""
     decoy_fraction: float = 0.25
     """Honest launches where the dev's co-funded friends buy in the launch slots (bundle-like
     footprint without a rug)."""
-    """Distinct prefixes let several simulated eras share one wallet population."""
-    archetype_weights: dict[str, float] = field(
-        default_factory=lambda: {"organic": 0.3, "graduate": 0.15, "rug": 0.3, "dud": 0.15, "wash": 0.1}
-    )
+    archetype_weights: dict[str, float] = field(default_factory=lambda: dict(MARKET_PRESETS["default"]))
+    """``runner`` launches (rare viral tokens that compound for hours, 100–1000x+) are off by
+    default; the ``degen`` preset turns them on."""
 
 
 @dataclass
@@ -244,6 +249,7 @@ class LaunchSimulator:
             "rug": (300, 1500),
             "dud": (300, 900),
             "wash": (900, 2400),
+            "runner": (3 * 3600, 5 * 3600),
         }[arch]
         tok = _Token(
             mint=mint,
@@ -320,8 +326,12 @@ class LaunchSimulator:
             )
         sniper_exit = {w: t0 + float(rng.uniform(8, 90)) for w in tok.holdings if w.startswith("sniper")}
         smart_in = (
-            rng.random() < {"organic": 0.7, "graduate": 0.95, "rug": 0.1, "dud": 0.15, "wash": 0.05}[arch]
+            rng.random()
+            < {"organic": 0.7, "graduate": 0.95, "rug": 0.1, "dud": 0.15, "wash": 0.05, "runner": 0.95}[arch]
         )
+        # runner virality is heavy-tailed: most stall at tens of x, a few go four figures
+        # (drawn only for runners so default simulations keep their random stream)
+        viral = float(np.exp(rng.uniform(np.log(0.15), np.log(1.2)))) if arch == "runner" else 0.0
         dumped = False
         pulled = False
         end = t0 + tok.lifetime
@@ -337,6 +347,12 @@ class LaunchSimulator:
                 lam_s = 0.2 if t < tok.dump_at else 1.2 * np.exp(-(t - tok.dump_at) / 60)
             elif arch == "dud":
                 lam_b, lam_s = 0.12 * np.exp(-age / 400), 0.08
+            elif arch == "runner":  # viral: demand compounds for hours after graduation
+                if not tok.migrated:
+                    lam_b, lam_s = 2.5, 0.35
+                else:
+                    lam_b = 0.8 + 0.6 * viral * np.log1p(age / 600)
+                    lam_s = 0.3 + 0.1 * np.log1p(age / 600)
             else:
                 lam_b, lam_s = 0.25 * np.exp(-age / 600) + 0.02, 0.1
             for _ in range(int(rng.poisson(lam_b))):
@@ -350,11 +366,16 @@ class LaunchSimulator:
                 size = float(rng.lognormal(np.log(0.6 if kind == "smart" else 0.25), 0.8))
                 if kind == "retail" and age < 120 and rng.random() < 0.06:
                     size = float(rng.uniform(2, 6))  # early whales concentrate honest launches too
+                if arch == "runner":
+                    size *= min(
+                        1.0 + viral * age / 900.0, 25.0 * viral + 1.0
+                    )  # FOMO: tickets grow with the market cap
                 self._swap(tok, ts, wlt, True, size, *self._fee(kind))
             for _ in range(int(rng.poisson(lam_s))):
                 seller = self._seller(tok, exclude={tok.creator, *tok.crew})
                 if seller is not None:
-                    frac = float(rng.uniform(0.3, 1.0))
+                    # runner holders take partial profits and keep a moon bag
+                    frac = float(rng.uniform(0.1, 0.5) if arch == "runner" else rng.uniform(0.3, 1.0))
                     self._swap(
                         tok,
                         t + float(rng.uniform(0, 1)),

@@ -145,7 +145,11 @@ An agent-based simulator used for tests and demos. It is not a market model.
   launch from shared funders).
 * **Archetypes**: `organic`, `graduate` (completes the curve and migrates), `rug` (bundled
   hype then a dump, or an LP pull on AMM launches, often with live mint authority), `dud`,
-  `wash`.
+  `wash`, and `runner`: a rare viral launch whose demand and ticket sizes keep compounding
+  for hours after graduation, with heavy-tailed virality (roughly 100x to 3,000x from the
+  launch price). Runners are off in the `default` mix; the `degen` preset
+  (`solana simulate --market degen`, or `--runners 0.1`) is mostly duds and rugs with a few
+  percent runners, for the [moonshot engine](MOONSHOT.md).
 * **Ambiguity on purpose**: 40 % of rugs are *stealth* (aged exchange-funded wallets,
   small crews trickling in over the first minute, authorities revoked); 25 % of honest
   launches are *decoys* (the dev's co-funded friends buy in the launch slots); honest
