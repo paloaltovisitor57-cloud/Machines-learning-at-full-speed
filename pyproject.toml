@@ -71,7 +71,7 @@ ignore = [
 python_version = "3.12"
 strict = true
 mypy_path = "src"
-packages = ["nardis_neural"]
+files = ["src/nardis_neural", "tests"]
 warn_unreachable = false
 plugins = ["pydantic.mypy"]
 

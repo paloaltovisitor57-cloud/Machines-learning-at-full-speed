@@ -113,7 +113,7 @@ class RegimeClusterer:
     def _fit_hdbscan(cls, x: F64, cfg: RegimeConfig) -> RegimeClusterer:
         from sklearn.cluster import HDBSCAN
 
-        labels = HDBSCAN(min_cluster_size=cfg.hdbscan_min_cluster_size).fit_predict(x)
+        labels = HDBSCAN(min_cluster_size=cfg.hdbscan_min_cluster_size, copy=True).fit_predict(x)
         ks = sorted(k for k in set(labels.tolist()) if k >= 0)
         if not ks:  # everything is noise → single cluster fallback
             return cls("hdbscan", 1, x.mean(axis=0, keepdims=True), noise_radius=np.array([np.inf]))

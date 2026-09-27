@@ -239,9 +239,13 @@ class ArrayStore:
                     dts = rows[seq_key(ts.name, "time_deltas")]
                     seq_vals, seq_dts = [], []
                     for i in range(len(idx)):
+                        # keep positions: write from the first observed step to "now";
+                        # interior gaps become all-NaN rows, which the reader masks again
                         m = mask[i]
-                        seq_vals.append([list(r) for r in vals[i][m].astype(np.float32)])
-                        seq_dts.append(list(dts[i][m].astype(np.float32)))
+                        first = int(np.argmax(m)) if m.any() else ts.max_len
+                        v = np.where(m[first:, None], vals[i][first:], np.nan).astype(np.float32)
+                        seq_vals.append([list(r) for r in v])
+                        seq_dts.append(list(dts[i][first:].astype(np.float32)))
                     cols[f"seq_{ts.name}_values"] = pa.array(seq_vals, type=pa.list_(pa.list_(pa.float32())))
                     cols[f"seq_{ts.name}_time_deltas"] = pa.array(seq_dts, type=pa.list_(pa.float32()))
                 for task in REGRESSION_TASKS:
