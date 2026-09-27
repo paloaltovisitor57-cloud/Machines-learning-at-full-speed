@@ -261,15 +261,11 @@ class BatchIndexSampler(Sampler[npt.NDArray[np.int64]]):
         self.shuffle = shuffle
         self.weights = weights
         self.seed = seed
-        self.epoch = 0
         self.drop_last = drop_last
         self.max_batches = max_batches
 
-    def set_epoch(self, epoch: int) -> None:
-        self.epoch = epoch
-
     def __iter__(self) -> Iterator[npt.NDArray[np.int64]]:
-        rng = np.random.default_rng(self.seed + 10_007 * self.epoch)
+        rng = np.random.default_rng(self.seed)
         if self.weights is not None:
             p = self.weights / self.weights.sum()
             order = rng.choice(self.n, size=self.n, replace=True, p=p)

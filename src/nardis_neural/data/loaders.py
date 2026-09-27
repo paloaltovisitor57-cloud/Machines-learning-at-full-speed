@@ -20,7 +20,7 @@ Optional ragged graph arrays: ``graph.node_offsets`` (N+1), ``graph.edge_offsets
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -395,8 +395,3 @@ def fingerprint_arrays(arrays: Mapping[str, Array], max_rows: int = 4096) -> str
         h.update(str(arr.shape).encode())
         h.update(np.ascontiguousarray(arr).tobytes())
     return h.hexdigest()[:16]
-
-
-def iter_index_chunks(n: int, chunk: int) -> Iterable[npt.NDArray[np.int64]]:
-    for start in range(0, n, chunk):
-        yield np.arange(start, min(start + chunk, n), dtype=np.int64)

@@ -142,8 +142,16 @@ def train(
         engine.save(out)
         typer.echo(f"saved model {engine.version} to {out}")
     if workspace is not None:
-        ContinualLearner.initialize(workspace, engine, cfg, device=engine.device)
-        typer.echo(f"registered {engine.version} as champion in {workspace}")
+        from nardis_neural.lifecycle.champion import ModelRegistry
+
+        if (workspace / "registry.json").exists() and ModelRegistry(workspace).champion_version is not None:
+            registry = ModelRegistry(workspace)
+            registry.register(engine, "candidate", "trained via CLI")
+            registry.set_status(engine.version, "challenger", "trained via CLI; entering shadow mode")
+            typer.echo(f"workspace already has a champion; registered {engine.version} as challenger")
+        else:
+            ContinualLearner.initialize(workspace, engine, cfg, device=engine.device)
+            typer.echo(f"registered {engine.version} as champion in {workspace}")
     _echo({k: v for k, v in report.validation_metrics.items() if k.count(".") <= 1})
 
 

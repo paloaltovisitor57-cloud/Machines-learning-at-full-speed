@@ -371,7 +371,19 @@ def canonical_row(row: dict[str, Array], config: NeuralConfig) -> dict[str, Arra
     keep |= {target_key(t) for t in REGRESSION_TASKS}
     out = {k: v for k, v in row.items() if k in keep or k.startswith("seq.")}
     if config.model.graph.enabled:
-        out |= {k: v for k, v in row.items() if k.startswith("graph.")}
+        graph = {k: v for k, v in row.items() if k.startswith("graph.")}
+        if not graph:  # rows without relational context get an explicit empty graph
+            n = len(row["observation_id"])
+            fdim = config.features.graph.node_feature_dim
+            graph = {
+                "graph.node_features": np.zeros((0, fdim), np.float32),
+                "graph.edge_index": np.zeros((0, 2), np.int64),
+                "graph.edge_type": np.zeros((0,), np.int64),
+                "graph.node_offsets": np.zeros(n + 1, np.int64),
+                "graph.edge_offsets": np.zeros(n + 1, np.int64),
+                "graph.target_node": np.full(n, -1, np.int64),
+            }
+        out |= graph
     return out
 
 

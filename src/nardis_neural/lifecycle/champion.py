@@ -67,10 +67,6 @@ class ModelRegistry:
         tmp.write_text(json.dumps(self.state.model_dump(mode="json"), indent=2))
         tmp.replace(self.file)
 
-    def reload(self) -> None:
-        if self.file.exists():
-            self.state = RegistryState.model_validate(json.loads(self.file.read_text()))
-
     def _event(self, kind: str, **data: Any) -> None:
         self.state.events.append({"event": kind, "at": time.time(), **data})
 
@@ -108,11 +104,6 @@ class ModelRegistry:
         if entry.deleted:
             raise FileNotFoundError(f"weights of {version} were pruned")
         return NeuralEngine.load(self.path(version), device=device)
-
-    def load_champion(self, device: torch.device | str | None = None) -> NeuralEngine:
-        if self.state.champion is None:
-            raise RuntimeError("registry has no champion")
-        return self.load_engine(self.state.champion, device)
 
     # ------------------------------------------------------------------ transitions
     def register(self, engine: NeuralEngine, status: Status = "candidate", reason: str = "") -> RegistryEntry:

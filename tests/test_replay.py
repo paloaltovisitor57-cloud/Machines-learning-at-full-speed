@@ -163,3 +163,21 @@ def test_experience_creation_and_priority(tiny_config: NeuralConfig, later_array
     bulk = experiences_from_arrays(rows, tiny_config)
     assert "regime" not in bulk[0].row, "ground-truth diagnostics never enter replay rows"
     assert set(bulk[0].row) == set(e.row)
+
+
+def test_graph_experiences_mix_with_graphless_rows() -> None:
+    from nardis_neural.synthetic import SyntheticSpec, generate_synthetic
+    from tests.conftest import make_tiny_config
+
+    cfg = make_tiny_config(graph=True)
+    with_graph = generate_synthetic(cfg, SyntheticSpec(n_observations=20, seed=1, graph=True))
+    without = {
+        k: v
+        for k, v in generate_synthetic(cfg, SyntheticSpec(n_observations=10, seed=2)).items()
+        if not k.startswith("graph.")
+    }
+    buf = ExperienceReplayBuffer(cfg.replay)
+    buf.extend(experiences_from_arrays(with_graph, cfg) + experiences_from_arrays(without, cfg))
+    batch = MarketDataset(buf.to_store(), cfg)[np.arange(len(buf))]
+    assert batch.graph is not None
+    assert int((~batch.graph.available).sum()) >= 10

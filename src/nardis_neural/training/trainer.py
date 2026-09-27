@@ -8,7 +8,6 @@ resume, deterministic seeding, NaN/Inf detection, structured JSONL metrics.
 
 from __future__ import annotations
 
-import copy
 import json
 import math
 import random
@@ -376,6 +375,3 @@ class Trainer:
         result.seconds += time.time() - t0
         model.eval()
         return result
-
-    def clone_model(self, model: NardisNeuralNetwork) -> NardisNeuralNetwork:
-        return copy.deepcopy(model)

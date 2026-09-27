@@ -288,3 +288,29 @@ def test_cli_errors(cli_env: dict[str, Path]) -> None:
     assert res.exit_code != 0
     res = runner.invoke(app, ["predict", "--model", str(cli_env["model"])])
     assert res.exit_code != 0
+
+
+def test_train_into_existing_workspace_registers_challenger(cli_env: dict[str, Path], tmp_path: Path) -> None:
+    import shutil
+
+    ws = tmp_path / "ws"
+    shutil.copytree(cli_env["ws"], ws)
+    before = _last_json(run("status", "--workspace", ws))
+    out = run(
+        "train",
+        "--data",
+        cli_env["root"] / "base",
+        "--config",
+        cli_env["cfg"],
+        "--workspace",
+        ws,
+        "--epochs",
+        "1",
+        "--ensemble-size",
+        "1",
+        "--device",
+        "cpu",
+    )
+    assert "challenger" in out
+    after = _last_json(run("status", "--workspace", ws))
+    assert after["champion"] == before["champion"] and after["challenger"] is not None
