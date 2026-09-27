@@ -19,13 +19,14 @@ env/
 .coverage
 htmlcov/
 
-# ML artifacts (never commit)
-models/
-runs/
-workspaces/
-checkpoints/
-data/
-!src/nardis_neural/data/
+# ML artifacts (never commit) — anchored to the repo root so package dirs
+# such as src/nardis_neural/models and src/nardis_neural/data stay tracked
+/models/
+/runs/
+/workspaces/
+/checkpoints/
+/data/
+/exports/
 *.pt
 *.pth
 *.ckpt
