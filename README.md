@@ -83,7 +83,7 @@ flowchart TB
 | Continual learning | 3-pool replay (recent FIFO, historical reservoir, protected rare events), 5 sampling strategies, candidate cloning, distillation, EWC, full retraining with configurable weights |
 | Lifecycle | immutable checkpoints, champion/candidate/challenger/retired/failed registry with audit log, shadow mode, 10-gate promotion, manual and optional automatic rollback |
 | Representation | self-supervised pretraining (masked timestep, masked feature, contrastive), embedding export to Parquet/NumPy, KMeans / GMM / HDBSCAN regime discovery |
-| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 148 tests |
+| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 169 tests |
 
 ## Quick start
 
@@ -326,7 +326,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 
 ```
 ├── configs/                 default.yaml · small.yaml
-├── docs/                    ARCHITECTURE.md · CONTINUAL_LEARNING.md · INTEGRATION.md
+├── docs/                    ARCHITECTURE.md · CONTINUAL_LEARNING.md · INTEGRATION.md · SOLANA.md
 ├── examples/                nardis_integration.py (runnable, tested)
 ├── src/nardis_neural/
 │   ├── config.py            Pydantic config tree
@@ -342,8 +342,10 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │   ├── inference/           engine · uncertainty · calibration · ood
 │   ├── regimes/             embeddings · clustering
 │   ├── lifecycle/           checkpoints · champion · candidate · shadow · promotion · rollback
-│   └── monitoring/          drift
-└── tests/                   148 tests incl. synthetic end-to-end pipeline
+│   ├── monitoring/          drift
+│   └── solana/              amm · events · market · wallets · features · labels · dataset ·
+│                            risk · simulator · brain · config · cli
+└── tests/                   169 tests incl. synthetic end-to-end pipeline
 ```
 
 ## Testing & quality gates
@@ -352,7 +354,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 ruff check .        # lint
 ruff format --check .
 mypy                # strict mode: src, tests and examples
-pytest              # 148 tests; CUDA / MPS tests auto-skip when unavailable
+pytest              # 169 tests; CUDA / MPS tests auto-skip when unavailable
 ```
 
 The suite covers:
@@ -394,6 +396,43 @@ See [docs/INTEGRATION.md](docs/INTEGRATION.md) and the runnable
 leakage-free bars), call `predict`, report `NeuralOutcome`s as horizons elapse, and run
 `adapt_if_needed` / `full_retrain_if_needed` / `promote_if_ready` on a background timer.
 The trading system never touches model internals.
+
+## Solana intelligence layer
+
+`nardis_neural.solana` specialises the brain for Solana memecoin markets. See
+[docs/SOLANA.md](docs/SOLANA.md).
+
+- exact **pump.fun bonding-curve and AMM maths**: bonding progress, graduation,
+  round-trip cost (fees + two-way impact) for a reference size;
+- a **causal market state** fed by decoded events (launches, swaps, migrations, LP changes,
+  SOL transfers) that rejects time travel;
+- **wallet intelligence**: union-find funding clusters with exchange-hub detection
+  (sybil / bundle discovery) and Beta-posterior reputations learned online *only* from
+  outcomes that have already resolved, plus rug attribution to creator clusters;
+- **48 named on-chain features**: holder concentration, dev / sniper / bundle /
+  creator-cluster exposure, fresh wallets, smart-money flow, bots, priority fees and Jito
+  tips, authorities, liquidity. Also 1 s / 5 s / 30 s trade bars with forward-filled
+  prices, and a live wallet→token / funding / cluster **graph** for the graph expert;
+- **hindsight labels** (returns, cost-aware net returns, rug / graduation / dev-dump events)
+  joined with **causally replayed features**; a test proves snapshots equal what a
+  past-only market would compute;
+- a **launch-risk ensemble** (P rug, P graduation, P dev dump) on
+  `[embedding ‖ on-chain features]`, with token-disjoint validation and calibration;
+- **`SolanaBrain`**: `ingest → assess_many → resolve → maintenance`, returning forecasts,
+  risk, expected net return after costs, P(beat costs) and human-readable red flags. It
+  plugs into the continual-learning, shadow, promotion and rollback machinery;
+- an **agent-based launch simulator** (retail, smart money, snipers, bots, loud and stealth
+  rug crews, decoys, graduations, LP pulls) and the `nardis-neural solana …` CLI
+  (`simulate`, `build-dataset`, `bootstrap`, `replay`, `assess`, `init-config`).
+
+```python
+from nardis_neural.solana import SolanaBrain, EventStore
+brain = SolanaBrain.bootstrap("workspaces/sol", EventStore.load("history/"))
+brain.ingest(event)                       # decoded on-chain events, in time order
+for report in brain.assess_active():      # one batched forward pass per round
+    report.risk["rug"], report.expected_net_return["60s"], report.flags
+brain.resolve(); brain.maintenance()
+```
 
 ## Optional / not included
 

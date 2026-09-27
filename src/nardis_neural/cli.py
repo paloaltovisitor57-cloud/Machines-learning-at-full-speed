@@ -18,6 +18,15 @@ from nardis_neural.config import NeuralConfig, load_config
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, help="Neural market-state brain (ML only).")
 
+
+def _register_solana() -> None:
+    from nardis_neural.solana.cli import app as solana_app
+
+    app.add_typer(solana_app, name="solana")
+
+
+_register_solana()
+
 ConfigOpt = Annotated[Path | None, typer.Option("--config", "-c", help="YAML config file")]
 DeviceOpt = Annotated[str | None, typer.Option("--device", help="cpu | cuda | cuda:0 | mps (default: auto)")]
 ModelOpt = Annotated[Path, typer.Option("--model", "-m", help="workspace or model directory")]

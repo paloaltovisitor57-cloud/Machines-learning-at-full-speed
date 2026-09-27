@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -17,14 +18,31 @@ from nardis_neural.models.main import ModelOutput, NardisNeuralNetwork
 Tensor = torch.Tensor
 
 
+_DROPOUT_CACHE: weakref.WeakKeyDictionary[nn.Module, list[nn.Dropout]] = weakref.WeakKeyDictionary()
+
+
+def _dropouts(module: nn.Module) -> list[nn.Dropout]:
+    cached = _DROPOUT_CACHE.get(module)
+    if cached is None:
+        cached = [m for m in module.modules() if isinstance(m, nn.Dropout)]
+        _DROPOUT_CACHE[module] = cached
+    return cached
+
+
 def set_mc_dropout(module: nn.Module, enabled: bool, scope: list[nn.Module] | None = None) -> None:
-    """Put ``nn.Dropout`` layers (within ``scope``, default everywhere) in train mode, all else eval."""
-    module.eval()
+    """Put ``nn.Dropout`` layers (within ``scope``, default everywhere) in train mode, all else eval.
+
+    Hot path at inference: the full ``eval()`` tree walk only happens when the module is
+    still in training mode; afterwards only the cached dropout layers are toggled.
+    """
+    if module.training:
+        module.eval()
+    for d in _dropouts(module):
+        d.training = False
     if enabled:
         for root in scope if scope is not None else [module]:
-            for m in root.modules():
-                if isinstance(m, nn.Dropout):
-                    m.train()
+            for d in _dropouts(root):
+                d.training = True
 
 
 @contextmanager
