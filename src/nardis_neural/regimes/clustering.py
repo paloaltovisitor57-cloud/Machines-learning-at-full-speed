@@ -35,6 +35,8 @@ def _log_gauss(x: F64, means: F64, covs: F64, weights: F64) -> F64:
 
 @dataclass
 class RegimeClusterer:
+    """Fitted regime model (KMeans, Gaussian mixture or HDBSCAN) stored as plain arrays."""
+
     method: str
     n_clusters: int = 0
     centers: F64 = field(default_factory=lambda: np.zeros((0, 0)))
@@ -45,6 +47,11 @@ class RegimeClusterer:
 
     @classmethod
     def fit(cls, embeddings: F64, cfg: RegimeConfig) -> tuple[RegimeClusterer, I64]:
+        """Fit ``cfg.method`` and return the model with labels for every embedding.
+
+        Fitting uses at most ``max_fit_samples`` random rows.  With ``auto_select`` the number
+        of clusters is chosen by silhouette score (KMeans) or BIC (GMM).
+        """
         x = np.asarray(embeddings, dtype=np.float64)
         rng = np.random.default_rng(cfg.seed)
         fit_x = (
@@ -124,6 +131,10 @@ class RegimeClusterer:
         return cls("hdbscan", len(ks), centers, noise_radius=radius)
 
     def predict(self, embeddings: F64) -> I64:
+        """Regime label per embedding: nearest centre, or most likely component for GMM.
+
+        HDBSCAN labels points farther than their cluster's radius as noise (-1).
+        """
         x = np.asarray(embeddings, dtype=np.float64)
         if len(x) == 0:
             return np.zeros(0, dtype=np.int64)
@@ -140,6 +151,7 @@ class RegimeClusterer:
         return labels
 
     def to_dict(self) -> dict[str, Any]:
+        """JSON-serialisable form, the inverse of from_dict()."""
         return {
             "method": self.method,
             "n_clusters": self.n_clusters,
@@ -152,6 +164,8 @@ class RegimeClusterer:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> RegimeClusterer:
+        """Rebuild a clusterer from to_dict() output."""
+
         def arr(v: Any) -> F64 | None:
             return None if v is None else np.asarray(v, dtype=np.float64)
 

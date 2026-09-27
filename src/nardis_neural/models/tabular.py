@@ -12,6 +12,8 @@ Tensor = torch.Tensor
 
 
 class ResidualMLP(nn.Module):
+    """Input projection → pre-norm residual blocks → LayerNorm → output projection."""
+
     def __init__(self, in_dim: int, out_dim: int, cfg: TabularConfig, dropout: float) -> None:
         super().__init__()
         self.inp = nn.Linear(in_dim, cfg.width)
@@ -22,5 +24,6 @@ class ResidualMLP(nn.Module):
         self.out = nn.Linear(cfg.width, out_dim)
 
     def forward(self, x: Tensor) -> Tensor:
+        """Map (B, in_dim) to (B, out_dim)."""
         y: Tensor = self.out(self.norm(self.blocks(self.inp(x))))
         return y

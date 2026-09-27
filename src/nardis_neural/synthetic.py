@@ -52,6 +52,8 @@ N_REGIMES = len(REGIMES)
 
 @dataclass
 class SyntheticSpec:
+    """Generator parameters: size, timing, missing-data rates, regime switching and drift."""
+
     n_observations: int = 2000
     n_tokens: int = 24
     episode_seconds: int = 1800

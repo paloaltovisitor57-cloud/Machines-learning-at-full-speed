@@ -19,6 +19,8 @@ from nardis_neural.lifecycle.shadow import ShadowReport
 
 
 class GateResult(BaseModel):
+    """Outcome of one promotion gate, with the compared champion and challenger values."""
+
     name: str
     passed: bool
     required: bool
@@ -29,6 +31,8 @@ class GateResult(BaseModel):
 
 
 class PromotionDecision(BaseModel):
+    """Promote/reject verdict with every gate result and the underlying shadow report."""
+
     promote: bool
     champion_version: str
     challenger_version: str
@@ -39,6 +43,7 @@ class PromotionDecision(BaseModel):
     shadow_report: dict[str, Any] = Field(default_factory=dict)
 
     def to_markdown(self) -> str:
+        """Render the decision and its gate table as Markdown."""
         lines = [
             f"# Promotion decision: {'PROMOTE' if self.promote else 'REJECT'}",
             "",
@@ -79,6 +84,12 @@ def _ratio_gate(name: str, champ: float, chall: float, max_ratio: float, require
 
 
 def evaluate_promotion(report: ShadowReport, cfg: PromotionConfig) -> PromotionDecision:
+    """Apply the promotion gates of ``cfg`` to a shadow report and decide; nothing is saved.
+
+    Promotes only if every required gate passes and at least ``min_passed_fraction`` of the
+    gates pass.  With fewer than two resolved observations only ``min_observations`` is
+    evaluated, and a required gate that could not be evaluated counts as failed.
+    """
     req = set(cfg.required_gates)
     c, h = report.champion, report.challenger
     gates: list[GateResult] = [

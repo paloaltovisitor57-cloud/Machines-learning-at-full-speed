@@ -84,6 +84,10 @@ class DeepEnsemble(nn.Module):
 
     @classmethod
     def create(cls, config: NeuralConfig, seed: int | None = None) -> DeepEnsemble:
+        """Build ``config.ensemble.size`` members, member ``i`` seeded with ``seed + 1000 (i + 1)``.
+
+        ``seed`` defaults to ``config.training.seed``; reseeds the global torch RNG.
+        """
         base = config.training.seed if seed is None else seed
         members = []
         for i in range(config.ensemble.size):
@@ -93,14 +97,17 @@ class DeepEnsemble(nn.Module):
 
     @property
     def size(self) -> int:
+        """Number of members."""
         return len(self.members)
 
     def member(self, i: int) -> NardisNeuralNetwork:
+        """Member ``i`` as a :class:`NardisNeuralNetwork`."""
         m = self.members[i]
         assert isinstance(m, NardisNeuralNetwork)
         return m
 
     def clone(self) -> DeepEnsemble:
+        """Deep copy with independent weights."""
         return copy.deepcopy(self)
 
     @torch.inference_mode()

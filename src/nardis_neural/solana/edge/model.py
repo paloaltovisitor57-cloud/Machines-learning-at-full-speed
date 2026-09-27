@@ -61,6 +61,10 @@ class _EdgeNet(nn.Module):
 
 @dataclass
 class EdgePrediction:
+    """Per-row edge outputs: calibrated P(win), stacked E[net], learner disagreement σ, the
+    lower-confidence ``edge_score`` and the capped fractional-Kelly fraction.
+    """
+
     p_win: F64
     expected_net: F64
     uncertainty: F64
@@ -69,6 +73,10 @@ class EdgePrediction:
 
 
 class EdgeModel:
+    """Meta-labeling edge model: bootstrap MLP ensemble, ridge and boosted trees on out-of-fold
+    meta-features.
+    """
+
     def __init__(
         self,
         d_in: int,
@@ -112,6 +120,11 @@ class EdgeModel:
         patience: int = 10,
         weight_decay: float = 1e-3,
     ) -> dict[str, Any]:
+        """Fit on meta-features and executable net returns; returns the validation report.
+
+        The latest ``validation_fraction`` of rows by ``timestamps`` is held out for early stopping,
+        isotonic calibration of P(win) and the report.  Raises ``ValueError`` below 30 training rows.
+        """
         order = np.argsort(timestamps, kind="stable")
         n_val = max(10, int(len(order) * validation_fraction))
         tr, va = order[:-n_val], order[-n_val:]
@@ -210,6 +223,7 @@ class EdgeModel:
         return np.stack([mlp, ridge, trees])
 
     def predict(self, x: F32) -> EdgePrediction:
+        """Calibrated P(win), stacked E[net], disagreement σ, ``edge_score = E[net] − λσ``, capped Kelly."""
         raw_p, _, _ = self._raw(x)
         comps = self.predict_components(x)
         mu, sd = comps.mean(axis=0), comps.std(axis=0)
@@ -220,6 +234,7 @@ class EdgeModel:
 
     # ------------------------------------------------------------------ persistence
     def save(self, directory: str | Path) -> None:
+        """Write members, scaler, trees and ``edge.json`` metadata to ``directory``."""
         d = Path(directory)
         d.mkdir(parents=True, exist_ok=True)
         torch.save({f"m{i}": m.state_dict() for i, m in enumerate(self.members)}, d / "members.pt")
@@ -245,6 +260,7 @@ class EdgeModel:
 
     @classmethod
     def load(cls, directory: str | Path) -> EdgeModel:
+        """Load a model written by :meth:`save`."""
         d = Path(directory)
         meta = json.loads((d / "edge.json").read_text())
         model = cls(

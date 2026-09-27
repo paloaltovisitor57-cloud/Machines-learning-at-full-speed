@@ -34,10 +34,14 @@ READ_ONLY_METHODS = frozenset(
 
 
 class RpcError(RuntimeError):
+    """Error object returned by the JSON-RPC endpoint."""
+
     pass
 
 
 class SolanaRpc:
+    """Read-only Solana JSON-RPC client over HTTP or an injected ``transport``, with retries."""
+
     def __init__(
         self,
         url: str | None = None,
@@ -69,6 +73,12 @@ class SolanaRpc:
         return payload.get("result")
 
     def call(self, method: str, params: list[Any]) -> Any:
+        """Call a read-only RPC method and return its ``result``.
+
+        Raises ``PermissionError`` for any method outside :data:`READ_ONLY_METHODS`.  Network errors,
+        5xx responses and rate limits (429 / -32005) are retried up to ``retries`` times with
+        exponential backoff.
+        """
         if method not in READ_ONLY_METHODS:
             raise PermissionError(
                 f"{method} is not a read-only RPC method; this client never writes to chain"
@@ -92,6 +102,10 @@ class SolanaRpc:
     def get_signatures(
         self, address: str, before: str | None = None, until: str | None = None, limit: int = 1000
     ) -> list[dict[str, Any]]:
+        """Up to ``limit`` confirmed signatures of ``address``, newest first.
+
+        ``before`` / ``until`` bound the page by signature (exclusive), for paging backwards.
+        """
         opts: dict[str, Any] = {"limit": limit, "commitment": "confirmed"}
         if before:
             opts["before"] = before
@@ -101,6 +115,7 @@ class SolanaRpc:
         return list(result or [])
 
     def get_transaction(self, signature: str) -> dict[str, Any] | None:
+        """A confirmed transaction in ``jsonParsed`` encoding (v0 included), or None if unavailable."""
         result = self.call(
             "getTransaction",
             [
@@ -111,6 +126,7 @@ class SolanaRpc:
         return dict(result) if result else None
 
     def get_slot(self) -> int:
+        """The current confirmed slot."""
         return int(self.call("getSlot", [{"commitment": "confirmed"}]))
 
     def mint_authorities(self, mint: str) -> tuple[bool, bool] | None:

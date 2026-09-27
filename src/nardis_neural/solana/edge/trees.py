@@ -19,6 +19,8 @@ F64 = npt.NDArray[np.float64]
 
 @dataclass
 class TreeEnsemble:
+    """Gradient-boosted regression trees as padded NumPy arrays, one ``(trees, nodes)`` array per field."""
+
     feature: npt.NDArray[np.int64]  # (T, M) padded
     threshold: F64
     left: npt.NDArray[np.int64]
@@ -30,6 +32,9 @@ class TreeEnsemble:
 
     @classmethod
     def fit(cls, x: npt.NDArray[Any], y: F64, seed: int = 0, **params: Any) -> TreeEnsemble:
+        """Train a shallow, early-stopped ``HistGradientBoostingRegressor`` (``params`` override the
+        defaults) and export it.
+        """
         from sklearn.ensemble import HistGradientBoostingRegressor
 
         cfg = {
@@ -46,6 +51,7 @@ class TreeEnsemble:
 
     @classmethod
     def export(cls, model: Any) -> TreeEnsemble:
+        """Convert a fitted ``HistGradientBoostingRegressor`` to arrays (reads its private predictors)."""
         trees = [p[0].nodes for p in model._predictors]
         m = max(len(t) for t in trees)
         t_count = len(trees)
@@ -68,6 +74,7 @@ class TreeEnsemble:
         )
 
     def predict(self, x: npt.NDArray[Any]) -> F64:
+        """Baseline plus the leaf values of every tree; NaN inputs follow each split's missing branch."""
         x = np.asarray(x, dtype=np.float64)
         n = len(x)
         rows = np.arange(n)
@@ -85,6 +92,7 @@ class TreeEnsemble:
         return total
 
     def save(self, file: str | Path) -> None:
+        """Write the arrays to an ``.npz`` file."""
         np.savez(
             file,
             feature=self.feature,
@@ -99,6 +107,7 @@ class TreeEnsemble:
 
     @classmethod
     def load(cls, file: str | Path) -> TreeEnsemble:
+        """Load an ensemble written by :meth:`save` (no pickles)."""
         with np.load(file, allow_pickle=False) as z:
             return cls(
                 z["feature"],

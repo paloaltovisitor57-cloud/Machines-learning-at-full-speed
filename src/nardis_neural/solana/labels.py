@@ -30,6 +30,10 @@ F64 = npt.NDArray[np.float64]
 
 @dataclass(frozen=True)
 class SnapshotLabels:
+    """Hindsight labels of one snapshot: outcome, net returns per horizon, risk events (None when
+    the risk horizon is incomplete) and round-trip cost.
+    """
+
     outcome: NeuralOutcome
     net_returns: dict[str, float]
     risk: dict[str, float] | None
@@ -37,6 +41,8 @@ class SnapshotLabels:
 
 
 class SolanaLabeler:
+    """Labels snapshots from a token's complete event log (hindsight; never features)."""
+
     def __init__(self, cfg: SolanaConfig | None = None) -> None:
         self.cfg = cfg or SolanaConfig()
 
@@ -102,6 +108,9 @@ class SolanaLabeler:
         return SnapshotLabels(outcome, net, self.risk_labels(full, t, data_end), cost)
 
     def risk_labels(self, full: TokenEventLog, t: float, data_end: float) -> dict[str, float] | None:
+        """``rug`` / ``graduation`` / ``dev_dump`` flags (0 or 1) within ``risk_horizon_seconds`` after
+        ``t``; None if the history ends first.  A graduation in the window cancels a rug.
+        """
         cfg = self.cfg
         end = t + cfg.risk_horizon_seconds
         if end > data_end:

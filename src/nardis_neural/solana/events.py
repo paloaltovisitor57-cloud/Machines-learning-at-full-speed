@@ -45,6 +45,8 @@ class TokenLaunch:
 
 @dataclass(frozen=True)
 class Swap:
+    """A buy or sell of ``token_amount`` tokens for ``sol_amount`` SOL against a curve or pool."""
+
     mint: str
     t: float
     wallet: str
@@ -101,10 +103,12 @@ Event = TokenLaunch | Swap | LiquidityChange | Migration | Transfer
 
 
 def event_time(e: Event) -> float:
+    """Timestamp of an event in seconds."""
     return e.t
 
 
 def slot_of(t: float, slot: int) -> int:
+    """``slot`` if known (≥ 0), else a slot derived from ``t`` at ``SLOT_SECONDS`` per slot."""
     return slot if slot >= 0 else int(t / SLOT_SECONDS)
 
 
@@ -120,6 +124,7 @@ class Columns:
         return self.n
 
     def append(self, **row: Any) -> None:
+        """Append one row (omitted columns stay zero), doubling capacity when full."""
         if self.n == len(next(iter(self._data.values()))):
             for k in self._data:
                 self._data[k] = np.concatenate([self._data[k], np.zeros_like(self._data[k])])
@@ -131,6 +136,7 @@ class Columns:
         return self._data[name][: self.n]
 
     def to_dict(self) -> dict[str, npt.NDArray[Any]]:
+        """Copies of every column, trimmed to the stored rows."""
         return {k: self[k].copy() for k in self.schema}
 
 
@@ -176,13 +182,16 @@ class TokenEventLog:
 
     @property
     def mint(self) -> str:
+        """The token's mint address."""
         return self.launch.mint
 
     @property
     def virtual_sol(self) -> float:
+        """Virtual SOL in the pricing reserves: ``PUMP_VIRTUAL_SOL`` on pump.fun, 0 on an AMM."""
         return PUMP_VIRTUAL_SOL if self.venue == "pump_fun" else 0.0
 
     def pool(self) -> Pool:
+        """Current pricing pool (latest reserves, else the launch reserves) with the venue's fee."""
         if len(self.reserves):
             sol, tok = float(self.reserves["sol_reserve"][-1]), float(self.reserves["token_reserve"][-1])
         else:
@@ -196,6 +205,9 @@ class TokenEventLog:
         self.last_t = t
 
     def add_swap(self, s: Swap, wallet_id: int) -> None:
+        """Record a swap by ``wallet_id``: trade row, reserves, holder balance, bought / sold totals and
+        first-buy slot.  Raises ``ValueError`` if it is older than the last event.
+        """
         self._check_time(s.t)
         slot = slot_of(s.t, s.slot)
         self.swaps.append(
@@ -222,6 +234,7 @@ class TokenEventLog:
             self.first_buy_slot[wallet_id] = slot
 
     def add_liquidity(self, c: LiquidityChange, wallet_id: int) -> None:
+        """Record an LP add or removal and the resulting reserves (``ValueError`` if out of order)."""
         self._check_time(c.t)
         self.liquidity.append(t=c.t, wallet=wallet_id, sol_delta=c.sol_delta, token_delta=c.token_delta)
         self.reserves.append(
@@ -229,6 +242,9 @@ class TokenEventLog:
         )
 
     def add_migration(self, m: Migration) -> None:
+        """Record graduation: switch venue, set ``migrated_at`` and append the AMM reserves
+        (``ValueError`` if out of order).
+        """
         self._check_time(m.t)
         self.venue = m.venue
         self.migrated_at = m.t

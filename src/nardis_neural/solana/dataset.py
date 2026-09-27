@@ -34,6 +34,8 @@ from nardis_neural.solana.market import EventStore, SolanaMarket
 
 @dataclass
 class SolanaDataset:
+    """Leakage-free snapshots: neural arrays, observations and outcomes plus per-row Solana labels."""
+
     arrays: dict[str, Array]
     """Canonical neural arrays (features + regression targets)."""
     observations: list[NeuralObservation]
@@ -50,14 +52,17 @@ class SolanaDataset:
         return len(self.observations)
 
     def store(self) -> ArrayStore:
+        """The canonical arrays as an :class:`ArrayStore` (training input)."""
         return ArrayStore(self.arrays)
 
     @property
     def current(self) -> npt.NDArray[np.float32]:
+        """(N, len(CURRENT_FEATURES)) current-state feature matrix."""
         return np.asarray(self.arrays["current"], dtype=np.float32)
 
 
 def hindsight_market(store: EventStore, cfg: SolanaConfig) -> SolanaMarket:
+    """A market that has ingested the whole history — used for labelling only, never for features."""
     market = SolanaMarket(cfg)
     market.ingest_many(store.sorted())
     return market
@@ -71,6 +76,13 @@ def build_solana_dataset(
     max_age_seconds: float = 7200.0,
     idle_stop_seconds: float = 300.0,
 ) -> SolanaDataset:
+    """Build leakage-free snapshots: features from a causal replay, labels from hindsight.
+
+    Each token is sampled every ``sample_interval_seconds`` from ``min_token_age_seconds`` after
+    launch until it is ``max_age_seconds`` old or idle for ``idle_stop_seconds``; snapshots with
+    no complete horizon are dropped.  ``archetypes`` (mint → name) adds an ``archetype`` extra
+    column.  Raises ``ValueError`` if no snapshot can be labelled.
+    """
     ncfg = neural_cfg or cfg.neural_config()
     builder = SolanaFeatureBuilder(cfg)
     labeler = SolanaLabeler(cfg)

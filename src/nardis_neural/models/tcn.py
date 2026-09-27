@@ -18,11 +18,14 @@ Tensor = torch.Tensor
 
 
 class CausalConv1d(nn.Conv1d):
+    """Dilated 1-D convolution padded on the left only, so output ``t`` sees inputs ≤ ``t``."""
+
     def __init__(self, in_ch: int, out_ch: int, kernel_size: int, dilation: int) -> None:
         super().__init__(in_ch, out_ch, kernel_size, dilation=dilation)
         self.left_pad = (kernel_size - 1) * dilation
 
     def forward(self, x: Tensor) -> Tensor:
+        """Convolve (B, C_in, T) to (B, C_out, T) causally."""
         return super().forward(F.pad(x, (self.left_pad, 0)))
 
 
@@ -34,11 +37,14 @@ class ChannelLayerNorm(nn.Module):
         self.norm = nn.LayerNorm(channels)
 
     def forward(self, x: Tensor) -> Tensor:
+        """Normalise (B, C, T) over C independently at every timestep."""
         out: Tensor = self.norm(x.transpose(1, 2)).transpose(1, 2)
         return out
 
 
 class TemporalBlock(nn.Module):
+    """Residual block of two causal convolutions with per-timestep LayerNorm and GELU."""
+
     def __init__(self, in_ch: int, out_ch: int, kernel_size: int, dilation: int, dropout: float) -> None:
         super().__init__()
         self.conv1 = CausalConv1d(in_ch, out_ch, kernel_size, dilation)
@@ -58,6 +64,8 @@ class TemporalBlock(nn.Module):
 
 
 class TCNCore(nn.Module):
+    """Dilated causal TCN with a learned softmax mixture over its blocks' scales."""
+
     def __init__(self, d_model: int, cfg: TCNConfig, dropout: float) -> None:
         super().__init__()
         blocks = []
@@ -72,6 +80,7 @@ class TCNCore(nn.Module):
         self.receptive_field = 1 + sum(2 * (cfg.kernel_size - 1) * 2**i for i in range(len(cfg.channels)))
 
     def forward(self, x: Tensor, mask: Tensor) -> Tensor:
+        """Encode (B, T, D) with a (B, T) mask; unobserved steps output zero."""
         m = mask.unsqueeze(1).to(x.dtype)  # (B, 1, T)
         h = x.transpose(1, 2) * m  # (B, D, T)
         weights = torch.softmax(self.scale_logits, dim=0)

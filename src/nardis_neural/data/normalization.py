@@ -49,6 +49,8 @@ def _center_scale(x: F64, method: str) -> tuple[F64, F64]:
 
 @dataclass
 class FeatureNormalizer:
+    """Centre/scale statistics for current features and sequences, and target scales."""
+
     method: str
     clip: float
     current_center: F64
@@ -67,6 +69,11 @@ class FeatureNormalizer:
         config: NeuralConfig,
         seed: int = 0,
     ) -> FeatureNormalizer:
+        """Fit on ``train_indices`` only (subsampled to ``max_fit_rows``).
+
+        Sequence statistics use observed steps only; each target scale is the per-horizon RMS
+        of the 1–99 % clipped training values.
+        """
         nc: NormalizationConfig = config.normalization
         idx = np.asarray(train_indices, dtype=np.int64)
         if len(idx) == 0:
@@ -125,6 +132,12 @@ class FeatureNormalizer:
         return z.clamp(-self.clip, self.clip)
 
     def transform_batch(self, batch: Batch) -> Batch:
+        """Return a normalised copy of ``batch`` (unchanged if it is already normalised).
+
+        Features are centred, scaled and clipped to ``±clip`` (NaN → 0), unobserved steps are
+        zeroed, regression targets are divided by their scale and graph node features get a
+        signed ``log1p``.
+        """
         if batch.normalized:
             return batch
         seqs: dict[str, SequenceBatch] = {}
@@ -161,6 +174,7 @@ class FeatureNormalizer:
         return mean * s, None if var is None else var * s**2
 
     def target_scale_tensor(self, task: str, like: torch.Tensor) -> torch.Tensor:
+        """Per-horizon scale of ``task`` as float32 on ``like``'s device."""
         return self._t(self.target_scale[task], like)
 
     def current_zscore(self, current: torch.Tensor) -> torch.Tensor:
@@ -170,6 +184,7 @@ class FeatureNormalizer:
 
     # ------------------------------------------------------------------ persistence
     def to_dict(self) -> dict[str, Any]:
+        """JSON-serialisable state, stored in checkpoints."""
         return {
             "method": self.method,
             "clip": self.clip,
@@ -183,6 +198,7 @@ class FeatureNormalizer:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> FeatureNormalizer:
+        """Rebuild a normaliser from :meth:`to_dict` output."""
         return cls(
             method=str(d["method"]),
             clip=float(d["clip"]),

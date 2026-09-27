@@ -238,6 +238,7 @@ def arrays_to_observations(arrays: dict[str, Array], config: NeuralConfig) -> li
 
 
 def arrays_to_outcomes(arrays: dict[str, Array], config: NeuralConfig) -> list[NeuralOutcome]:
+    """Convert labelled rows to :class:`NeuralOutcome` objects (masked horizons omitted)."""
     horizons = config.horizon_names
     n = len(arrays[KEY_ID])
     mask = np.asarray(arrays.get(KEY_TARGET_MASK, np.ones((n, len(horizons)), dtype=bool)), dtype=bool)

@@ -34,6 +34,8 @@ F64 = npt.NDArray[np.float64]
 
 @dataclass
 class TrainingSet:
+    """Tail-model training rows: features, peak multiples, censoring flags, times and mints."""
+
     x: F32
     peak: F64
     censored: npt.NDArray[np.bool_]
@@ -45,11 +47,14 @@ class TrainingSet:
 
     @property
     def tokens(self) -> int:
+        """Number of distinct tokens in the set."""
         return len(set(self.mints.tolist()))
 
 
 @dataclass
 class MoonshotTracker:
+    """Samples, labels and buffers moonshot ticket rows as events stream past (bounded memory)."""
+
     spec: MoonshotSpec = field(default_factory=MoonshotSpec)
     sample_every: float = 30.0
     capacity: int = 200_000
@@ -121,6 +126,7 @@ class MoonshotTracker:
 
     # ------------------------------------------------------------------ persistence
     def save(self, path: str | Path) -> None:
+        """Write resolved and pending rows plus settings to an ``.npz`` file (the spec is not stored)."""
         pend = [(m, t, x) for m, rows in self.pending.items() for t, x in rows]
         res = list(self.resolved)
         d = int(res[0][2].shape[0]) if res else int(pend[0][2].shape[0]) if pend else 0
@@ -139,6 +145,7 @@ class MoonshotTracker:
 
     @classmethod
     def load(cls, path: str | Path, spec: MoonshotSpec) -> MoonshotTracker:
+        """Load a tracker written by :meth:`save`; ``spec`` comes from the caller."""
         with np.load(path) as z:
             every, cap, n_tok = z["meta"].tolist()
             tr = cls(spec, sample_every=float(every), capacity=int(cap))

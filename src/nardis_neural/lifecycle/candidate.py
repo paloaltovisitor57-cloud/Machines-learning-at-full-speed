@@ -18,6 +18,9 @@ def create_candidate(champion: NeuralEngine, origin: str = "adapt") -> NeuralEng
 
 
 def assert_isolated(champion: NeuralEngine, candidate: NeuralEngine) -> None:
+    """Raise AssertionError if the candidate shares parameter storage, normaliser/calibration
+    objects or its version id with the champion.
+    """
     champ_ptrs = {p.data_ptr() for p in champion.ensemble.parameters()}
     shared = [n for n, p in candidate.ensemble.named_parameters() if p.data_ptr() in champ_ptrs]
     if shared:

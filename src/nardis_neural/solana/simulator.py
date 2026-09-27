@@ -55,6 +55,8 @@ MARKET_PRESETS: dict[str, dict[str, float]] = {
 
 @dataclass
 class LaunchSimSpec:
+    """Simulated market settings: token count, duration, seed, wallet population and archetype mix."""
+
     n_tokens: int = 40
     duration_seconds: float = 3 * 3600.0
     seed: int = 0
@@ -102,6 +104,8 @@ class _Token:
 
 
 class LaunchSimulator:
+    """Agent-based generator of launch event streams with ground-truth archetypes (tests and demos only)."""
+
     def __init__(self, spec: LaunchSimSpec | None = None) -> None:
         self.spec = spec or LaunchSimSpec()
         self.rng = np.random.default_rng(self.spec.seed)
@@ -425,6 +429,10 @@ class LaunchSimulator:
             t += 1.0
 
     def run(self) -> tuple[EventStore, dict[str, str]]:
+        """Simulate every launch; returns the event store and each mint's archetype.
+
+        Call once per instance: generated events accumulate on the simulator.
+        """
         self._fund_population()
         tokens = [self._launch(k) for k in range(self.spec.n_tokens)]
         for tok in tokens:

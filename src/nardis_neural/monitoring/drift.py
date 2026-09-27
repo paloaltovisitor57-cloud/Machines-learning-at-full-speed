@@ -32,6 +32,10 @@ F64 = npt.NDArray[np.float64]
 
 
 def population_stability_index(ref: F64, cur: F64, bins: int = 10) -> float:
+    """PSI of ``cur`` against quantile bins of ``ref``; non-finite values are dropped.
+
+    Returns NaN when either sample has fewer than two values.
+    """
     ref = ref[np.isfinite(ref)]
     cur = cur[np.isfinite(cur)]
     if len(ref) < 2 or len(cur) < 2:
@@ -52,6 +56,8 @@ def population_stability_index(ref: F64, cur: F64, bins: int = 10) -> float:
 
 
 class FeatureDrift(BaseModel):
+    """Drift statistics of one feature; Wasserstein and mean shift are in reference std units."""
+
     name: str
     psi: float
     ks_statistic: float
@@ -63,6 +69,7 @@ class FeatureDrift(BaseModel):
 
 
 def univariate_drift(ref: F64, cur: F64, name: str, cfg: DriftConfig) -> FeatureDrift:
+    """PSI, KS, Wasserstein and moment shifts of one feature and whether it drifted."""
     r = ref[np.isfinite(ref)]
     c = cur[np.isfinite(cur)]
     if len(r) < 2 or len(c) < 2:
@@ -96,6 +103,8 @@ def univariate_drift(ref: F64, cur: F64, name: str, cfg: DriftConfig) -> Feature
 
 
 class DriftSection(BaseModel):
+    """Drift verdict for one level, with per-feature results and/or summary statistics."""
+
     drifted: bool
     fraction_drifted: float = 0.0
     features: list[FeatureDrift] = Field(default_factory=list)
@@ -103,6 +112,8 @@ class DriftSection(BaseModel):
 
 
 class DriftReport(BaseModel):
+    """Four-level drift report (input, embedding, prediction, error) with sample sizes."""
+
     input: DriftSection
     embedding: DriftSection | None = None
     prediction: DriftSection | None = None
@@ -112,11 +123,13 @@ class DriftReport(BaseModel):
 
     @property
     def any_drift(self) -> bool:
+        """True if any computed section drifted."""
         return any(
             s is not None and s.drifted for s in (self.input, self.embedding, self.prediction, self.error)
         )
 
     def summary(self) -> dict[str, Any]:
+        """Drifted flag per level (None where not computed) plus ``any_drift``."""
         return {
             "any_drift": self.any_drift,
             "input": self.input.drifted,
@@ -127,6 +140,9 @@ class DriftReport(BaseModel):
 
 
 def multivariate_section(ref: F64, cur: F64, names: Sequence[str], cfg: DriftConfig) -> DriftSection:
+    """Univariate drift per column; the section drifts when the drifted fraction reaches
+    ``feature_fraction_threshold``.
+    """
     feats = [univariate_drift(ref[:, j], cur[:, j], names[j], cfg) for j in range(ref.shape[1])]
     frac = float(np.mean([f.drifted for f in feats])) if feats else 0.0
     return DriftSection(drifted=frac >= cfg.feature_fraction_threshold, fraction_drifted=frac, features=feats)
@@ -150,6 +166,7 @@ def input_features(arrays: dict[str, Array], config: NeuralConfig) -> tuple[F64,
 
 
 def input_drift(ref: dict[str, Array], cur: dict[str, Array], config: NeuralConfig) -> DriftSection:
+    """Raw input drift between two array dicts (current features and sequence means)."""
     r, names = input_features(ref, config)
     c, _ = input_features(cur, config)
     return multivariate_section(r, c, names, config.drift)
@@ -158,6 +175,9 @@ def input_drift(ref: dict[str, Array], cur: dict[str, Array], config: NeuralConf
 def embedding_drift(
     ref_distances: F64, cur_distances: F64, ref_emb: F64, cur_emb: F64, precision: F64, cfg: DriftConfig
 ) -> DriftSection:
+    """Latent drift from Mahalanobis distances: mean-distance ratio (decides drift), KS test
+    and whitened mean shift.
+    """
     ratio = float(np.mean(cur_distances) / max(np.mean(ref_distances), 1e-12))
     ks = stats.ks_2samp(ref_distances, cur_distances)
     shift = cur_emb.mean(axis=0) - ref_emb.mean(axis=0)
@@ -174,6 +194,7 @@ def embedding_drift(
 
 
 def error_drift(ref_err: F64, cur_err: F64, cfg: DriftConfig) -> DriftSection:
+    """Model-error drift: current / reference mean absolute error (decides drift) plus KS test."""
     ratio = float(np.mean(cur_err) / max(np.mean(ref_err), 1e-12))
     ks = stats.ks_2samp(ref_err, cur_err)
     return DriftSection(
@@ -199,6 +220,7 @@ PREDICTION_COLUMNS = (
 
 
 def prediction_matrix(preds: dict[str, Array], horizons: Sequence[str]) -> tuple[F64, list[str]]:
+    """Stack the available prediction columns into an (N, C) matrix with per-horizon names."""
     cols, names = [], []
     for key in PREDICTION_COLUMNS:
         if key not in preds:

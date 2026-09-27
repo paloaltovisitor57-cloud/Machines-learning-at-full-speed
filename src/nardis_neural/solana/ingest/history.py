@@ -42,6 +42,10 @@ class _Edge:
 
 @dataclass
 class HistoryWalker:
+    """Replays the watched programs' history from ``start_time`` to ``end_time`` (Unix seconds),
+    oldest first, one ``segment_seconds`` segment at a time.
+    """
+
     rpc: SolanaRpc
     start_time: float
     end_time: float
@@ -97,6 +101,10 @@ class HistoryWalker:
             before = page[-1]["signature"]
 
     def events(self) -> Iterator[Event]:
+        """Yield decoded events in time order, segment by segment, updating :attr:`stats`.
+
+        Failed transactions and signatures listed by several watched programs are skipped.
+        """
         edges = self._edges()
         bounds = {p: self._boundaries(p, edges) for p in self.programs}
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
@@ -119,5 +127,6 @@ class HistoryWalker:
 
 
 def chain(*sources: Iterable[Event]) -> Iterator[Event]:
+    """Concatenate event sources in order (e.g. a history replay followed by the live stream)."""
     for src in sources:
         yield from src

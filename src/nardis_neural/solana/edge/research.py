@@ -66,6 +66,8 @@ def _quiet(_: str) -> None:
 # ---------------------------------------------------------------------------- dataset
 @dataclass
 class EdgeDataset:
+    """Snapshots with a complete executable barrier outcome: net return, exit reason, hold and exit time."""
+
     base: SolanaDataset
     net: F64
     reason: npt.NDArray[np.str_]
@@ -74,6 +76,7 @@ class EdgeDataset:
 
     @property
     def timestamps(self) -> F64:
+        """Snapshot times in seconds."""
         return np.asarray(self.base.arrays["timestamp"], dtype=np.float64)
 
     def __len__(self) -> int:
@@ -81,6 +84,7 @@ class EdgeDataset:
 
 
 def subset_dataset(ds: SolanaDataset, keep: npt.NDArray[np.int64]) -> SolanaDataset:
+    """Rows ``keep`` of a :class:`SolanaDataset` (every array, list and extra)."""
     return SolanaDataset(
         arrays=select_rows(ds.arrays, keep),
         observations=[ds.observations[i] for i in keep],
@@ -100,6 +104,9 @@ def build_edge_dataset(
     neural_cfg: NeuralConfig | None = None,
     archetypes: dict[str, str] | None = None,
 ) -> EdgeDataset:
+    """Leakage-free snapshots labelled with executable triple-barrier outcomes (from the hindsight
+    market); snapshots without a complete outcome are dropped.
+    """
     base = build_solana_dataset(store, cfg, neural_cfg, archetypes=archetypes)
     full = hindsight_market(store, cfg)
     end = store.end_time
@@ -156,6 +163,10 @@ def edge_features(
 # ---------------------------------------------------------------------------- walk-forward OOF
 @dataclass
 class OOFPredictions:
+    """Walk-forward out-of-fold neural outputs and risk probabilities (0.5 where unavailable), the
+    rows the folds covered and per-fold statistics.
+    """
+
     preds: dict[str, Array]
     risk: F64
     covered: npt.NDArray[np.bool_]
@@ -224,6 +235,8 @@ def walk_forward_oof(
 # ---------------------------------------------------------------------------- research
 @dataclass
 class EdgeResearch:
+    """Result of :func:`run_edge_research`: report, production edge model, dataset and OOF outputs."""
+
     report: dict[str, Any]
     model: EdgeModel
     dataset: EdgeDataset
@@ -242,6 +255,11 @@ def run_edge_research(
     device: torch.device | None = None,
     log: Logger = _quiet,
 ) -> EdgeResearch:
+    """Run the causal edge protocol (see the module docstring) on an event history.
+
+    Returns the out-of-sample report together with a production edge model refitted on every
+    out-of-fold row.
+    """
     spec = spec or BarrierSpec(size_sol=cfg.trade_size_sol)
     eds = build_edge_dataset(store, cfg, spec, ncfg, archetypes)
     log(
@@ -334,6 +352,7 @@ def run_edge_research(
 
 
 def research_markdown(report: dict[str, Any]) -> str:
+    """Render an edge research report as Markdown: test-period table versus baselines and the verdict."""
     t, b = report["test"], report["test_baselines"]
     v = report["verdict"]
     lines = [

@@ -61,6 +61,8 @@ OFFLINE_KEYS = ("return.rmse", "upside.log_loss", "downside.log_loss")
 
 
 class LearnerState(BaseModel):
+    """Counters and promotion baseline MAE, persisted in ``state.json``."""
+
     new_since_adapt: int = 0
     new_since_full: int = 0
     last_adapt_seq: int = -1
@@ -73,6 +75,8 @@ class LearnerState(BaseModel):
 
 
 class CandidateReport(BaseModel):
+    """Outcome of an adaptation or full retrain: offline comparison and resulting status."""
+
     kind: str
     candidate_version: str
     champion_version: str
@@ -160,6 +164,9 @@ class ContinualLearner:
         config: NeuralConfig | None = None,
         device: torch.device | str | None = None,
     ) -> ContinualLearner:
+        """Create a workspace with ``champion`` registered as champion (unless one exists),
+        save the config and return a learner on it.
+        """
         root = Path(workspace)
         root.mkdir(parents=True, exist_ok=True)
         cfg = config or champion.config
@@ -172,12 +179,14 @@ class ContinualLearner:
         return learner
 
     def engine(self, version: str) -> NeuralEngine:
+        """Engine of ``version``, loaded from the registry once and cached."""
         if version not in self._engines:
             self._engines[version] = self.registry.load_engine(version, self.device)
         return self._engines[version]
 
     @property
     def champion(self) -> NeuralEngine:
+        """Current champion engine; raises RuntimeError if the workspace has none."""
         v = self.registry.champion_version
         if v is None:
             raise RuntimeError("workspace has no champion")
@@ -185,6 +194,7 @@ class ContinualLearner:
 
     @property
     def challenger(self) -> NeuralEngine | None:
+        """Current challenger engine, or None."""
         v = self.registry.challenger_version
         return None if v is None else self.engine(v)
 
@@ -207,6 +217,7 @@ class ContinualLearner:
         return preds
 
     def predict(self, observation: NeuralObservation) -> NeuralPrediction:
+        """Champion prediction for one observation (see predict_batch())."""
         return self.predict_batch([observation])[0]
 
     def record_prediction(self, prediction: NeuralPrediction) -> None:
@@ -233,6 +244,12 @@ class ContinualLearner:
         outcome: NeuralOutcome,
         prediction: NeuralPrediction | None = None,
     ) -> Experience:
+        """Add a labelled outcome to replay and resolve its shadow record; returns the experience.
+
+        The outcome is linked to its pending prediction (or ``prediction``).  If the champion
+        made that prediction its live error is tracked, which may trigger an automatic
+        rollback.  State is saved every ``autosave_every`` experiences.
+        """
         if prediction is not None:
             self.record_prediction(prediction)
         pred = self.pending.pop(observation.observation_id, None)
@@ -299,6 +316,7 @@ class ContinualLearner:
 
     # ------------------------------------------------------------------ adaptation
     def adapt_if_needed(self) -> CandidateReport | None:
+        """Run adapt() once ``min_new_samples`` new experiences have arrived; otherwise None."""
         if self.state.new_since_adapt < self.config.continual.min_new_samples:
             return None
         return self.adapt()
@@ -371,6 +389,9 @@ class ContinualLearner:
 
     # ------------------------------------------------------------------ full retraining
     def full_retrain_if_needed(self, external: ArrayStore | None = None) -> CandidateReport | None:
+        """Run full_retrain() when enough new samples arrived or, if enabled, replay input drift
+        is detected; otherwise None.
+        """
         cc = self.config.continual
         due = self.state.new_since_full >= cc.full_retrain_min_new_samples
         if not due and cc.full_retrain_on_drift:
@@ -378,6 +399,10 @@ class ContinualLearner:
         return self.full_retrain(external) if due else None
 
     def replay_input_drift(self, min_samples: int = 200) -> bool:
+        """True if recent replay inputs drifted from the historical pool.
+
+        False when either pool has fewer than ``min_samples`` experiences.
+        """
         recent = list(self.buffer.recent)
         hist = self.buffer.historical
         if len(recent) < min_samples or len(hist) < min_samples:
@@ -494,6 +519,7 @@ class ContinualLearner:
 
     # ------------------------------------------------------------------ shadow / promotion
     def shadow_report(self) -> ShadowReport | None:
+        """Shadow comparison of champion and challenger, or None without a challenger."""
         ch = self.registry.challenger_version
         champ = self.registry.champion_version
         if ch is None or champ is None:
@@ -501,6 +527,9 @@ class ContinualLearner:
         return self.shadow.report(self.config, champ, ch)
 
     def evaluate_promotion(self) -> PromotionDecision | None:
+        """Evaluate the promotion gates on the shadow report and write JSON and Markdown
+        reports to ``reports/``; None without a challenger.
+        """
         report = self.shadow_report()
         if report is None:
             return None
@@ -515,6 +544,7 @@ class ContinualLearner:
         return decision
 
     def promote_if_ready(self) -> PromotionDecision | None:
+        """Evaluate promotion and promote the challenger if it passes; returns the decision."""
         decision = self.evaluate_promotion()
         if decision is None or not decision.promote:
             return decision
@@ -522,11 +552,18 @@ class ContinualLearner:
         return decision
 
     def promote(self, version: str, decision: PromotionDecision | None = None) -> None:
+        """Make ``version`` champion, prune old weights, reset the rollback baseline and save.
+
+        The new baseline is the challenger's shadow return MAE from ``decision`` (None for a
+        manual promotion); the version's shadow records are cleared.
+        """
         reason = "manual promotion" if decision is None else decision.reason
         summary: dict[str, Any] = {"reason": reason}
         if decision is not None:
             summary["gates"] = {g.name: g.passed for g in decision.gates}
         self.registry.promote(version, reason=reason, report=summary)
+        # long-running learners would otherwise keep every model version on disk
+        self.registry.prune(self.config.lifecycle.keep_champions)
         baseline = None
         if decision is not None:
             baseline = decision.shadow_report.get("challenger", {}).get("return.mae")
@@ -537,6 +574,9 @@ class ContinualLearner:
         self.save()
 
     def rollback(self, to_version: str | None = None, reason: str = "manual rollback") -> str:
+        """Restore ``to_version`` (default: previous champion), clear the rollback baseline and
+        save; returns the new champion version.
+        """
         target = rollback(self.registry, to_version, reason)
         self.state.rollbacks += 1
         self.state.promotion_baseline_mae = None
@@ -551,12 +591,14 @@ class ContinualLearner:
         (d / name).write_text(json.dumps(payload, indent=2, default=float))
 
     def save(self) -> None:
+        """Persist the replay buffer, shadow records and learner state."""
         self.buffer.save(self.root / "replay")
         self.shadow.save()
         (self.root / "state.json").write_text(self.state.model_dump_json(indent=2))
         self._since_save = 0
 
     def status(self) -> dict[str, Any]:
+        """Champion, challenger, replay pool sizes, shadow records, counters and version statuses."""
         return {
             "champion": self.registry.champion_version,
             "challenger": self.registry.challenger_version,

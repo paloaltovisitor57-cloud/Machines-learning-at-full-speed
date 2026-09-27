@@ -62,7 +62,7 @@ without supervision.
 * **Deep ensemble**: members are fitted on token-bootstrap resamples, with early stopping
   on the most recently launched tokens. The predictive survival is the members' average,
   and their spread is the epistemic uncertainty.
-* **Inputs**: `raw` uses the 53 on-chain features and is fast on any CPU. `neural` adds
+* **Inputs**: `raw` uses the 67 on-chain features and is fast on any CPU. `neural` adds
   the walk-forward out-of-fold neural forecasts, uncertainty, expert gates and risk
   probabilities, the same stack the edge model uses.
 

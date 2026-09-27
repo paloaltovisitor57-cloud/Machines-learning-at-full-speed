@@ -28,6 +28,8 @@ def build_attention_mask(mask: Tensor, causal: bool) -> Tensor:
 
 
 class MultiHeadSelfAttention(nn.Module):
+    """Multi-head self-attention via ``scaled_dot_product_attention``."""
+
     def __init__(self, d_model: int, heads: int, dropout: float) -> None:
         super().__init__()
         if d_model % heads:
@@ -39,6 +41,7 @@ class MultiHeadSelfAttention(nn.Module):
         self.dropout = dropout
 
     def forward(self, x: Tensor, attn_mask: Tensor) -> Tensor:
+        """Attend over (B, T, D) with a boolean (B, 1, T, T) mask; returns (B, T, D)."""
         b, t, d = x.shape
         q, k, v = self.qkv(x).view(b, t, 3, self.heads, self.head_dim).permute(2, 0, 3, 1, 4)
         out = F.scaled_dot_product_attention(
@@ -50,6 +53,8 @@ class MultiHeadSelfAttention(nn.Module):
 
 
 class TransformerBlock(nn.Module):
+    """Pre-LN block: masked self-attention and a GELU feed-forward, both residual."""
+
     def __init__(self, d_model: int, heads: int, ff_multiplier: int, dropout: float) -> None:
         super().__init__()
         self.norm1 = nn.LayerNorm(d_model)
@@ -65,6 +70,7 @@ class TransformerBlock(nn.Module):
         self.drop2 = nn.Dropout(dropout)
 
     def forward(self, x: Tensor, attn_mask: Tensor) -> Tensor:
+        """Apply the block to (B, T, D) with a boolean (B, 1, T, T) attention mask."""
         x = x + self.drop1(self.attn(self.norm1(x), attn_mask))
         x = x + self.drop2(self.ff(self.norm2(x)))
         return x
@@ -90,6 +96,7 @@ class TemporalTransformerCore(nn.Module):
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, x: Tensor, mask: Tensor) -> Tensor:
+        """Encode (B, T, D) with a (B, T) mask (causally if configured); unobserved steps output zero."""
         t = x.shape[1]
         recency = torch.arange(t - 1, -1, -1, device=x.device).clamp_max(self.max_positions - 1)
         x = x + self.recency_embedding(recency).unsqueeze(0)

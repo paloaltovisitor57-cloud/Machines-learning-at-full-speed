@@ -7,6 +7,7 @@ _INDEX = {c: i for i, c in enumerate(ALPHABET)}
 
 
 def b58encode(data: bytes) -> str:
+    """Encode bytes as base58; each leading zero byte becomes ``1``."""
     n = int.from_bytes(data, "big")
     out = []
     while n:
@@ -17,6 +18,7 @@ def b58encode(data: bytes) -> str:
 
 
 def b58decode(text: str) -> bytes:
+    """Decode base58 text to bytes; raises ``ValueError`` on an invalid character."""
     n = 0
     for c in text:
         if c not in _INDEX:

@@ -23,7 +23,7 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 import torch
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from nardis_neural.config import NeuralConfig
 from nardis_neural.data.datasets import MarketDataset
@@ -50,6 +50,8 @@ F32 = npt.NDArray[np.float32]
 
 class SolanaAssessment(BaseModel):
     """Everything the ML module knows about one token right now (no trade decision)."""
+
+    model_config = ConfigDict(use_attribute_docstrings=True)
 
     mint: str
     timestamp: float
@@ -127,6 +129,14 @@ class _Pending:
 
 
 class SolanaBrain:
+    """Live Solana intelligence over one workspace: causal market, neural ensemble, risk, edge and
+    moonshot models.
+
+    Loads whatever the workspace holds (``solana.yaml``, the neural champion, the event history
+    or a streaming checkpoint, risk / edge / tail models, the online moonshot buffer).
+    :meth:`bootstrap` creates a workspace from historical events.
+    """
+
     def __init__(self, workspace: str | Path, device: torch.device | str | None = None) -> None:
         self.root = Path(workspace)
         self.cfg = SolanaConfig.load(self.root / "solana.yaml")
@@ -229,6 +239,10 @@ class SolanaBrain:
         self.history = EventStore()
 
     def ingest(self, event: Event) -> None:
+        """Feed one event, in time order, into the market (and the event history unless streaming).
+
+        Raises like :meth:`SolanaMarket.ingest` (``ValueError`` / ``KeyError``) for events it rejects.
+        """
         self.market.ingest(event)
         if not self.streaming:
             self.history.add(event)
@@ -242,10 +256,12 @@ class SolanaBrain:
         return self.market.evict(now, idle, keep=busy.__contains__)
 
     def ingest_many(self, events: Iterable[Event]) -> None:
+        """Ingest events in order (see :meth:`ingest`)."""
         for e in events:
             self.ingest(e)
 
     def assess(self, mint: str) -> SolanaAssessment:
+        """Assess one token at the current market time (see :meth:`assess_many`)."""
         return self.assess_many([mint])[0]
 
     def assess_many(self, mints: list[str]) -> list[SolanaAssessment]:
@@ -379,6 +395,9 @@ class SolanaBrain:
     def assess_active(
         self, max_idle_seconds: float = 120.0, min_age_seconds: float | None = None
     ) -> list[SolanaAssessment]:
+        """Assess every token that traded within ``max_idle_seconds`` and is at least ``min_age_seconds``
+        old (default ``cfg.min_token_age_seconds``).
+        """
         min_age = self.cfg.min_token_age_seconds if min_age_seconds is None else min_age_seconds
         now = self.market.now
         mints = [
@@ -437,6 +456,12 @@ class SolanaBrain:
         return done
 
     def maintenance(self, risk_refit_min_new: int = 200) -> dict[str, Any]:
+        """Periodic upkeep: neural adaptation / retraining / promotion, risk refit, online tail refit,
+        then :meth:`save`; returns a status summary.
+
+        The risk model is refitted once ``risk_refit_min_new`` new labelled samples have arrived and
+        every risk label has at least 3 positives.
+        """
         adapted = self.learner.adapt_if_needed()
         retrained = self.learner.full_retrain_if_needed()
         decision = self.learner.promote_if_ready()
@@ -592,6 +617,9 @@ class SolanaBrain:
                 self.risk_t = list(z["t"])
 
     def save(self) -> None:
+        """Checkpoint the workspace: learner, event history (or the pickled market when streaming),
+        moonshot buffer, risk samples and ``solana_state.json``.
+        """
         self.learner.save()
         if self.streaming:
             target = self.root / "stream" / "market.pkl"
@@ -629,6 +657,9 @@ class SolanaBrain:
 
 
 def fit_risk_model(embeddings: npt.NDArray[Any], ds: SolanaDataset, members: int = 3) -> SolanaRiskModel:
+    """Fit a :class:`SolanaRiskModel` on embeddings plus current features of ``ds``, validated on
+    held-out later-launched tokens (token-disjoint).
+    """
     x = SolanaRiskModel.inputs(embeddings, ds.current)
     model = SolanaRiskModel(x.shape[1], members=members)
     model.fit(x, ds.risk, np.asarray(ds.arrays["timestamp"], dtype=np.float64), groups=ds.mints)

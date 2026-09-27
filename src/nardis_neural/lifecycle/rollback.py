@@ -38,18 +38,22 @@ class AutoRollbackMonitor:
         self.errors: deque[float] = deque(maxlen=cfg.auto_rollback_min_observations)
 
     def reset(self, baseline_mae: float | None) -> None:
+        """Set a new baseline MAE and discard the collected live errors."""
         self.baseline_mae = baseline_mae
         self.errors.clear()
 
     def update(self, abs_error: float) -> None:
+        """Record one live absolute return error (non-finite values are ignored)."""
         if np.isfinite(abs_error):
             self.errors.append(float(abs_error))
 
     @property
     def live_mae(self) -> float | None:
+        """Mean of the recorded live errors, or None when there are none."""
         return float(np.mean(self.errors)) if self.errors else None
 
     def should_rollback(self) -> bool:
+        """True when enabled, the error window is full and live MAE exceeds the degraded baseline."""
         if not self.cfg.auto_rollback or self.baseline_mae is None:
             return False
         if len(self.errors) < self.cfg.auto_rollback_min_observations:

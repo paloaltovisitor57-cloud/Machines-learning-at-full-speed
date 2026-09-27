@@ -42,6 +42,7 @@ def slog(x: F64 | float) -> Any:
 
 
 def gini(values: F64) -> float:
+    """Gini coefficient of the positive entries of ``values`` (0 with fewer than two)."""
     v = np.sort(values[values > 0])
     n = len(v)
     if n < 2 or v.sum() <= 0:
@@ -51,6 +52,8 @@ def gini(values: F64) -> float:
 
 
 class SolanaFeatureBuilder:
+    """Turns causal market state into model inputs: current features, trade bars and wallet graph."""
+
     def __init__(self, cfg: SolanaConfig | None = None) -> None:
         self.cfg = cfg or SolanaConfig()
 
@@ -89,7 +92,10 @@ class SolanaFeatureBuilder:
             )
 
     # ------------------------------------------------------------------ current features
-    def current_features(self, log: TokenEventLog, wallets: WalletIntel, now: float) -> F64:
+    def current_features(
+        self, log: TokenEventLog, wallets: WalletIntel, now: float, market: SolanaMarket | None = None
+    ) -> F64:
+        """The named feature vector; ``market`` adds creator-family and market-heat context."""
         self._check_now(log, now)
         cfg = self.cfg
         s = log.swaps
@@ -210,6 +216,8 @@ class SolanaFeatureBuilder:
         f["mint_authority_revoked"] = float(log.launch.mint_authority_revoked)
         f["freeze_authority_revoked"] = float(log.launch.freeze_authority_revoked)
         f["lp_burned_fraction"] = float(log.launch.lp_burned_fraction)
+        f.update(self._tail_and_clusters(log, wallets, now, holders))
+        f.update(self._context(log, market, now))
         vec = np.asarray([f[name] for name in CURRENT_FEATURES], dtype=np.float64)
         return np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -248,6 +256,62 @@ class SolanaFeatureBuilder:
         prior = int((buy & (t > now - 60) & (t <= now - 30)).sum())
         out["buy_acceleration_30s"] = float(np.log1p(recent) - np.log1p(prior))
         return out
+
+    @staticmethod
+    def _tail_and_clusters(
+        log: TokenEventLog, wallets: WalletIntel, now: float, holders: dict[int, float]
+    ) -> dict[str, float]:
+        """Who is buying measured by *runner* skill, and crowd size measured in funding clusters
+        (one operator with fifty wallets counts once)."""
+        s = log.swaps
+        t, wal, buy, sol = s["t"], s["wallet"], s["is_buy"], s["sol"]
+        out: dict[str, float] = {}
+        b60 = (t > now - 60) & buy
+        if b60.any():
+            sk = wallets.tail_skills(wal[b60])
+            vol = sol[b60]
+            out["tail_smart_buy_share_60s"] = float(vol[sk > 0.5].sum() / vol.sum()) if vol.sum() > 0 else 0.0
+            out["buyer_clusters_60s_log"] = float(np.log1p(len({wallets.root(int(w)) for w in wal[b60]})))
+        else:
+            out["tail_smart_buy_share_60s"] = out["buyer_clusters_60s_log"] = 0.0
+        b300 = np.unique(wal[(t > now - 300) & buy])
+        out["tail_smart_buyers_300s_log"] = (
+            float(np.log1p(int((wallets.tail_skills(b300) > 0.5).sum()))) if len(b300) else 0.0
+        )
+        first = np.asarray(list(log.first_buy_slot)[:20], dtype=np.int64)
+        out["early_buyer_tail_skill"] = float(wallets.tail_skills(first).mean()) if len(first) else 0.0
+        clusters = len({wallets.root(w) for w in holders})
+        out["holder_clusters_log"] = float(np.log1p(clusters))
+        out["holder_cluster_ratio"] = clusters / len(holders) if holders else 1.0
+        return out
+
+    @staticmethod
+    def _context(log: TokenEventLog, market: SolanaMarket | None, now: float) -> dict[str, float]:
+        """Creator-family track record and market-wide heat (zeros without a market)."""
+        if market is None or log.mint not in market.tokens:
+            return {
+                "creator_prior_launches_log": 0.0,
+                "creator_prior_best_peak_log": 0.0,
+                "creator_prior_rug_rate": 0.0,
+                "creator_prior_graduation_rate": 0.0,
+                "since_creator_last_launch_log": float(np.log1p(1e7)),
+                "market_launches_600s_log": 0.0,
+                "market_graduations_3600s_log": 0.0,
+                "market_volume_300s_log": 0.0,
+            }
+        rec = market.creator_record(log.mint, now)
+        n = rec["launches"]
+        heat = market.heat_values(now)
+        return {
+            "creator_prior_launches_log": float(np.log1p(n)),
+            "creator_prior_best_peak_log": float(np.log(max(rec["best_peak"], 1e-9))),
+            "creator_prior_rug_rate": rec["rugs"] / n if n else 0.0,
+            "creator_prior_graduation_rate": rec["graduations"] / n if n else 0.0,
+            "since_creator_last_launch_log": float(np.log1p(max(rec["since_last"], 0.0))),
+            "market_launches_600s_log": float(np.log1p(heat["launches"])),
+            "market_graduations_3600s_log": float(np.log1p(heat["graduations"])),
+            "market_volume_300s_log": float(np.log1p(heat["volume"])),
+        }
 
     # ------------------------------------------------------------------ bars
     def bars(self, log: TokenEventLog, now: float, spec: BarSpec) -> SequenceInput:
@@ -325,6 +389,12 @@ class SolanaFeatureBuilder:
 
     # ------------------------------------------------------------------ graph
     def graph(self, log: TokenEventLog, wallets: WalletIntel, now: float) -> GraphInput:
+        """Wallet graph at ``now``: the token node plus its ``graph_top_k`` wallets by SOL volume in the
+        last ``graph_window_seconds``.
+
+        Edges: wallet → token (traded), funder → wallet (funding known by ``now``), and both
+        directions between wallets of the same funding cluster.
+        """
         cfg = self.cfg
         s = log.swaps
         t = s["t"]
@@ -390,9 +460,10 @@ class SolanaFeatureBuilder:
 
     # ------------------------------------------------------------------ observation
     def observation(self, market: SolanaMarket, mint: str, now: float | None = None) -> NeuralObservation:
+        """Full model input for ``mint`` at ``now`` (default: market time), from state known at ``now``."""
         log = market.token(mint)
         now = market.now if now is None else now
-        current = self.current_features(log, market.wallets, now)
+        current = self.current_features(log, market.wallets, now, market)
         seqs = {b.name: self.bars(log, now, b) for b in self.cfg.bars}
         graph = self.graph(log, market.wallets, now) if self.cfg.graph_enabled else None
         return NeuralObservation(
@@ -406,4 +477,5 @@ class SolanaFeatureBuilder:
 
     @staticmethod
     def explain(current: F64) -> dict[str, float]:
+        """Map a current-feature vector to ``{name: value}`` in :data:`CURRENT_FEATURES` order."""
         return {name: float(v) for name, v in zip(CURRENT_FEATURES, current, strict=True)}

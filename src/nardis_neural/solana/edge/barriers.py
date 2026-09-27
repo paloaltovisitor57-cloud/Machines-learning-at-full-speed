@@ -31,21 +31,32 @@ F64 = npt.NDArray[np.float64]
 
 
 class BarrierSpec(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    """Executable triple-barrier parameters: take-profit, stop-loss, time barrier, latency and size."""
+
+    model_config = ConfigDict(extra="forbid", use_attribute_docstrings=True)
 
     take_profit: float = Field(default=0.25, gt=0)
+    """Net return (fraction of stake) at which the position is closed for a profit."""
     stop_loss: float = Field(default=0.15, gt=0, lt=1)
+    """Net loss (fraction of stake) at which the position is closed."""
     max_hold_seconds: float = Field(default=180.0, gt=0)
+    """Maximum holding time in seconds before the position is closed on time."""
     latency_seconds: float = Field(default=1.0, ge=0)
+    """Delay in seconds between a signal or exit decision and its fill."""
     size_sol: float = Field(default=1.0, gt=0)
+    """Position size in SOL, used for fees and price impact on entry and exit."""
     vol_scaled: bool = False
     """Scale barriers by realised volatility over ``vol_lookback_seconds`` (clipped)."""
     vol_lookback_seconds: float = Field(default=120.0, gt=0)
+    """Look-back in seconds for the realised volatility used by ``vol_scaled``."""
     vol_multiple: float = Field(default=3.0, gt=0)
+    """Barrier scale is this multiple of realised volatility, clipped to [0.5, 2]."""
 
 
 @dataclass(frozen=True)
 class BarrierOutcome:
+    """Executable outcome of one signal under a :class:`BarrierSpec`."""
+
     net_return: float
     """Realised SOL out / SOL in − 1, after both fees and both price impacts."""
     exit_reason: Literal["take_profit", "stop_loss", "time", "dead"]
@@ -55,6 +66,7 @@ class BarrierOutcome:
 
     @property
     def win(self) -> bool:
+        """True when the realised net return is positive."""
         return self.net_return > 0
 
 

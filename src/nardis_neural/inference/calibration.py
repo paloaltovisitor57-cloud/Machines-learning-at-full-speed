@@ -34,10 +34,16 @@ def _sigmoid(x: F64) -> F64:
 
 @dataclass
 class BinaryCalibrator:
+    """Maps raw probabilities of one binary event at one horizon to calibrated ones."""
+
     method: str = "none"
     params: dict[str, Any] = field(default_factory=dict)
 
     def fit(self, prob: F64, labels: F64, method: str, min_samples: int = 50) -> BinaryCalibrator:
+        """Fit ``method`` (``temperature``, ``platt``, ``isotonic`` or ``none``) in place; return self.
+
+        Falls back to the identity with fewer than ``min_samples`` points or a single class.
+        """
         prob = np.asarray(prob, dtype=np.float64)
         labels = np.asarray(labels, dtype=np.float64)
         if method == "none" or len(prob) < min_samples or labels.min() == labels.max():
@@ -74,6 +80,7 @@ class BinaryCalibrator:
         return self
 
     def transform(self, prob: F64) -> F64:
+        """Apply the fitted calibration to probabilities (identity for ``none``)."""
         prob = np.asarray(prob, dtype=np.float64)
         if self.method == "temperature":
             return _sigmoid(_logit(prob) / self.params["temperature"])
@@ -85,10 +92,12 @@ class BinaryCalibrator:
         return prob
 
     def to_dict(self) -> dict[str, Any]:
+        """JSON-serialisable state."""
         return {"method": self.method, "params": self.params}
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> BinaryCalibrator:
+        """Rebuild a calibrator from :meth:`to_dict` output."""
         return cls(method=str(d["method"]), params=dict(d["params"]))
 
 
@@ -102,6 +111,7 @@ class CalibrationSet:
 
     @classmethod
     def identity(cls, horizons: list[str]) -> CalibrationSet:
+        """Identity (uncalibrated) calibrators for every event task and horizon."""
         return cls(horizons, {t: [BinaryCalibrator() for _ in horizons] for t in CLASSIFICATION_TASKS})
 
     def fit(
@@ -143,6 +153,7 @@ class CalibrationSet:
         return out
 
     def to_dict(self) -> dict[str, Any]:
+        """JSON-serialisable state, including the fit report."""
         return {
             "horizons": self.horizons,
             "calibrators": {t: [c.to_dict() for c in cs] for t, cs in self.calibrators.items()},
@@ -151,6 +162,7 @@ class CalibrationSet:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> CalibrationSet:
+        """Rebuild a calibration set from :meth:`to_dict` output."""
         return cls(
             horizons=list(d["horizons"]),
             calibrators={

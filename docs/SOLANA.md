@@ -21,7 +21,7 @@ flowchart LR
     T --> WI[WalletIntel<br/>funding clusters · hubs]
     MK -->|buys queued, resolved after horizon| REP[Wallet reputations<br/>Beta posterior · rug marks]
     WI --> REP
-    MK & REP --> FB[SolanaFeatureBuilder<br/>53 named features · 1s/5s/30s bars · wallet graph]
+    MK & REP --> FB[SolanaFeatureBuilder<br/>67 named features · 1s/5s/30s bars · wallet graph]
     FB --> NE[Neural ensemble<br/>Transformer · GRU · TCN · MLP · Graph + MoE]
     NE --> EMB[MarketStateEmbedding]
     EMB & FB --> RK[Risk ensemble<br/>P rug · P graduation · P dev dump]
@@ -59,7 +59,7 @@ canonical order (launch → transfer → migration → LP → swap at equal time
 
 ## 3. Features (`features.py`)
 
-53 named current-state features (`CURRENT_FEATURES`):
+67 named current-state features (`CURRENT_FEATURES`):
 
 | Group | Features |
 |---|---|
@@ -71,6 +71,22 @@ canonical order (launch → transfer → migration → LP → swap at equal time
 | Execution competition | priority fees, **Jito tip share**, slot density |
 | Token safety | mint and freeze authority revoked, LP burned fraction |
 | Edge dynamics | bonding-curve velocity, holder growth, smart-buyer share, top-holder sell share, buy acceleration |
+| Runner skill | share of the last minute's buy SOL from wallets with proven **runner skill**, #runner-skilled buyers in 5 min, mean runner skill of the first 20 buyers |
+| Sybil-resistant counts | #holder funding clusters, clusters ÷ holders, #buyer clusters per minute |
+| Creator family | prior launches, best prior peak multiple, prior rug rate, prior graduation rate, time since the family's last launch |
+| Market heat | launches in 10 min, graduations in 1 h, total swap volume in 5 min (all tokens) |
+
+**Runner skill** is a second, separate wallet reputation. A buy in a token's first
+`tail_entry_window` seconds (300) counts as a success if the price later reaches
+`tail_multiple` × the entry price (10x) within `tail_horizon_seconds` (1.5 h). The skill
+is an evidence-shrunk log-lift of the wallet's hit rate over a Beta(0.1, 1.9) prior (base
+rate 5 %). Being good at 60-second scalps and being early to runners are different skills.
+
+A **creator family** is the creator's funder, or the creator itself when the funder is an
+exchange-like hub (more than `hub_threshold` funded wallets). Serial deployers who spin up
+a fresh wallet for every launch from the same source are therefore tracked together. Its
+record covers the family's earlier launches still in memory plus every finished one, with
+peaks measured only up to the snapshot time.
 
 **Trade bars** (fast 1 s × 60, medium 5 s × 48, slow 30 s × 40) carry 10 features each:
 return, realised vol, volume, buy share, #trades, #unique wallets, net flow, liquidity,
@@ -163,7 +179,7 @@ An agent-based simulator used for tests and demos. It is not a market model.
 |---|---|
 | simulate 40 launches (~50 k events) | ~4 s |
 | replay 52 k events into a market | ~0.8 s |
-| build one observation (53 features + 3 bar streams + graph) | ~1 ms |
+| build one observation (features + 3 bar streams + graph) | ~1 ms |
 | dataset from 40 launches (~7.8 k leakage-free snapshots) | ~25 s |
 | `assess_many` 1 / 8 / 32 tokens (tiny 2-member test model) | ~23 / 38 / 74 ms |
 | neural ensemble on held-out snapshots (tiny model) | downside AUC 0.84, return rank-corr 0.13 |

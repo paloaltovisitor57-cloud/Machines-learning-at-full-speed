@@ -9,6 +9,7 @@ Tensor = torch.Tensor
 
 
 def make_activation(name: str) -> nn.Module:
+    """Return the activation module for ``name`` (``gelu`` or ``silu``)."""
     if name == "gelu":
         return nn.GELU()
     if name == "silu":
@@ -31,6 +32,7 @@ class TimeEncoding(nn.Module):
         self.out = nn.Linear(2 * n_frequencies + 1, d_model)
 
     def forward(self, seconds: Tensor) -> Tensor:
+        """Encode offsets in seconds (…) as (…, d_model); negative offsets count as 0."""
         t = torch.log1p(seconds.clamp_min(0.0)).unsqueeze(-1)
         phase = self.freq(t)
         feats = torch.cat([torch.sin(phase), torch.cos(phase), t / 10.0], dim=-1)
@@ -65,6 +67,7 @@ class ResidualBlock(nn.Module):
         self.drop2 = nn.Dropout(dropout)
 
     def forward(self, x: Tensor) -> Tensor:
+        """Apply the block to (…, dim); the shape is unchanged."""
         y = self.fc2(self.drop1(self.act(self.fc1(self.norm(x)))))
         out: Tensor = x + self.drop2(y)
         return out

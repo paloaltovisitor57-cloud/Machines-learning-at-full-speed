@@ -46,14 +46,17 @@ ID_WIDTH = 64
 
 
 def seq_key(name: str, part: str) -> str:
+    """Store key of a sequence array: ``seq.<name>.<part>`` (values, mask or time_deltas)."""
     return f"seq.{name}.{part}"
 
 
 def target_key(task: str) -> str:
+    """Store key of a regression target: ``target.<task>``."""
     return f"target.{task}"
 
 
 def has_graph(arrays: Mapping[str, Array]) -> bool:
+    """True when ``arrays`` carry the ragged graph arrays."""
     return "graph.node_offsets" in arrays
 
 
@@ -136,19 +139,27 @@ class ArrayStore:
 
     @property
     def timestamps(self) -> npt.NDArray[np.float64]:
+        """Observation timestamps as float64, shape (N,)."""
         return np.asarray(self.arrays[KEY_TIMESTAMP], dtype=np.float64)
 
     @property
     def has_targets(self) -> bool:
+        """True when every regression target array is present."""
         return all(target_key(t) in self.arrays for t in REGRESSION_TASKS)
 
     def select(self, indices: Array) -> dict[str, Array]:
+        """Materialise rows ``indices`` as an in-memory array dict (see :func:`select_rows`)."""
         return select_rows(self.arrays, indices)
 
     def subset(self, indices: Array) -> ArrayStore:
+        """New in-memory store holding rows ``indices``."""
         return ArrayStore(self.select(indices))
 
     def validate(self, config: NeuralConfig) -> None:
+        """Check array shapes against ``config``; raises ``ValueError`` on a mismatch.
+
+        Absent timescales and targets are allowed; ``current`` is required.
+        """
         n = len(self)
         cur = self.arrays[KEY_CURRENT]
         if cur.shape != (n, config.features.current_dim):
@@ -168,6 +179,7 @@ class ArrayStore:
 
     # ------------------------------------------------------------------ persistence
     def save(self, directory: str | Path) -> Path:
+        """Write one ``.npy`` per key plus ``manifest.json`` into ``directory``; return its path."""
         path = Path(directory)
         path.mkdir(parents=True, exist_ok=True)
         manifest = {"n": len(self), "keys": sorted(self.arrays)}
@@ -178,6 +190,7 @@ class ArrayStore:
 
     @classmethod
     def load(cls, directory: str | Path, mmap: bool = True) -> ArrayStore:
+        """Open a directory written by :meth:`save`, memory-mapped read-only unless ``mmap=False``."""
         path = Path(directory)
         manifest = json.loads((path / "manifest.json").read_text())
         arrays = {
@@ -188,15 +201,18 @@ class ArrayStore:
 
     @classmethod
     def from_npz(cls, file: str | Path) -> ArrayStore:
+        """Load every array of an ``.npz`` file into memory."""
         with np.load(file, allow_pickle=False) as data:
             return cls({k: data[k] for k in data.files})
 
     def save_npz(self, file: str | Path) -> None:
+        """Write every array to an uncompressed ``.npz`` file."""
         payload: dict[str, Any] = {k: np.asarray(v) for k, v in self.arrays.items()}
         np.savez(file, **payload)
 
     @classmethod
     def from_torch(cls, file: str | Path) -> ArrayStore:
+        """Load a ``.pt`` dict of tensors/arrays (observation ids coerced to unicode)."""
         raw = torch.load(file, map_location="cpu", weights_only=True, mmap=True)
         if not isinstance(raw, dict):
             raise ValueError("a .pt dataset must contain a dict of tensors")
@@ -211,6 +227,7 @@ class ArrayStore:
         return cls(arrays)
 
     def save_torch(self, file: str | Path) -> None:
+        """Save as a ``.pt`` dict of tensors (string arrays stored as lists)."""
         payload: dict[str, Any] = {}
         for key, arr in self.arrays.items():
             a = np.asarray(arr)

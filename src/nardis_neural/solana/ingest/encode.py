@@ -60,6 +60,8 @@ def _transfer_ix(src: str, dst: str, sol: float) -> dict[str, Any]:
 
 
 class TransactionEncoder:
+    """Renders events as synthetic ``getTransaction`` JSON, tracking venues and AMM vault balances."""
+
     def __init__(self) -> None:
         self.n = 0
         self.venue: dict[str, str] = {}
@@ -127,6 +129,9 @@ class TransactionEncoder:
         )
 
     def encode(self, e: Event) -> dict[str, Any] | None:
+        """One transaction for ``e``, or None for an AMM-venue launch (it appears through its first
+        liquidity transaction).  Feed events in time order: vault balances carry over between calls.
+        """
         if isinstance(e, Transfer):
             src, dst = as_pubkey(e.source), as_pubkey(e.dest)
             return self._tx(e, src, [_transfer_ix(src, dst, e.sol_amount)])
@@ -188,6 +193,7 @@ class TransactionEncoder:
 
 
 def events_to_transactions(events: Iterable[Event]) -> list[dict[str, Any]]:
+    """Encode events, sorted by :func:`event_sort_key`, skipping those without a transaction of their own."""
     enc = TransactionEncoder()
     out = []
     for e in sorted(events, key=event_sort_key):

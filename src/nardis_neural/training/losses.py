@@ -30,10 +30,12 @@ Tensor = torch.Tensor
 
 
 def gaussian_nll(mean: Tensor, logvar: Tensor, target: Tensor) -> Tensor:
+    """Elementwise Gaussian NLL ``½(log σ² + (y−μ)²/σ²)`` without the constant term."""
     return 0.5 * (logvar + (target - mean) ** 2 * torch.exp(-logvar))
 
 
 def huber(mean: Tensor, target: Tensor, delta: float) -> Tensor:
+    """Elementwise Huber loss with threshold ``delta``."""
     return F.huber_loss(mean, target, reduction="none", delta=delta)
 
 
@@ -45,6 +47,7 @@ def pinball(quantile_preds: Tensor, target: Tensor, quantiles: Tensor) -> Tensor
 
 
 def focal_loss(logits: Tensor, labels: Tensor, gamma: float, alpha: float | None) -> Tensor:
+    """Elementwise binary focal loss on logits, optionally ``alpha``-balanced."""
     bce = F.binary_cross_entropy_with_logits(logits, labels, reduction="none")
     p = torch.sigmoid(logits)
     p_t = p * labels + (1 - p) * (1 - labels)
@@ -63,6 +66,8 @@ def masked_weighted_mean(values: Tensor, mask: Tensor, sample_weights: Tensor | 
 
 
 class MultiTaskLoss(nn.Module):
+    """Multi-task objective; learned task weights, when enabled, are parameters of the module."""
+
     def __init__(self, config: NeuralConfig, pos_weight: dict[str, Tensor] | None = None) -> None:
         super().__init__()
         self.cfg: LossConfig = config.loss
@@ -78,6 +83,9 @@ class MultiTaskLoss(nn.Module):
         self.pos_weight: dict[str, Tensor] = pos_weight or {}
 
     def regression_term(self, out: ModelOutput, targets: TargetBatch, task: str) -> Tensor:
+        """Elementwise loss of one regression task: Gaussian NLL, or a point loss plus the
+        weighted variance NLL on a detached mean.
+        """
         mean, logvar, y = out.means[task], out.logvars[task], targets.regression[task]
         if self.cfg.regression_loss == "gaussian":
             return gaussian_nll(mean, logvar, y)
@@ -87,6 +95,7 @@ class MultiTaskLoss(nn.Module):
         return point + self.cfg.variance_loss_weight * gaussian_nll(mean.detach(), logvar, y)
 
     def classification_term(self, logits: Tensor, labels: Tensor, task: str) -> Tensor:
+        """Elementwise BCE, weighted BCE or focal loss of one event task."""
         kind = self.cfg.classification_loss
         if kind == "focal":
             return focal_loss(logits, labels, self.cfg.focal_gamma, self.cfg.focal_alpha)
@@ -98,6 +107,9 @@ class MultiTaskLoss(nn.Module):
     def forward(
         self, out: ModelOutput, targets: TargetBatch, sample_weights: Tensor | None = None
     ) -> tuple[Tensor, dict[str, Tensor]]:
+        """Masked, sample-weighted total loss and every component (per task, quantile,
+        supervised, auxiliary losses, total).
+        """
         mask = targets.mask
         components: dict[str, Tensor] = {}
         for task in REGRESSION_TASKS:

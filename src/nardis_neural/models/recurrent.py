@@ -17,6 +17,8 @@ Tensor = torch.Tensor
 
 
 class RecurrentCore(nn.Module):
+    """GRU/LSTM temporal core that runs only over observed steps."""
+
     def __init__(self, d_model: int, cfg: RecurrentConfig, dropout: float) -> None:
         super().__init__()
         rnn_cls = nn.GRU if cfg.cell == "gru" else nn.LSTM
@@ -31,6 +33,7 @@ class RecurrentCore(nn.Module):
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, x: Tensor, mask: Tensor) -> Tensor:
+        """Encode (B, T, D) with a (B, T) mask; unobserved steps output zero."""
         b, t, d = x.shape
         order = torch.argsort((~mask).to(torch.int8), dim=1, stable=True)
         compact = torch.gather(x, 1, order.unsqueeze(-1).expand(b, t, d))

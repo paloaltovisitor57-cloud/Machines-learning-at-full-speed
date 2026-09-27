@@ -28,12 +28,16 @@ Tensor = torch.Tensor
 
 @dataclass
 class GateOutput:
+    """Gate weights (B, E), raw logits (B, E) and the weighted auxiliary losses."""
+
     weights: Tensor  # (B, E), rows sum to 1 over available experts
     logits: Tensor  # (B, E) pre-mask logits
     aux_losses: dict[str, Tensor]
 
 
 class GatingNetwork(nn.Module):
+    """Per-observation softmax gate over experts with anti-collapse regularisers."""
+
     def __init__(self, n_experts: int, d_expert: int, cfg: GatingConfig, dropout: float) -> None:
         super().__init__()
         self.n_experts = n_experts
@@ -51,6 +55,11 @@ class GatingNetwork(nn.Module):
         nn.init.zeros_(last.bias)
 
     def forward(self, latents: Tensor, available: Tensor) -> GateOutput:
+        """Route expert latents (B, E, D) with availability (B, E).
+
+        Unavailable experts get zero weight (all experts are used when none is available);
+        expert dropout and gate noise apply only in training mode.
+        """
         b, e, _ = latents.shape
         if self.training and self.cfg.expert_dropout > 0 and e > 1:
             drop = torch.rand(b, e, device=latents.device) < self.cfg.expert_dropout

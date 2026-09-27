@@ -23,10 +23,12 @@ EPS = 1e-7
 
 
 def brier_score(prob: Array, labels: Array) -> float:
+    """Mean squared error between probabilities and 0/1 labels (NaN if empty)."""
     return float(np.mean((prob - labels) ** 2)) if len(prob) else math.nan
 
 
 def log_loss(prob: Array, labels: Array) -> float:
+    """Mean binary cross-entropy with probabilities clipped away from 0 and 1 (NaN if empty)."""
     if not len(prob):
         return math.nan
     p = np.clip(prob, EPS, 1 - EPS)
@@ -34,6 +36,7 @@ def log_loss(prob: Array, labels: Array) -> float:
 
 
 def reliability_bins(prob: Array, labels: Array, n_bins: int = 10) -> list[dict[str, float]]:
+    """Count, mean confidence and observed frequency per equal-width probability bin."""
     edges = np.linspace(0.0, 1.0, n_bins + 1)
     idx = np.clip(np.digitize(prob, edges[1:-1]), 0, n_bins - 1)
     out = []
@@ -53,6 +56,7 @@ def reliability_bins(prob: Array, labels: Array, n_bins: int = 10) -> list[dict[
 
 
 def expected_calibration_error(prob: Array, labels: Array, n_bins: int = 10) -> float:
+    """Count-weighted mean |confidence − frequency| over reliability bins (NaN if empty)."""
     if not len(prob):
         return math.nan
     total = len(prob)
@@ -64,6 +68,7 @@ def expected_calibration_error(prob: Array, labels: Array, n_bins: int = 10) -> 
 
 
 def roc_auc(prob: Array, labels: Array) -> float:
+    """ROC AUC from the rank-sum statistic (NaN unless both classes are present)."""
     pos = labels > 0.5
     n_pos, n_neg = int(pos.sum()), int((~pos).sum())
     if n_pos == 0 or n_neg == 0:
@@ -73,6 +78,7 @@ def roc_auc(prob: Array, labels: Array) -> float:
 
 
 def rank_correlation(a: Array, b: Array) -> float:
+    """Spearman correlation; 0 for fewer than 3 points, constant inputs or undefined results."""
     if len(a) < 3 or np.std(a) < 1e-12 or np.std(b) < 1e-12:
         return 0.0
     r = stats.spearmanr(a, b).statistic
@@ -80,11 +86,13 @@ def rank_correlation(a: Array, b: Array) -> float:
 
 
 def gaussian_nll_np(mean: Array, std: Array, y: Array) -> float:
+    """Mean Gaussian negative log-likelihood of ``y`` under N(mean, std²), including log 2π."""
     var = np.maximum(std, 1e-8) ** 2
     return float(np.mean(0.5 * (np.log(2 * np.pi * var) + (y - mean) ** 2 / var)))
 
 
 def labels_from_targets(targets: Mapping[str, Array], config: NeuralConfig) -> dict[str, Array]:
+    """Upside/downside event labels (N, H) from real-unit targets and per-horizon thresholds."""
     up = np.array([h.upside_threshold for h in config.targets.horizons])
     down = np.array([h.downside_threshold for h in config.targets.horizons])
     return {

@@ -18,6 +18,7 @@ StepMode = Literal["batch", "epoch", "plateau"]
 def build_optimizer(
     params: Iterable[torch.nn.Parameter], cfg: TrainingConfig, lr: float | None = None
 ) -> Optimizer:
+    """AdamW, Adam or Nesterov SGD over the trainable ``params``; ``lr`` overrides the config."""
     lr = cfg.learning_rate if lr is None else lr
     plist = [p for p in params if p.requires_grad]
     if cfg.optimizer == "adamw":
@@ -28,6 +29,7 @@ def build_optimizer(
 
 
 def warmup_cosine(total_steps: int, warmup_fraction: float, floor: float = 0.05) -> Callable[[int], float]:
+    """LR multiplier: linear warmup, then cosine decay to ``floor`` at ``total_steps``."""
     warmup = max(1, int(total_steps * warmup_fraction))
 
     def fn(step: int) -> float:
@@ -42,6 +44,10 @@ def warmup_cosine(total_steps: int, warmup_fraction: float, floor: float = 0.05)
 def build_scheduler(
     optimizer: Optimizer, cfg: TrainingConfig, total_steps: int, lr: float | None = None
 ) -> tuple[LRScheduler | ReduceLROnPlateau | None, StepMode]:
+    """Configured LR scheduler and its step mode (batch, epoch or plateau).
+
+    The ``constant`` schedule returns (None, "epoch").
+    """
     lr = cfg.learning_rate if lr is None else lr
     total_steps = max(1, total_steps)
     if cfg.scheduler == "cosine":

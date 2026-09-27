@@ -45,6 +45,11 @@ Array = npt.NDArray[Any]
 
 
 class NeuralEngine:
+    """One immutable model version: ensemble, normaliser, calibration, OOD detector and regimes.
+
+    Produces probabilistic :class:`NeuralPrediction` objects only, never trading decisions.
+    """
+
     def __init__(
         self,
         config: NeuralConfig,
@@ -68,13 +73,16 @@ class NeuralEngine:
     # ------------------------------------------------------------------ persistence
     @property
     def version(self) -> str:
+        """Model version from the metadata."""
         return self.metadata.version
 
     @property
     def expert_names(self) -> tuple[str, ...]:
+        """Names of the enabled experts."""
         return self.ensemble.member(0).expert_names
 
     def contents(self) -> CheckpointContents:
+        """The engine's components as :class:`CheckpointContents`."""
         return CheckpointContents(
             self.config,
             self.ensemble,
@@ -86,6 +94,7 @@ class NeuralEngine:
         )
 
     def save(self, path: str | Path, overwrite: bool = False) -> Path:
+        """Write a checkpoint directory to ``path`` and return it."""
         return save_checkpoint(path, self.contents(), overwrite=overwrite)
 
     @classmethod
@@ -195,6 +204,7 @@ class NeuralEngine:
         return out
 
     def predict_arrays(self, arrays: dict[str, Array], mc_samples: int | None = None) -> dict[str, Array]:
+        """Predict canonical row arrays; returns the :meth:`forward_arrays` dict."""
         return self.forward_arrays(arrays_to_batch(arrays, self.config), mc_samples)
 
     def predict_dataset(
@@ -210,6 +220,7 @@ class NeuralEngine:
 
     # ------------------------------------------------------------------ public API
     def predict_batch(self, observations: Sequence[NeuralObservation]) -> list[NeuralPrediction]:
+        """Predict several observations in one pass (empty input → empty list)."""
         if not observations:
             return []
         arrays = observations_to_arrays(observations, self.config)
@@ -217,9 +228,11 @@ class NeuralEngine:
         return self.to_predictions(out)
 
     def predict(self, observation: NeuralObservation) -> NeuralPrediction:
+        """Predict a single observation."""
         return self.predict_batch([observation])[0]
 
     def to_predictions(self, out: dict[str, Array]) -> list[NeuralPrediction]:
+        """Convert a :meth:`forward_arrays` result to one :class:`NeuralPrediction` per row."""
         horizons = self.config.horizon_names
         qs = [f"q{round(q * 100):02d}" for q in self.config.targets.quantiles]
         names = list(self.expert_names)
@@ -270,6 +283,7 @@ class NeuralEngine:
         return preds
 
     def describe(self) -> dict[str, Any]:
+        """Summary of version lineage, architecture, calibration and reference statistics."""
         return {
             "version": self.version,
             "parent_version": self.metadata.parent_version,

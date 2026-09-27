@@ -14,7 +14,7 @@ app = typer.Typer(
 
 SolCfg = Annotated[Path | None, typer.Option("--solana-config", help="Solana YAML config")]
 BaseCfg = Annotated[Path | None, typer.Option("--config", "-c", help="base neural YAML config")]
-DeviceOpt = Annotated[str | None, typer.Option("--device")]
+DeviceOpt = Annotated[str | None, typer.Option("--device", help="cpu | cuda | cuda:0 | mps (default: auto)")]
 
 
 def _sol_cfg(path: Path | None) -> Any:
@@ -28,7 +28,11 @@ def _echo(obj: Any) -> None:
 
 
 @app.command("init-config")
-def init_config(out: Annotated[Path, typer.Option("--out", "-o")] = Path("configs/solana.yaml")) -> None:
+def init_config(
+    out: Annotated[Path, typer.Option("--out", "-o", help="YAML file to write")] = Path(
+        "configs/solana.yaml"
+    ),
+) -> None:
     """Write the default Solana configuration."""
     from nardis_neural.solana.config import SolanaConfig
 
@@ -40,11 +44,15 @@ def init_config(out: Annotated[Path, typer.Option("--out", "-o")] = Path("config
 @app.command()
 def simulate(
     out: Annotated[Path, typer.Option("--out", "-o", help="event directory (Parquet tables)")],
-    tokens: Annotated[int, typer.Option("--tokens")] = 40,
-    seed: Annotated[int, typer.Option("--seed")] = 0,
-    prefix: Annotated[str, typer.Option("--prefix")] = "Mint",
-    start_time: Annotated[float, typer.Option("--start-time")] = 1_750_000_000.0,
-    hours: Annotated[float, typer.Option("--hours")] = 3.0,
+    tokens: Annotated[int, typer.Option("--tokens", help="number of token launches to simulate")] = 40,
+    seed: Annotated[int, typer.Option("--seed", help="random seed")] = 0,
+    prefix: Annotated[
+        str, typer.Option("--prefix", help="mint/wallet name prefix (distinguishes eras)")
+    ] = "Mint",
+    start_time: Annotated[
+        float, typer.Option("--start-time", help="simulation start, unix seconds")
+    ] = 1_750_000_000.0,
+    hours: Annotated[float, typer.Option("--hours", help="simulated duration, hours")] = 3.0,
     market: Annotated[
         str, typer.Option("--market", help="archetype mix: default, or degen (mostly duds + runners)")
     ] = "default",
@@ -79,7 +87,7 @@ def simulate(
 
 @app.command("build-dataset")
 def build_dataset(
-    events: Annotated[Path, typer.Option("--events", "-e")],
+    events: Annotated[Path, typer.Option("--events", "-e", help="event directory (Parquet tables)")],
     out: Annotated[Path, typer.Option("--out", "-o", help="output .npy dataset directory")],
     solana_config: SolCfg = None,
     config: BaseCfg = None,
@@ -106,11 +114,17 @@ def build_dataset(
 
 @app.command()
 def bootstrap(
-    events: Annotated[Path, typer.Option("--events", "-e")],
-    workspace: Annotated[Path, typer.Option("--workspace", "-w")],
+    events: Annotated[
+        Path, typer.Option("--events", "-e", help="historical event directory (Parquet tables)")
+    ],
+    workspace: Annotated[
+        Path, typer.Option("--workspace", "-w", help="Solana workspace directory to create")
+    ],
     solana_config: SolCfg = None,
     config: BaseCfg = None,
-    epochs: Annotated[int | None, typer.Option("--epochs")] = None,
+    epochs: Annotated[
+        int | None, typer.Option("--epochs", help="training epochs (default: from config)")
+    ] = None,
     profile: Annotated[
         str | None, typer.Option("--profile", help="auto | cpu-lite | cpu | gpu | gpu-frontier")
     ] = None,
@@ -144,7 +158,7 @@ def bootstrap(
 
 @app.command()
 def replay(
-    workspace: Annotated[Path, typer.Option("--workspace", "-w")],
+    workspace: Annotated[Path, typer.Option("--workspace", "-w", help="Solana workspace directory")],
     events: Annotated[Path, typer.Option("--events", "-e", help="new events to stream in")],
     every: Annotated[float, typer.Option("--assess-every", help="seconds between assessment rounds")] = 10.0,
     out: Annotated[Path | None, typer.Option("--out", "-o", help="JSONL of assessments")] = None,
@@ -178,8 +192,10 @@ def replay(
 
 @app.command()
 def assess(
-    workspace: Annotated[Path, typer.Option("--workspace", "-w")],
-    mint: Annotated[str | None, typer.Option("--mint", help="default: all recently active tokens")] = None,
+    workspace: Annotated[Path, typer.Option("--workspace", "-w", help="Solana workspace directory")],
+    mint: Annotated[
+        str | None, typer.Option("--mint", help="token mint to assess (default: all recently active tokens)")
+    ] = None,
     device: DeviceOpt = None,
 ) -> None:
     """Assess token(s) at the workspace's current market time."""
@@ -200,7 +216,9 @@ RpcOpt = Annotated[
 def decode(
     input_file: Annotated[Path, typer.Option("--input", "-i", help="JSONL of getTransaction results")],
     out: Annotated[Path, typer.Option("--out", "-o", help="event directory (Parquet tables)")],
-    min_transfer_sol: Annotated[float, typer.Option("--min-transfer-sol")] = 0.05,
+    min_transfer_sol: Annotated[
+        float, typer.Option("--min-transfer-sol", help="ignore SOL transfers below this amount, SOL")
+    ] = 0.05,
 ) -> None:
     """Decode raw Solana transactions (pump.fun, AMMs, SOL transfers) into market events."""
     from nardis_neural.solana.ingest import TransactionDecoder, decode_transactions
@@ -249,15 +267,19 @@ def backfill(
 
 @app.command()
 def stream(
-    workspace: Annotated[Path, typer.Option("--workspace", "-w")],
+    workspace: Annotated[Path, typer.Option("--workspace", "-w", help="Solana workspace directory")],
     rpc: RpcOpt = None,
     out: Annotated[Path | None, typer.Option("--out", "-o", help="append assessments as JSONL")] = None,
     polls: Annotated[
         int | None, typer.Option("--polls", help="stop after N polls (default: run forever)")
     ] = None,
-    poll_interval: Annotated[float, typer.Option("--poll-interval")] = 2.0,
-    assess_every: Annotated[float, typer.Option("--assess-every")] = 10.0,
-    maintenance_every: Annotated[float, typer.Option("--maintenance-every")] = 600.0,
+    poll_interval: Annotated[float, typer.Option("--poll-interval", help="seconds between RPC polls")] = 2.0,
+    assess_every: Annotated[
+        float, typer.Option("--assess-every", help="seconds between assessment rounds")
+    ] = 10.0,
+    maintenance_every: Annotated[
+        float, typer.Option("--maintenance-every", help="seconds between maintenance runs")
+    ] = 600.0,
     device: DeviceOpt = None,
 ) -> None:
     """Stream live chain activity into a Solana workspace (read-only) and emit assessments."""
@@ -282,12 +304,20 @@ def edge_research(
     workspace: Annotated[
         Path, typer.Option("--workspace", "-w", help="Solana workspace (history + champion)")
     ],
-    folds: Annotated[int, typer.Option("--folds")] = 4,
-    take_profit: Annotated[float, typer.Option("--take-profit")] = 0.25,
-    stop_loss: Annotated[float, typer.Option("--stop-loss")] = 0.15,
-    max_hold: Annotated[float, typer.Option("--max-hold", help="seconds")] = 180.0,
+    folds: Annotated[int, typer.Option("--folds", help="walk-forward folds")] = 4,
+    take_profit: Annotated[
+        float, typer.Option("--take-profit", help="take-profit barrier, fractional return (0.25 = +25%)")
+    ] = 0.25,
+    stop_loss: Annotated[
+        float, typer.Option("--stop-loss", help="stop-loss barrier, fractional loss (0.15 = -15%)")
+    ] = 0.15,
+    max_hold: Annotated[
+        float, typer.Option("--max-hold", help="max holding time (time barrier), seconds")
+    ] = 180.0,
     latency: Annotated[float, typer.Option("--latency", help="entry/exit latency, seconds")] = 1.0,
-    max_positions: Annotated[int, typer.Option("--max-positions")] = 5,
+    max_positions: Annotated[
+        int, typer.Option("--max-positions", help="max concurrent open positions in the backtest")
+    ] = 5,
     device: DeviceOpt = None,
 ) -> None:
     """Walk-forward edge research on the workspace history; installs the edge model.
@@ -320,12 +350,18 @@ def moonshot_research(
     ] = "raw",
     size: Annotated[float, typer.Option("--size", help="ticket size, SOL")] = 0.5,
     latency: Annotated[float, typer.Option("--latency", help="entry/exit latency, seconds")] = 1.0,
-    horizon_hours: Annotated[float, typer.Option("--horizon-hours")] = 6.0,
-    max_entry_age: Annotated[float, typer.Option("--max-entry-age", help="seconds after launch")] = 600.0,
+    horizon_hours: Annotated[
+        float, typer.Option("--horizon-hours", help="outcome horizon after entry, hours")
+    ] = 6.0,
+    max_entry_age: Annotated[
+        float, typer.Option("--max-entry-age", help="latest entry after launch, seconds")
+    ] = 600.0,
     min_ev: Annotated[
         float, typer.Option("--min-ev", help="ticket when E[ladder payoff] per SOL is at least this")
     ] = 1.0,
-    test_fraction: Annotated[float, typer.Option("--test-fraction")] = 0.35,
+    test_fraction: Annotated[
+        float, typer.Option("--test-fraction", help="share of later tokens held out for the test")
+    ] = 0.35,
     folds: Annotated[int, typer.Option("--folds", help="walk-forward folds (neural inputs)")] = 4,
     archetypes: Annotated[
         Path | None, typer.Option("--archetypes", help="simulator archetypes.json for diagnostics")
@@ -373,17 +409,25 @@ def _when(value: str) -> float:
 
 @app.command("stream-train")
 def stream_train_cmd(
-    workspace: Annotated[Path, typer.Option("--workspace", "-w")],
+    workspace: Annotated[
+        Path, typer.Option("--workspace", "-w", help="Solana workspace (created if new, else resumed)")
+    ],
     events: Annotated[
         Path | None, typer.Option("--events", "-e", help="stream a saved event directory instead of RPC")
     ] = None,
     rpc: RpcOpt = None,
     start: Annotated[str | None, typer.Option("--start", help="unix seconds or ISO date (RPC mode)")] = None,
     end: Annotated[str | None, typer.Option("--end", help="unix seconds or ISO date (RPC mode)")] = None,
-    segment_minutes: Annotated[float, typer.Option("--segment-minutes")] = 60.0,
+    segment_minutes: Annotated[
+        float, typer.Option("--segment-minutes", help="history segment length, minutes (RPC mode)")
+    ] = 60.0,
     workers: Annotated[int, typer.Option("--workers", help="parallel getTransaction calls")] = 8,
-    warmup_hours: Annotated[float, typer.Option("--warmup-hours")] = 6.0,
-    evict_idle_hours: Annotated[float, typer.Option("--evict-idle-hours")] = 2.0,
+    warmup_hours: Annotated[
+        float, typer.Option("--warmup-hours", help="hours of stream used to bootstrap a new workspace")
+    ] = 6.0,
+    evict_idle_hours: Annotated[
+        float, typer.Option("--evict-idle-hours", help="forget tokens idle this many hours")
+    ] = 2.0,
     solana_config: SolCfg = None,
     config: BaseCfg = None,
     profile: Annotated[

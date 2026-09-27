@@ -24,12 +24,18 @@ Status = Literal["champion", "candidate", "challenger", "retired", "failed"]
 
 
 class StatusChange(BaseModel):
+    """One status transition of a model version, with timestamp and reason."""
+
     status: Status
     at: float = Field(default_factory=time.time)
     reason: str = ""
 
 
 class RegistryEntry(BaseModel):
+    """Registry record of one model version: status, checkpoint path (relative to the root),
+    lineage, status history and validation metrics.
+    """
+
     version: str
     status: Status
     path: str
@@ -42,6 +48,8 @@ class RegistryEntry(BaseModel):
 
 
 class RegistryState(BaseModel):
+    """Persisted registry contents: entries, champion pointer, champion history and audit events."""
+
     entries: dict[str, RegistryEntry] = Field(default_factory=dict)
     champion: str | None = None
     champion_history: list[str] = Field(default_factory=list)
@@ -49,6 +57,11 @@ class RegistryState(BaseModel):
 
 
 class ModelRegistry:
+    """Status pointers over immutable model directories, persisted in ``<root>/registry.json``.
+
+    Existing state is loaded on construction; every transition method saves it.
+    """
+
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
         self.models_dir = self.root / "models"
@@ -63,6 +76,7 @@ class ModelRegistry:
 
     # ------------------------------------------------------------------ persistence
     def save(self) -> None:
+        """Atomically write the registry state to ``registry.json``."""
         tmp = self.file.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(self.state.model_dump(mode="json"), indent=2))
         tmp.replace(self.file)
@@ -72,32 +86,39 @@ class ModelRegistry:
 
     # ------------------------------------------------------------------ queries
     def entry(self, version: str) -> RegistryEntry:
+        """Registry entry of ``version``; raises KeyError if it is unknown."""
         if version not in self.state.entries:
             raise KeyError(f"unknown model version {version}")
         return self.state.entries[version]
 
     def versions(self, status: Status | None = None) -> list[str]:
+        """Registered versions ordered by creation time, optionally only those with ``status``."""
         items = sorted(self.state.entries.values(), key=lambda e: e.created_at)
         return [e.version for e in items if status is None or e.status == status]
 
     @property
     def champion_version(self) -> str | None:
+        """Version id of the current champion, or None."""
         return self.state.champion
 
     @property
     def challenger_version(self) -> str | None:
+        """Most recently created challenger version, or None."""
         ch = self.versions("challenger")
         return ch[-1] if ch else None
 
     def path(self, version: str) -> Path:
+        """Checkpoint directory of ``version``."""
         return self.root / self.entry(version).path
 
     def champion_path(self) -> Path:
+        """Checkpoint directory of the current champion; raises RuntimeError if there is none."""
         if self.state.champion is None:
             raise RuntimeError("registry has no champion")
         return self.path(self.state.champion)
 
     def load_engine(self, version: str, device: torch.device | str | None = None) -> NeuralEngine:
+        """Load ``version`` as a NeuralEngine; raises FileNotFoundError if its weights were pruned."""
         from nardis_neural.inference.engine import NeuralEngine
 
         entry = self.entry(version)
@@ -107,6 +128,11 @@ class ModelRegistry:
 
     # ------------------------------------------------------------------ transitions
     def register(self, engine: NeuralEngine, status: Status = "candidate", reason: str = "") -> RegistryEntry:
+        """Save ``engine`` to ``models/<version>`` and record it with ``status``; returns the entry.
+
+        Versions are immutable, so registering an existing one raises ValueError.  Registering
+        as ``champion`` retires the previous champion.  The registry is persisted.
+        """
         version = engine.version
         if version in self.state.entries:
             raise ValueError(f"version {version} already registered (models are immutable)")
@@ -129,6 +155,11 @@ class ModelRegistry:
         return entry
 
     def set_status(self, version: str, status: Status, reason: str = "") -> None:
+        """Move a non-champion version to ``status`` and persist the registry.
+
+        Making a version challenger retires any other challenger.  ``champion`` is reachable
+        only through promote() or restore(), and the champion's own status cannot change here.
+        """
         if status == "champion":
             raise ValueError("use promote() to make a model champion")
         entry = self.entry(version)
@@ -156,6 +187,10 @@ class ModelRegistry:
         self.state.champion_history.append(version)
 
     def promote(self, version: str, reason: str = "", report: dict[str, Any] | None = None) -> None:
+        """Make a candidate, challenger or retired version champion and persist the registry.
+
+        The previous champion is retired; ``report`` is stored with the audit event.
+        """
         entry = self.entry(version)
         if entry.deleted:
             raise FileNotFoundError(f"cannot promote pruned model {version}")

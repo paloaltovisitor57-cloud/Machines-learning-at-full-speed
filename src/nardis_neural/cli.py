@@ -72,7 +72,11 @@ def hardware() -> None:
 
 
 @app.command("init-config")
-def init_config(out: Annotated[Path, typer.Option("--out", "-o")] = Path("configs/default.yaml")) -> None:
+def init_config(
+    out: Annotated[Path, typer.Option("--out", "-o", help="YAML file to write")] = Path(
+        "configs/default.yaml"
+    ),
+) -> None:
     """Write the default configuration to a YAML file."""
     out.parent.mkdir(parents=True, exist_ok=True)
     NeuralConfig().save(out)
@@ -81,13 +85,18 @@ def init_config(out: Annotated[Path, typer.Option("--out", "-o")] = Path("config
 
 @app.command("generate-synthetic")
 def generate_synthetic_cmd(
-    out: Annotated[Path, typer.Option("--out", "-o")],
-    n: Annotated[int, typer.Option("--n")] = 4000,
-    seed: Annotated[int, typer.Option("--seed")] = 0,
-    fmt: Annotated[str, typer.Option("--format", help="npy | npz | pt | parquet")] = "npy",
-    graph: Annotated[bool, typer.Option("--graph/--no-graph")] = False,
-    drift_shift: Annotated[float, typer.Option("--drift-shift")] = 0.0,
-    start_time: Annotated[float, typer.Option("--start-time")] = 1_700_000_000.0,
+    out: Annotated[Path, typer.Option("--out", "-o", help="output dataset path (file or directory)")],
+    n: Annotated[int, typer.Option("--n", help="number of observations to generate")] = 4000,
+    seed: Annotated[int, typer.Option("--seed", help="random seed")] = 0,
+    fmt: Annotated[str, typer.Option("--format", help="output format: npy | npz | pt | parquet")] = "npy",
+    graph: Annotated[bool, typer.Option("--graph/--no-graph", help="include token-graph features")] = False,
+    drift_shift: Annotated[
+        float,
+        typer.Option("--drift-shift", help="extra drift/volatility in sigmas (simulates distribution shift)"),
+    ] = 0.0,
+    start_time: Annotated[
+        float, typer.Option("--start-time", help="first timestamp, unix seconds")
+    ] = 1_700_000_000.0,
     config: ConfigOpt = None,
 ) -> None:
     """Generate a synthetic multi-regime dataset (testing only, not a market model)."""
@@ -123,13 +132,17 @@ def train(
         Path | None, typer.Option("--workspace", "-w", help="register as champion here")
     ] = None,
     out: Annotated[Path | None, typer.Option("--out", "-o", help="save model directory here")] = None,
-    epochs: Annotated[int | None, typer.Option("--epochs")] = None,
-    ensemble_size: Annotated[int | None, typer.Option("--ensemble-size")] = None,
+    epochs: Annotated[
+        int | None, typer.Option("--epochs", help="training epochs (default: from config)")
+    ] = None,
+    ensemble_size: Annotated[
+        int | None, typer.Option("--ensemble-size", help="ensemble members (default: from config)")
+    ] = None,
     pretrained: Annotated[
         Path | None, typer.Option("--pretrained", help="encoder weights from `pretrain`")
     ] = None,
     run_dir: Annotated[Path | None, typer.Option("--run-dir", help="per-epoch checkpoints / metrics")] = None,
-    resume: Annotated[bool, typer.Option("--resume")] = False,
+    resume: Annotated[bool, typer.Option("--resume", help="resume from checkpoints in --run-dir")] = False,
     profile: ProfileOpt = None,
     device: DeviceOpt = None,
 ) -> None:
@@ -184,9 +197,11 @@ def train(
 @app.command()
 def pretrain(
     data: DataOpt,
-    out: Annotated[Path, typer.Option("--out", "-o")],
+    out: Annotated[Path, typer.Option("--out", "-o", help="file to save the pretrained encoder weights to")],
     config: ConfigOpt = None,
-    epochs: Annotated[int | None, typer.Option("--epochs")] = None,
+    epochs: Annotated[
+        int | None, typer.Option("--epochs", help="pretraining epochs (default: from config)")
+    ] = None,
     device: DeviceOpt = None,
 ) -> None:
     """Self-supervised pretraining of the temporal encoders on (unlabelled) sequences."""
@@ -210,7 +225,9 @@ def pretrain(
 def evaluate(
     model: ModelOpt,
     data: DataOpt,
-    out: Annotated[Path | None, typer.Option("--out", "-o")] = None,
+    out: Annotated[
+        Path | None, typer.Option("--out", "-o", help="also write all metrics as JSON here")
+    ] = None,
     device: DeviceOpt = None,
 ) -> None:
     """Evaluate a model on a labelled dataset (regression, calibration, ranking, tails)."""
@@ -228,7 +245,7 @@ def predict(
     input_file: Annotated[Path | None, typer.Option("--input", "-i", help="JSON observation(s)")] = None,
     data: Annotated[Path | None, typer.Option("--data", "-d", help="dataset to predict")] = None,
     out: Annotated[Path | None, typer.Option("--out", "-o", help="JSONL output")] = None,
-    limit: Annotated[int, typer.Option("--limit")] = 10_000,
+    limit: Annotated[int, typer.Option("--limit", help="max dataset rows to predict (--data only)")] = 10_000,
     device: DeviceOpt = None,
 ) -> None:
     """Predict from JSON observations or a dataset; prints / writes NeuralPrediction JSON."""
@@ -277,9 +294,13 @@ def cluster_regimes(
     model: ModelOpt,
     data: DataOpt,
     method: Annotated[str, typer.Option("--method", help="kmeans | gmm | hdbscan")] = "kmeans",
-    k: Annotated[int | None, typer.Option("--k")] = None,
-    auto_k: Annotated[bool, typer.Option("--auto-k")] = False,
-    out: Annotated[Path | None, typer.Option("--out", "-o")] = None,
+    k: Annotated[int | None, typer.Option("--k", help="number of clusters (default: from config)")] = None,
+    auto_k: Annotated[
+        bool, typer.Option("--auto-k", help="select the number of clusters automatically")
+    ] = False,
+    out: Annotated[
+        Path | None, typer.Option("--out", "-o", help="also write the result as JSON here")
+    ] = None,
     device: DeviceOpt = None,
 ) -> None:
     """Discover latent regimes from embeddings and report per-cluster statistics."""
@@ -341,7 +362,7 @@ def adapt(
 def full_retrain(
     workspace: WorkspaceOpt,
     data: Annotated[Path | None, typer.Option("--data", "-d", help="extra external dataset")] = None,
-    force: Annotated[bool, typer.Option("--force")] = False,
+    force: Annotated[bool, typer.Option("--force", help="retrain even if not due")] = False,
     device: DeviceOpt = None,
 ) -> None:
     """Train a fresh ensemble on weighted recent/historical/rare/difficult data."""
@@ -359,7 +380,9 @@ def shadow_evaluate(
     data: Annotated[
         Path | None, typer.Option("--data", "-d", help="labelled data to replay in shadow")
     ] = None,
-    out: Annotated[Path | None, typer.Option("--out", "-o")] = None,
+    out: Annotated[
+        Path | None, typer.Option("--out", "-o", help="also write the full report as JSON here")
+    ] = None,
     device: DeviceOpt = None,
 ) -> None:
     """Compare challenger vs champion on shadow predictions (optionally replaying a dataset)."""
@@ -414,7 +437,9 @@ def rollback_cmd(
     to: Annotated[
         str | None, typer.Option("--to", help="version to restore (default: previous champion)")
     ] = None,
-    reason: Annotated[str, typer.Option("--reason")] = "manual rollback",
+    reason: Annotated[
+        str, typer.Option("--reason", help="reason recorded in the registry")
+    ] = "manual rollback",
 ) -> None:
     """Restore a previous champion (weights, normaliser, calibration, config, ensemble)."""
     from nardis_neural.training.continual import ContinualLearner
@@ -427,9 +452,11 @@ def rollback_cmd(
 @app.command("drift-report")
 def drift_report_cmd(
     model: ModelOpt,
-    reference: Annotated[Path, typer.Option("--reference", "-r")],
-    current: Annotated[Path, typer.Option("--current", "-k")],
-    out: Annotated[Path | None, typer.Option("--out", "-o")] = None,
+    reference: Annotated[Path, typer.Option("--reference", "-r", help="reference (baseline) dataset")],
+    current: Annotated[Path, typer.Option("--current", "-k", help="current dataset to compare")],
+    out: Annotated[
+        Path | None, typer.Option("--out", "-o", help="also write the full report as JSON here")
+    ] = None,
     device: DeviceOpt = None,
 ) -> None:
     """Input, embedding, prediction and error drift between two datasets."""
@@ -468,9 +495,13 @@ def status(workspace: WorkspaceOpt) -> None:
 def benchmark(
     model: ModelOpt,
     data: DataOpt,
-    batch_sizes: Annotated[str, typer.Option("--batch-sizes")] = "1,32,256",
+    batch_sizes: Annotated[
+        str, typer.Option("--batch-sizes", help="comma-separated batch sizes")
+    ] = "1,32,256",
     mc_samples: Annotated[int | None, typer.Option("--mc-samples", help="override MC-dropout passes")] = None,
-    out: Annotated[Path | None, typer.Option("--out", "-o")] = None,
+    out: Annotated[
+        Path | None, typer.Option("--out", "-o", help="also write the results as JSON here")
+    ] = None,
     device: DeviceOpt = None,
 ) -> None:
     """Measure inference latency, throughput and memory."""

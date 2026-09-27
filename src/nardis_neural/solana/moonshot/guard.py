@@ -25,19 +25,28 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class GuardConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    """Hard-veto thresholds of the moonshot manipulation guard."""
+
+    model_config = ConfigDict(extra="forbid", use_attribute_docstrings=True)
 
     veto_rug_probability: float = Field(default=0.6, ge=0, le=1)
+    """Veto when the predicted rug probability is at least this."""
     veto_bundle_share: float = Field(default=0.2, ge=0, le=1)
+    """Veto when bundled early wallets hold at least this share of supply."""
     veto_creator_cluster_share: float = Field(default=0.3, ge=0, le=1)
+    """Veto when the creator's wallet cluster holds at least this share of supply."""
     veto_bot_share: float = Field(default=0.8, ge=0, le=1)
+    """Veto when at least this share of the last 60 s's traders are bots (wash trading)."""
     veto_ood_score: float = Field(default=4.0, gt=0)
+    """Veto when the out-of-distribution score of the market state is at least this."""
     veto_out_of_range_share: float = Field(default=0.25, gt=0, le=1)
     """Veto when this share of the inputs lies outside anything seen in training."""
 
 
 @dataclass(frozen=True)
 class GuardVerdict:
+    """Guard result: ``trust`` in [0, 1], human-readable vetoes and every trust factor."""
+
     trust: float
     vetoes: list[str]
     factors: dict[str, float]
@@ -60,6 +69,12 @@ def assess_manipulation(
     out_of_range_share: float,
     cfg: GuardConfig | None = None,
 ) -> GuardVerdict:
+    """Trust and vetoes for one token from its named features, P(rug), OOD score, ensemble
+    disagreement and out-of-range input share.
+
+    ``trust`` is the product of monotone factors in [0, 1]; a ``rug_probability`` of None (no risk
+    model) adds neither a penalty nor a veto.
+    """
     cfg = cfg or GuardConfig()
     factors = {
         "rug": 1.0 - rug_probability if rug_probability is not None else 1.0,

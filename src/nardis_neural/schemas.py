@@ -34,7 +34,7 @@ def _as_float_array(value: Any, ndim: int, name: str) -> FloatArray:
 class SequenceInput(BaseModel):
     """One temporal stream for one observation."""
 
-    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True, use_attribute_docstrings=True)
 
     values: FloatArray
     """(T, F) feature matrix, oldest row first."""
@@ -76,7 +76,7 @@ class SequenceInput(BaseModel):
 class GraphInput(BaseModel):
     """Optional relational context (e.g. wallet→token, wallet→wallet, token→token)."""
 
-    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True, use_attribute_docstrings=True)
 
     node_features: FloatArray
     """(N, F_node)."""
@@ -122,7 +122,7 @@ class GraphInput(BaseModel):
 class NeuralObservation(BaseModel):
     """Market state at one instant, expressed as generic tensors."""
 
-    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True, use_attribute_docstrings=True)
 
     observation_id: str
     timestamp: float
@@ -141,9 +141,11 @@ class NeuralObservation(BaseModel):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> NeuralObservation:
+        """Validate a plain dict (e.g. parsed JSON) into an observation."""
         return cls.model_validate(data)
 
     def to_dict(self) -> dict[str, Any]:
+        """JSON-serialisable dict of the observation (arrays become nested lists)."""
         seqs: dict[str, Any] = {}
         for name, s in self.sequences.items():
             seqs[name] = {
@@ -184,6 +186,7 @@ class NeuralOutcome(BaseModel):
     resolved_at: float = Field(default_factory=time.time)
 
     def task_values(self, task: str) -> dict[str, float]:
+        """Horizon name → realised value for regression ``task`` (``KeyError`` for unknown tasks)."""
         mapping = {
             "return": self.returns,
             "max_upside": self.max_upside,

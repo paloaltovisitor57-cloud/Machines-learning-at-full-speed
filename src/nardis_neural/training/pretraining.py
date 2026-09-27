@@ -39,6 +39,8 @@ Tensor = torch.Tensor
 
 
 class PretrainHeads(nn.Module):
+    """Reconstruction heads per (sequence expert, timescale) and projection heads per expert."""
+
     def __init__(self, model: NardisNeuralNetwork, config: NeuralConfig) -> None:
         super().__init__()
         d = config.model.d_model
@@ -58,6 +60,7 @@ class PretrainHeads(nn.Module):
 
 
 def nt_xent(z1: Tensor, z2: Tensor, temperature: float) -> Tensor:
+    """NT-Xent (InfoNCE) loss with ``z1[i]`` and ``z2[i]`` as the positive pair."""
     z = F.normalize(torch.cat([z1, z2]), dim=-1)
     sim = z @ z.T / temperature
     n = z1.shape[0]
@@ -67,6 +70,7 @@ def nt_xent(z1: Tensor, z2: Tensor, temperature: float) -> Tensor:
 
 
 def augment(batch: Batch, cfg: PretrainConfig, generator: torch.Generator | None = None) -> Batch:
+    """Copy of the batch with sequences jittered, rescaled and ~10% of steps dropped."""
     seqs = {}
     for name, s in batch.sequences.items():
         noise = (
@@ -81,6 +85,8 @@ def augment(batch: Batch, cfg: PretrainConfig, generator: torch.Generator | None
 
 @dataclass
 class PretrainResult:
+    """Per-epoch pretraining loss history and wall-clock seconds."""
+
     history: list[dict[str, float]] = field(default_factory=list)
     seconds: float = 0.0
 
@@ -88,6 +94,10 @@ class PretrainResult:
 def pretrain_step(
     model: NardisNeuralNetwork, heads: PretrainHeads, batch: Batch, cfg: PretrainConfig
 ) -> tuple[Tensor, dict[str, float]]:
+    """Self-supervised loss of one normalised batch over all experts, timescales and tasks.
+
+    Returns the total loss tensor and each component as a float.
+    """
     comps: dict[str, Tensor] = {}
     total = torch.zeros((), device=batch.device)
     experts = model.sequence_experts()
@@ -134,6 +144,10 @@ def pretrain_encoders(
     max_batches_per_epoch: int | None = None,
     log: Callable[[str], None] | None = None,
 ) -> tuple[NardisNeuralNetwork, PretrainResult]:
+    """Pretrain the sequence experts of ``model`` (a new network by default) in place.
+
+    Returns the model in eval mode and the loss history.
+    """
     pc = config.pretrain
     dev = device or resolve_device(config.training.device)
     set_seed(config.training.seed)
@@ -172,6 +186,7 @@ def pretrain_encoders(
 def save_pretrained(
     path: str | Path, model: NardisNeuralNetwork, result: PretrainResult, config: NeuralConfig
 ) -> None:
+    """Save the ``experts.*`` weights, loss history and config to ``path`` with torch.save."""
     payload: dict[str, Any] = {
         "state_dict": {
             k: v.detach().cpu() for k, v in model.state_dict().items() if k.startswith("experts.")
@@ -183,6 +198,7 @@ def save_pretrained(
 
 
 def load_pretrained(path: str | Path) -> dict[str, Tensor]:
+    """Load the expert state dict written by save_pretrained()."""
     payload = torch.load(path, map_location="cpu", weights_only=True)
     state = payload["state_dict"]
     assert isinstance(state, dict)

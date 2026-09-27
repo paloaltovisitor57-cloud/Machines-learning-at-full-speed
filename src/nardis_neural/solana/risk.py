@@ -51,12 +51,16 @@ class _RiskNet(nn.Module):
 
 @dataclass
 class RiskFitReport:
+    """Training / validation row counts and per-label validation metrics."""
+
     n_train: int
     n_validation: int
     metrics: dict[str, dict[str, float]]
 
 
 class SolanaRiskModel:
+    """Deep ensemble of multi-label MLPs for P(rug), P(graduation) and P(dev dump), calibrated per label."""
+
     def __init__(
         self, d_in: int, members: int = 3, hidden: int = 64, dropout: float = 0.1, seed: int = 0
     ) -> None:
@@ -73,6 +77,7 @@ class SolanaRiskModel:
 
     @staticmethod
     def inputs(embedding: npt.NDArray[Any], current: npt.NDArray[Any]) -> F32:
+        """Model inputs: neural embedding concatenated with the current features, NaN replaced by 0."""
         return np.asarray(np.nan_to_num(np.concatenate([embedding, current], axis=1)), dtype=np.float32)
 
     def _x(self, x: F32) -> torch.Tensor:
@@ -167,6 +172,7 @@ class SolanaRiskModel:
         return cal, members.std(axis=0)
 
     def save(self, directory: str | Path) -> None:
+        """Write members, scaler and ``risk.json`` (calibrators, report) to ``directory``."""
         d = Path(directory)
         d.mkdir(parents=True, exist_ok=True)
         torch.save({f"m{i}": m.state_dict() for i, m in enumerate(self.members)}, d / "members.pt")
@@ -185,6 +191,7 @@ class SolanaRiskModel:
 
     @classmethod
     def load(cls, directory: str | Path) -> SolanaRiskModel:
+        """Load a model written by :meth:`save`."""
         d = Path(directory)
         meta = json.loads((d / "risk.json").read_text())
         model = cls(

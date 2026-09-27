@@ -31,11 +31,14 @@ Tensor = torch.Tensor
 
 @dataclass
 class SequenceBatch:
+    """One timescale's padded steps: values (B, T, F), observed mask (B, T), ages in seconds (B, T)."""
+
     values: Tensor  # (B, T, F) float
     mask: Tensor  # (B, T) bool, True = observed
     time_deltas: Tensor  # (B, T) seconds before observation time
 
     def to(self, device: torch.device) -> SequenceBatch:
+        """Copy to ``device`` (non-blocking)."""
         return SequenceBatch(
             self.values.to(device, non_blocking=True),
             self.mask.to(device, non_blocking=True),
@@ -50,6 +53,8 @@ class SequenceBatch:
 
 @dataclass
 class GraphBatch:
+    """A batch's ego-graphs merged into one disjoint graph with global node indices."""
+
     node_features: Tensor  # (N_total, F_node)
     edge_index: Tensor  # (2, E_total) global node indices
     edge_type: Tensor  # (E_total,)
@@ -57,6 +62,7 @@ class GraphBatch:
     target_node: Tensor  # (B,) global index of target node, -1 when the sample has no graph
 
     def to(self, device: torch.device) -> GraphBatch:
+        """Copy all tensors to ``device``."""
         return GraphBatch(
             self.node_features.to(device),
             self.edge_index.to(device),
@@ -67,16 +73,20 @@ class GraphBatch:
 
     @property
     def available(self) -> Tensor:
+        """(B,) True where the sample has a target node in the graph."""
         return self.target_node >= 0
 
 
 @dataclass
 class TargetBatch:
+    """Regression targets and derived event labels, each (B, H), plus a (B, H) validity mask."""
+
     regression: dict[str, Tensor]  # task -> (B, H)
     labels: dict[str, Tensor]  # task -> (B, H) float {0, 1}
     mask: Tensor  # (B, H) bool
 
     def to(self, device: torch.device) -> TargetBatch:
+        """Copy all tensors to ``device``."""
         return TargetBatch(
             {k: v.to(device) for k, v in self.regression.items()},
             {k: v.to(device) for k, v in self.labels.items()},
@@ -86,6 +96,12 @@ class TargetBatch:
 
 @dataclass
 class Batch:
+    """A collated batch: current features, per-timescale sequences and optional graph/targets.
+
+    ``normalized`` is set by :meth:`FeatureNormalizer.transform_batch`; the network only
+    accepts normalised batches.
+    """
+
     current: Tensor  # (B, F)
     sequences: dict[str, SequenceBatch]
     observation_ids: list[str]
@@ -99,13 +115,16 @@ class Batch:
 
     @property
     def size(self) -> int:
+        """Number of samples B."""
         return int(self.current.shape[0])
 
     @property
     def device(self) -> torch.device:
+        """Device of the batch tensors (that of ``current``)."""
         return self.current.device
 
     def to(self, device: torch.device) -> Batch:
+        """Copy with every tensor moved to ``device``; NumPy fields are shared."""
         return replace(
             self,
             current=self.current.to(device, non_blocking=True),
@@ -233,13 +252,16 @@ class MarketDataset(Dataset[Batch]):
 
     @property
     def timestamps(self) -> npt.NDArray[np.float64]:
+        """Timestamps of the dataset's rows, in dataset order."""
         return self.store.timestamps[self.indices]
 
     def subset(self, positions: npt.NDArray[np.int64]) -> MarketDataset:
+        """Dataset over ``positions`` of this one (same store; sample weights carried over)."""
         w = None if self.sample_weights is None else self.sample_weights[positions]
         return MarketDataset(self.store, self.config, self.indices[positions], w)
 
     def target_array(self, task: str) -> npt.NDArray[np.float32]:
+        """Raw ``target.<task>`` values of the dataset's rows, shape (N, H)."""
         return np.asarray(self.store[target_key(task)][self.indices], dtype=np.float32)
 
 
@@ -299,6 +321,10 @@ def make_loader(
     weights: npt.NDArray[np.float64] | None = None,
     max_batches: int | None = None,
 ) -> DataLoader[Batch]:
+    """``DataLoader`` yielding whole :class:`Batch` objects drawn by a :class:`BatchIndexSampler`.
+
+    ``weights`` switches to weighted sampling with replacement; ``max_batches`` caps an epoch.
+    """
     sampler = BatchIndexSampler(
         len(dataset), batch_size, shuffle=shuffle, weights=weights, seed=seed, max_batches=max_batches
     )

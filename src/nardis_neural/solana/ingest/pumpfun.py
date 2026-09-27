@@ -52,6 +52,7 @@ JITO_TIP_ACCOUNTS: frozenset[str] = frozenset(
 
 
 def discriminator(name: str) -> bytes:
+    """Anchor event discriminator: the first 8 bytes of ``sha256("event:<name>")``."""
     return hashlib.sha256(f"event:{name}".encode()).digest()[:8]
 
 
@@ -62,6 +63,8 @@ COMPLETE_DISC = discriminator("CompleteEvent")
 
 @dataclass(frozen=True)
 class PumpTrade:
+    """pump.fun ``TradeEvent``: amounts in lamports / raw token units, virtual reserves after the trade."""
+
     mint: str
     sol_lamports: int
     token_units: int
@@ -74,6 +77,8 @@ class PumpTrade:
 
 @dataclass(frozen=True)
 class PumpCreate:
+    """pump.fun ``CreateEvent``: token metadata, mint, bonding curve and creator."""
+
     name: str
     symbol: str
     uri: str
@@ -84,6 +89,8 @@ class PumpCreate:
 
 @dataclass(frozen=True)
 class PumpComplete:
+    """pump.fun ``CompleteEvent``: the bonding curve of ``mint`` completed."""
+
     user: str
     mint: str
     bonding_curve: str
@@ -134,6 +141,7 @@ def decode_event(payload: bytes) -> PumpEvent | None:
 
 
 def decode_log_events(logs: list[str]) -> list[PumpEvent]:
+    """pump.fun events in a transaction's ``Program data:`` log lines; other or corrupt lines are skipped."""
     out: list[PumpEvent] = []
     for line in logs:
         if not line.startswith("Program data: "):

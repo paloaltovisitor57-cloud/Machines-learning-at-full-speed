@@ -41,19 +41,26 @@ Tensor = torch.Tensor
 
 @dataclass
 class ExpertOutput:
+    """An expert's latent (B, D), availability (B,) and optional diagnostic tensors."""
+
     latent: Tensor  # (B, D)
     available: Tensor  # (B,) bool
     extras: dict[str, Tensor] = field(default_factory=dict)
 
 
 class Expert(nn.Module):
+    """Base class of the expert pathways: ``forward(batch) -> ExpertOutput``."""
+
     name: str = "expert"
 
     def forward(self, batch: Batch) -> ExpertOutput:  # pragma: no cover - interface
+        """Encode ``batch``; implemented by subclasses."""
         raise NotImplementedError
 
 
 class TabularExpert(Expert):
+    """Expert over the current-state feature vector (always available)."""
+
     name = "tabular"
 
     def __init__(self, config: NeuralConfig) -> None:
@@ -63,6 +70,7 @@ class TabularExpert(Expert):
         self.norm = nn.LayerNorm(mc.d_model)
 
     def forward(self, batch: Batch) -> ExpertOutput:
+        """Latent (B, D) from ``batch.current``; every sample is available."""
         latent = self.norm(self.mlp(batch.current))
         available = torch.ones(batch.size, dtype=torch.bool, device=latent.device)
         return ExpertOutput(latent=latent, available=available)
@@ -108,6 +116,7 @@ class SequenceExpert(Expert):
         self.missing = nn.Parameter(torch.zeros(d))
 
     def core_for(self, timescale: str) -> nn.Module:
+        """Temporal core used for ``timescale`` (the shared core unless per-timescale)."""
         return self.core if self.shared else self.cores[timescale]
 
     def embed_inputs(self, timescale: str, seq: SequenceBatch) -> Tensor:
@@ -128,6 +137,7 @@ class SequenceExpert(Expert):
         return h
 
     def summarize(self, h: Tensor, mask: Tensor) -> Tensor:
+        """Pool steps (B, T, D) to (B, D) from the last observed step and the masked mean."""
         out: Tensor = self.pool(torch.cat([last_valid(h, mask), masked_mean(h, mask)], dim=-1))
         return out
 
@@ -169,6 +179,11 @@ class SequenceExpert(Expert):
         return torch.stack(tokens, dim=1), torch.stack(avail, dim=1)
 
     def forward(self, batch: Batch) -> ExpertOutput:
+        """Fuse per-timescale summaries into a latent (B, D).
+
+        Samples without any observed timescale get the learned missing vector and are marked
+        unavailable; ``extras['timescale_weights']`` holds the (B, S) fusion weights.
+        """
         tokens, avail = self.encode_timescales(batch)
         fused, weights = self.fusion(tokens, avail)
         available = avail.any(dim=1)
@@ -177,6 +192,8 @@ class SequenceExpert(Expert):
 
 
 class GraphExpert(Expert):
+    """Expert over per-observation relational ego-graphs."""
+
     name = "graph"
 
     def __init__(self, config: NeuralConfig) -> None:
@@ -187,6 +204,7 @@ class GraphExpert(Expert):
         self.missing = nn.Parameter(torch.zeros(mc.d_model))
 
     def forward(self, batch: Batch) -> ExpertOutput:
+        """Latent (B, D) per sample graph; samples without one get the learned missing vector."""
         b = batch.size
         g = batch.graph
         if g is None:
@@ -201,6 +219,7 @@ class GraphExpert(Expert):
 
 
 def build_expert(name: str, config: NeuralConfig) -> Expert:
+    """Create the expert ``name``: ``tabular``, ``graph`` or a sequence core kind."""
     if name == "tabular":
         return TabularExpert(config)
     if name == "graph":

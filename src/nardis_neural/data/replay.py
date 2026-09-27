@@ -47,6 +47,8 @@ Pool = Literal["all", "recent", "historical", "rare"]
 
 @dataclass
 class Experience:
+    """A resolved observation (features + realised targets) with its prediction metadata."""
+
     observation_id: str
     timestamp: float
     row: dict[str, Array]
@@ -61,10 +63,12 @@ class Experience:
     seq: int = -1
 
     def target(self, task: str) -> npt.NDArray[np.float32]:
+        """Realised ``task`` values of this row, shape (H,)."""
         return np.asarray(self.row[target_key(task)][0], dtype=np.float32)
 
     @property
     def magnitude(self) -> float:
+        """Largest |return| or max drawdown over valid horizons (0 when none is valid)."""
         mask = np.asarray(self.row[KEY_TARGET_MASK][0], dtype=bool)
         if not mask.any():
             return 0.0
@@ -82,6 +86,11 @@ class Experience:
         embedding: Sequence[float] | None = None,
         regime: int | None = None,
     ) -> Experience:
+        """Build an experience from an observation and its outcome (``ValueError`` if ids differ).
+
+        ``is_rare`` comes from ``replay.rare_return_threshold`` and ``priority`` from the
+        standardised error of ``prediction`` (None when unavailable).
+        """
         if outcome.observation_id != observation.observation_id:
             raise ValueError("outcome does not belong to this observation")
         row = observations_to_arrays([observation], config) | outcomes_to_arrays([outcome], config)
@@ -118,6 +127,8 @@ def prediction_error_priority(
 
 
 class ExperienceReplayBuffer:
+    """Replay memory with recent, historical (reservoir) and rare pools."""
+
     def __init__(self, cfg: ReplayConfig) -> None:
         self.cfg = cfg
         self.rng = np.random.default_rng(cfg.seed)
@@ -130,6 +141,11 @@ class ExperienceReplayBuffer:
 
     # ------------------------------------------------------------------ insertion
     def add(self, exp: Experience) -> Experience:
+        """Insert ``exp`` and return it; assigns its ``seq`` and, if unset, the max priority.
+
+        Overflow of the recent FIFO is offered to the historical reservoir; rare experiences
+        are also kept in the rare pool.
+        """
         exp.seq = self.next_seq
         self.next_seq += 1
         if exp.priority is None:
@@ -143,6 +159,7 @@ class ExperienceReplayBuffer:
         return exp
 
     def extend(self, experiences: Iterable[Experience]) -> None:
+        """Add each experience in order."""
         for e in experiences:
             self.add(e)
 
@@ -163,6 +180,7 @@ class ExperienceReplayBuffer:
 
     # ------------------------------------------------------------------ access
     def all(self) -> list[Experience]:
+        """Unique experiences across all pools, sorted by (timestamp, seq)."""
         uniq = {e.seq: e for pool in (self.historical, list(self.recent), self.rare) for e in pool}
         return sorted(uniq.values(), key=lambda e: (e.timestamp, e.seq))
 
@@ -170,6 +188,7 @@ class ExperienceReplayBuffer:
         return len({e.seq for pool in (self.historical, list(self.recent), self.rare) for e in pool})
 
     def pool(self, name: Pool) -> list[Experience]:
+        """Copy of one pool's items (``all`` → :meth:`all`)."""
         if name == "recent":
             return list(self.recent)
         if name == "historical":
@@ -179,6 +198,7 @@ class ExperienceReplayBuffer:
         return self.all()
 
     def update_priorities(self, seqs: Sequence[int], priorities: Sequence[float]) -> None:
+        """Set priorities by ``seq`` and update the running max priority."""
         lookup = dict(zip(seqs, priorities, strict=True))
         for e in self.all():
             if e.seq in lookup:
@@ -189,6 +209,7 @@ class ExperienceReplayBuffer:
     def probabilities(
         self, items: Sequence[Experience], strategy: Strategy, now: float | None = None
     ) -> npt.NDArray[np.float64]:
+        """Sampling probabilities of ``items`` under ``strategy`` (uniform if all weights are 0)."""
         n = len(items)
         if n == 0:
             return np.zeros(0)
@@ -276,15 +297,18 @@ class ExperienceReplayBuffer:
     # ------------------------------------------------------------------ conversion
     @staticmethod
     def to_arrays(experiences: Sequence[Experience]) -> dict[str, Array]:
+        """Concatenate the experiences' rows into one canonical array dict."""
         if not experiences:
             raise ValueError("no experiences")
         return concat_arrays([e.row for e in experiences])
 
     def to_store(self, experiences: Sequence[Experience] | None = None) -> ArrayStore:
+        """In-memory :class:`ArrayStore` of ``experiences`` (default: every buffered experience)."""
         return ArrayStore(self.to_arrays(self.all() if experiences is None else experiences))
 
     # ------------------------------------------------------------------ persistence
     def save(self, directory: str | Path) -> Path:
+        """Persist rows, metadata, embeddings and pool state to ``directory``."""
         path = Path(directory)
         path.mkdir(parents=True, exist_ok=True)
         items = self.all()
@@ -331,6 +355,7 @@ class ExperienceReplayBuffer:
 
     @classmethod
     def load(cls, directory: str | Path, cfg: ReplayConfig) -> ExperienceReplayBuffer:
+        """Restore a buffer written by :meth:`save` (empty if nothing was saved)."""
         path = Path(directory)
         buf = cls(cfg)
         if not (path / "state.json").exists():

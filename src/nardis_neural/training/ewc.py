@@ -22,6 +22,8 @@ Tensor = torch.Tensor
 
 
 class EWCPenalty:
+    """EWC penalty ``λ/2 · Σ_i F_i (θ_i − θ*_i)²`` around anchor parameters θ*."""
+
     def __init__(self, anchor: dict[str, Tensor], fisher: dict[str, Tensor], weight: float) -> None:
         self.anchor = anchor
         self.fisher = fisher
@@ -68,6 +70,7 @@ class EWCPenalty:
         return cls(anchor, fisher, weight)
 
     def to(self, device: torch.device) -> EWCPenalty:
+        """Move anchor and Fisher tensors to ``device``; returns self."""
         self.anchor = {k: v.to(device) for k, v in self.anchor.items()}
         self.fisher = {k: v.to(device) for k, v in self.fisher.items()}
         return self
@@ -84,4 +87,5 @@ class EWCPenalty:
         return 0.5 * self.weight * penalty
 
     def state_dict(self) -> dict[str, dict[str, Tensor] | float]:
+        """Anchor parameters, Fisher information and weight."""
         return {"anchor": self.anchor, "fisher": self.fisher, "weight": self.weight}

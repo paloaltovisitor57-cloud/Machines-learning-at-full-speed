@@ -34,6 +34,8 @@ class ModelOutput:
 
 
 class NardisNeuralNetwork(nn.Module):
+    """Experts → dynamic gate → expert mixture → MarketStateEmbedding → task heads."""
+
     def __init__(self, config: NeuralConfig) -> None:
         super().__init__()
         self.config = config
@@ -60,9 +62,14 @@ class NardisNeuralNetwork(nn.Module):
         self.disabled_experts = set(names or set())
 
     def sequence_experts(self) -> dict[str, SequenceExpert]:
+        """The enabled sequence (temporal) experts by name."""
         return {n: e for n, e in self.experts.items() if isinstance(e, SequenceExpert)}
 
     def run_experts(self, batch: Batch) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
+        """Run every expert: latents (B, E, D), availability (B, E), timescale weights per expert.
+
+        Disabled experts are reported as unavailable.
+        """
         latents, avail = [], []
         ts_weights: dict[str, Tensor] = {}
         for name in self.expert_names:
@@ -79,6 +86,7 @@ class NardisNeuralNetwork(nn.Module):
         return torch.stack(latents, dim=1), torch.stack(avail, dim=1), ts_weights
 
     def forward(self, batch: Batch) -> ModelOutput:
+        """Full forward pass; ``ValueError`` unless ``batch`` is normalised."""
         if not batch.normalized:
             raise ValueError(
                 "NardisNeuralNetwork expects a normalised batch (FeatureNormalizer.transform_batch)"
@@ -110,4 +118,5 @@ class NardisNeuralNetwork(nn.Module):
         )
 
     def parameter_count(self) -> int:
+        """Total number of parameters."""
         return sum(p.numel() for p in self.parameters())

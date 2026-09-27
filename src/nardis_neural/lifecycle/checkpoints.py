@@ -41,6 +41,7 @@ FORMAT_VERSION = 1
 
 
 def git_commit() -> str | None:
+    """HEAD commit of the source checkout, or None when git or the repository is unavailable."""
     try:
         out = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -57,11 +58,13 @@ def git_commit() -> str | None:
 
 
 def new_version_id(prefix: str = "m") -> str:
+    """New unique version id ``<prefix>-<UTC %Y%m%dT%H%M%S>-<6 hex chars>``."""
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
     return f"{prefix}-{stamp}-{uuid.uuid4().hex[:6]}"
 
 
 def target_definitions(config: NeuralConfig) -> dict[str, Any]:
+    """Human-readable definitions of every target, event label and horizon (in seconds)."""
     return {
         "regression": {
             "return": "log(price[t+h] / price[t])",
@@ -79,6 +82,8 @@ def target_definitions(config: NeuralConfig) -> dict[str, Any]:
 
 
 class ModelMetadata(BaseModel):
+    """Checkpoint manifest (``manifest.json``): lineage, provenance, statistics and versions."""
+
     version: str
     parent_version: str | None = None
     created_at: float = Field(default_factory=time.time)
@@ -99,11 +104,14 @@ class ModelMetadata(BaseModel):
 
     @property
     def created_at_iso(self) -> str:
+        """``created_at`` as an ISO-8601 UTC string."""
         return datetime.fromtimestamp(self.created_at, UTC).isoformat()
 
 
 @dataclass
 class CheckpointContents:
+    """Everything a checkpoint directory holds, as loaded objects."""
+
     config: NeuralConfig
     ensemble: DeepEnsemble
     normalizer: FeatureNormalizer
@@ -118,6 +126,12 @@ def _write_json(path: Path, data: Any) -> None:
 
 
 def save_checkpoint(path: str | Path, contents: CheckpointContents, overwrite: bool = False) -> Path:
+    """Write ``contents`` atomically to ``path`` via a temporary sibling directory; returns ``path``.
+
+    Fills in the metadata's ensemble size, expert names, horizons, target definitions and
+    (if unset) git commit, mutating ``contents.metadata``.  A non-empty existing directory
+    raises FileExistsError unless ``overwrite``, which deletes it first.
+    """
     target = Path(path)
     if target.exists() and any(target.iterdir()):
         if not overwrite:
@@ -155,6 +169,10 @@ def save_checkpoint(path: str | Path, contents: CheckpointContents, overwrite: b
 
 
 def load_checkpoint(path: str | Path, device: torch.device | str = "cpu") -> CheckpointContents:
+    """Load a checkpoint directory; ensemble members are put in eval mode on ``device``.
+
+    Raises FileNotFoundError without ``manifest.json`` and ValueError for a newer format.
+    """
     root = Path(path)
     if not (root / "manifest.json").exists():
         raise FileNotFoundError(f"{root} is not a model checkpoint (manifest.json missing)")

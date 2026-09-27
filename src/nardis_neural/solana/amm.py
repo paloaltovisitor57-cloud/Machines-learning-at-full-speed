@@ -37,6 +37,7 @@ class Pool:
 
     @property
     def real_sol(self) -> float:
+        """SOL actually in the pool: reserves minus the curve's virtual SOL (never negative)."""
         return max(self.sol - self.virtual_sol, 0.0)
 
     def buy(self, sol_in: float) -> tuple[float, Pool]:
@@ -92,4 +93,5 @@ def price_impact(pool: Pool, size_sol: float) -> float:
 
 
 def market_cap_sol(pool: Pool, supply: float = TOTAL_SUPPLY) -> float:
+    """Market cap in SOL: spot price times ``supply`` (default: the full token supply)."""
     return pool.price * supply

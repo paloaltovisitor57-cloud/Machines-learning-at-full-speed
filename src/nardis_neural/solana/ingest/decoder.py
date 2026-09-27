@@ -52,6 +52,8 @@ BASE_FEE_LAMPORTS = 5000
 
 @dataclass
 class PoolInfo:
+    """An AMM pool recognised on chain: mint, authority, token and WSOL vaults, venue."""
+
     mint: str
     authority: str
     token_vault: str
@@ -69,11 +71,14 @@ class _Balance:
 
 @dataclass
 class DecodeStats:
+    """Counts of decoded transactions, failed ones and emitted events by type."""
+
     transactions: int = 0
     failed: int = 0
     events: dict[str, int] = field(default_factory=dict)
 
     def count(self, e: Event) -> None:
+        """Count one emitted event under its type name."""
         name = type(e).__name__
         self.events[name] = self.events.get(name, 0) + 1
 
@@ -107,6 +112,13 @@ def _token_balances(rows: Iterable[Mapping[str, Any]], keys: list[str]) -> dict[
 
 
 class TransactionDecoder:
+    """Stateful decoder of ``getTransaction`` JSON into market events; feed transactions in slot order.
+
+    Keeps per-token venue, pool and virtual-reserve state.  ``mint_info`` looks up authority
+    revocations of AMM-launched tokens; ``implicit_launches`` emits a :class:`TokenLaunch` for
+    tokens first seen mid-stream.
+    """
+
     def __init__(
         self,
         min_transfer_sol: float = 0.05,
@@ -174,6 +186,10 @@ class TransactionDecoder:
 
     # ------------------------------------------------------------------ main entry
     def decode(self, tx: Mapping[str, Any]) -> list[Event]:
+        """Decode one transaction into events (none if it failed) and update :attr:`stats`.
+
+        The transaction's priority fee and Jito tip (in SOL) are attached to its first swap.
+        """
         self.stats.transactions += 1
         meta = tx.get("meta") or {}
         if meta.get("err") is not None:

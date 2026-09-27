@@ -26,17 +26,22 @@ Tensor = torch.Tensor
 
 @dataclass
 class RegressionUncertainty:
+    """Mean with aleatoric and epistemic variance, each (B, H)."""
+
     mean: Tensor  # (B, H)
     aleatoric_var: Tensor
     epistemic_var: Tensor
 
     @property
     def total_var(self) -> Tensor:
+        """Aleatoric + epistemic variance."""
         return self.aleatoric_var + self.epistemic_var
 
 
 @dataclass
 class ClassificationUncertainty:
+    """Mean event probability and its entropy decomposition, each (B, H)."""
+
     prob: Tensor  # (B, H) mean probability (uncalibrated)
     total_entropy: Tensor
     aleatoric_entropy: Tensor
@@ -52,6 +57,7 @@ def aggregate_regression(means: Tensor, logvars: Tensor) -> RegressionUncertaint
 
 
 def binary_entropy(p: Tensor) -> Tensor:
+    """Elementwise Bernoulli entropy in nats (``p`` clamped away from 0 and 1)."""
     p = p.clamp(1e-7, 1 - 1e-7)
     return -(p * torch.log(p) + (1 - p) * torch.log(1 - p))
 

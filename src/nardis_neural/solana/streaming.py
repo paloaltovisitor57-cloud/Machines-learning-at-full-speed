@@ -54,6 +54,13 @@ def stream_train(
     device: torch.device | str | None = None,
     log: Callable[[str], None] = _quiet,
 ) -> dict[str, Any]:
+    """Learn online from a time-ordered event stream into ``workspace``; returns run statistics.
+
+    A fresh workspace is bootstrapped from the first ``warmup_seconds`` after the first launch.
+    Assessment, eviction, maintenance and checkpoints run on market-time schedules (seconds).  A
+    resumed run skips events up to the checkpointed market time; rejected events (unknown or
+    evicted token, out of order) are counted, not raised.
+    """
     root = Path(workspace)
     it = iter(events)
     stats: dict[str, Any] = {

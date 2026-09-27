@@ -32,6 +32,8 @@ SHADOW_KEYS: tuple[str, ...] = (
 
 @dataclass
 class ShadowRecord:
+    """Champion and challenger outputs for one observation, plus its targets once resolved."""
+
     observation_id: str
     timestamp: float
     regime: int
@@ -44,11 +46,14 @@ class ShadowRecord:
 
     @property
     def resolved(self) -> bool:
+        """True once the outcome targets are known."""
         return self.targets is not None
 
 
 @dataclass
 class ShadowReport:
+    """Champion vs challenger metrics on resolved records: overall, per regime, per time window."""
+
     champion_version: str
     challenger_version: str
     n: int
@@ -58,6 +63,7 @@ class ShadowReport:
     by_window: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """Plain-dict form of the report."""
         return asdict(self)
 
 
@@ -66,6 +72,11 @@ def _slice(out: dict[str, Array], i: int) -> dict[str, list[Any]]:
 
 
 class ShadowEvaluator:
+    """Shadow record store, optionally persisted to ``<directory>/records.jsonl``.
+
+    Existing records in ``directory`` are loaded on construction.
+    """
+
     def __init__(self, directory: str | Path | None = None) -> None:
         self.directory = Path(directory) if directory is not None else None
         self.records: dict[str, ShadowRecord] = {}
@@ -80,6 +91,11 @@ class ShadowEvaluator:
         champion_version: str,
         challenger_version: str,
     ) -> None:
+        """Store one record per observation from both models' output arrays (in memory only).
+
+        Raises ValueError unless both outputs cover identical observation ids; a record with
+        the same id is replaced.
+        """
         ids = champion_out["observation_id"]
         if not np.array_equal(ids, challenger_out["observation_id"]):
             raise ValueError("shadow models must receive identical observations")
@@ -95,6 +111,7 @@ class ShadowEvaluator:
             )
 
     def resolve(self, observation_id: str, targets: dict[str, Array], mask: Array) -> bool:
+        """Attach outcome targets and mask to a recorded observation; False if it is unknown."""
         rec = self.records.get(observation_id)
         if rec is None:
             return False
@@ -103,6 +120,7 @@ class ShadowEvaluator:
         return True
 
     def resolved_records(self, champion_version: str, challenger_version: str) -> list[ShadowRecord]:
+        """Resolved records of this champion/challenger pair, sorted by timestamp."""
         return sorted(
             (
                 r
@@ -115,6 +133,7 @@ class ShadowEvaluator:
         )
 
     def clear(self, challenger_version: str | None = None) -> None:
+        """Drop all records, or only those of ``challenger_version``, and persist."""
         if challenger_version is None:
             self.records.clear()
         else:
@@ -125,6 +144,11 @@ class ShadowEvaluator:
 
     # ------------------------------------------------------------------ comparison
     def report(self, config: NeuralConfig, champion_version: str, challenger_version: str) -> ShadowReport:
+        """Compare the pair on its resolved records overall, per regime and per time window.
+
+        With fewer than two resolved records only the count is filled in; time windows with
+        fewer than five records are skipped.
+        """
         recs = self.resolved_records(champion_version, challenger_version)
         rep = ShadowReport(champion_version, challenger_version, n=len(recs))
         if len(recs) < 2:
@@ -192,6 +216,7 @@ class ShadowEvaluator:
 
     # ------------------------------------------------------------------ persistence
     def save(self) -> None:
+        """Atomically write all records to ``records.jsonl`` (no-op without a directory)."""
         if self.directory is None:
             return
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -202,6 +227,7 @@ class ShadowEvaluator:
         tmp.replace(self.directory / "records.jsonl")
 
     def load(self) -> None:
+        """Replace the in-memory records with those in ``records.jsonl``."""
         assert self.directory is not None
         self.records = {}
         with (self.directory / "records.jsonl").open() as fh:

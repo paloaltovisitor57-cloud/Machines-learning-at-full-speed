@@ -42,6 +42,7 @@ class NonFiniteLossError(RuntimeError):
 
 # ---------------------------------------------------------------------------- devices
 def resolve_device(spec: str = "auto") -> torch.device:
+    """Device from ``spec``; ``auto`` prefers CUDA, then MPS, then CPU."""
     if spec != "auto":
         return torch.device(spec)
     if torch.cuda.is_available():
@@ -68,12 +69,14 @@ def amp_settings(device: torch.device, mode: str) -> tuple[bool, torch.dtype, bo
 
 
 def autocast_context(device: torch.device, enabled: bool, dtype: torch.dtype) -> AbstractContextManager[Any]:
+    """``torch.autocast`` context when enabled, otherwise a no-op context."""
     if not enabled:
         return nullcontext()
     return torch.autocast(device_type=device.type, dtype=dtype)
 
 
 def set_seed(seed: int, deterministic: bool = False) -> None:
+    """Seed Python, NumPy and torch (all CUDA devices); optionally force deterministic algorithms."""
     random.seed(seed)
     np.random.seed(seed)  # noqa: NPY002 - seed legacy global RNG used by third-party code
     torch.manual_seed(seed)
@@ -100,6 +103,7 @@ class TrainingObjective(nn.Module):
         self.ewc = ewc
 
     def to_device(self, device: torch.device) -> TrainingObjective:
+        """Move the loss, distillation teacher and EWC tensors to ``device``; returns self."""
         self.to(device)
         if self.distillation is not None:
             self.distillation.to(device)
@@ -108,6 +112,7 @@ class TrainingObjective(nn.Module):
         return self
 
     def compute(self, model: nn.Module, batch: Batch, out: ModelOutput) -> tuple[Tensor, dict[str, Tensor]]:
+        """Total loss and its components for one batch; raises ValueError without targets."""
         if batch.targets is None:
             raise ValueError("training batches must contain targets")
         total, comps = self.loss(out, batch.targets, batch.weights)
@@ -126,6 +131,8 @@ class TrainingObjective(nn.Module):
 # ---------------------------------------------------------------------------- results
 @dataclass
 class TrainResult:
+    """History and early-stopping outcome of one Trainer.fit() run."""
+
     history: list[dict[str, float]] = field(default_factory=list)
     best_epoch: int = -1
     best_val_loss: float = math.inf
@@ -135,6 +142,7 @@ class TrainResult:
     seconds: float = 0.0
 
     def summary(self) -> dict[str, float]:
+        """Scalar summary: best epoch and loss, epochs run, early stop, non-finite steps, seconds."""
         return {
             "best_epoch": float(self.best_epoch),
             "best_val_loss": self.best_val_loss,
@@ -151,6 +159,8 @@ def _mean_components(acc: dict[str, list[float]]) -> dict[str, float]:
 
 # ---------------------------------------------------------------------------- trainer
 class Trainer:
+    """Trains one network with the configured device, precision, schedule and early stopping."""
+
     def __init__(self, config: NeuralConfig, device: torch.device | None = None) -> None:
         self.config = config
         self.tc = config.training
@@ -167,6 +177,7 @@ class Trainer:
         weights: npt.NDArray[np.float64] | None = None,
         max_batches: int | None = None,
     ) -> Iterator[Batch]:
+        """Iterate normalised batches of ``dataset`` on the trainer's device."""
         loader = make_loader(
             dataset,
             batch_size,
@@ -187,6 +198,7 @@ class Trainer:
         dataset: MarketDataset,
         objective: TrainingObjective,
     ) -> dict[str, float]:
+        """Batch-size-weighted mean of every loss component over ``dataset`` in eval mode."""
         model.eval()
         acc: dict[str, list[float]] = {}
         weights: list[float] = []
@@ -215,6 +227,13 @@ class Trainer:
         sampling_weights: npt.NDArray[np.float64] | None = None,
         on_epoch_end: Callable[[dict[str, float]], None] | None = None,
     ) -> TrainResult:
+        """Train ``model`` in place, restore its best-validation weights and return the result.
+
+        Early stopping uses the validation supervised loss (training loss without ``val_ds``).
+        With ``run_dir`` every epoch appends to ``metrics.jsonl`` and overwrites
+        ``trainer_state.pt``, from which ``resume`` continues exactly.  Raises
+        NonFiniteLossError after ``max_nonfinite_steps`` consecutive NaN/Inf losses or gradients.
+        """
         tc = self.tc
         epochs = tc.epochs if epochs is None else epochs
         lr = tc.learning_rate if learning_rate is None else learning_rate

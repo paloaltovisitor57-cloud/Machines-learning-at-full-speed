@@ -27,6 +27,8 @@ Tensor = torch.Tensor
 
 
 class SelectiveSSMLayer(nn.Module):
+    """One Mamba-style selective state-space layer with a residual connection."""
+
     def __init__(self, d_model: int, cfg: SSMConfig, dropout: float) -> None:
         super().__init__()
         d_inner = cfg.expand * d_model
@@ -48,6 +50,7 @@ class SelectiveSSMLayer(nn.Module):
         self.drop = nn.Dropout(dropout)
 
     def forward(self, x: Tensor, mask: Tensor) -> Tensor:
+        """Apply causally to (B, T, D); unobserved steps leave the state unchanged."""
         m = mask.unsqueeze(-1).to(x.dtype)
         xs, z = self.in_proj(self.norm(x)).chunk(2, dim=-1)
         xs = xs * m
@@ -71,12 +74,15 @@ class SelectiveSSMLayer(nn.Module):
 
 
 class SSMCore(nn.Module):
+    """Stack of selective SSM layers followed by LayerNorm."""
+
     def __init__(self, d_model: int, cfg: SSMConfig, dropout: float) -> None:
         super().__init__()
         self.layers = nn.ModuleList(SelectiveSSMLayer(d_model, cfg, dropout) for _ in range(cfg.layers))
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, x: Tensor, mask: Tensor) -> Tensor:
+        """Encode (B, T, D) with a (B, T) mask; unobserved steps output zero."""
         h = x * mask.unsqueeze(-1).to(x.dtype)
         for layer in self.layers:
             h = layer(h, mask)

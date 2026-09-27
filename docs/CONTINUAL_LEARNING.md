@@ -162,9 +162,10 @@ ensemble membership together.
   compared with the challenger's shadow MAE at promotion time. If it exceeds
   `baseline × (1 + auto_rollback_degradation)` over `auto_rollback_min_observations`
   samples, the previous champion is restored.
-* `ModelRegistry.prune(keep_champions)` deletes weights of failed models and of old
-  retired models beyond the newest `keep_champions` former champions. Registry entries and
-  the audit log are kept.
+* After every promotion, `ModelRegistry.prune(lifecycle.keep_champions)` deletes the
+  weights of failed models and of retired models beyond the newest `keep_champions` (5)
+  former champions, which stay available as rollback targets. Registry entries and the
+  audit log are kept. This keeps disk use bounded when the learner runs for months.
 
 ## 9. Lifecycle states
 

@@ -25,6 +25,7 @@ F64 = npt.NDArray[np.float64]
 
 
 def shrunk_precision(x: F64, shrinkage: float) -> tuple[F64, F64]:
+    """Mean and precision of ``x`` (N, D), the covariance shrunk towards a scaled identity."""
     mean = x.mean(axis=0)
     xc = x - mean
     cov = xc.T @ xc / max(len(x) - 1, 1)
@@ -34,6 +35,7 @@ def shrunk_precision(x: F64, shrinkage: float) -> tuple[F64, F64]:
 
 
 def mahalanobis(x: F64, mean: F64, precision: F64) -> F64:
+    """Row-wise Mahalanobis distance of ``x`` (N, D) given ``mean`` and ``precision``; (N,)."""
     d = x - mean
     sq = np.asarray(np.einsum("ij,jk,ik->i", d, precision, d), dtype=np.float64)
     return np.asarray(np.sqrt(np.maximum(sq, 0.0)), dtype=np.float64)
@@ -41,6 +43,8 @@ def mahalanobis(x: F64, mean: F64, precision: F64) -> F64:
 
 @dataclass
 class OODDetector:
+    """Training-distribution references that turn three signals into an OOD score."""
+
     mean: F64
     precision: F64
     ref_embedding: float
@@ -51,6 +55,7 @@ class OODDetector:
 
     @classmethod
     def fit(cls, embeddings: F64, input_rms: F64, epistemic: F64, cfg: OODConfig) -> OODDetector:
+        """Fit on training embeddings, input RMS z-scores and epistemic uncertainties."""
         emb = np.asarray(embeddings, dtype=np.float64)
         mean, prec = shrunk_precision(emb, cfg.shrinkage)
         d = mahalanobis(emb, mean, prec)
@@ -71,9 +76,14 @@ class OODDetector:
         )
 
     def embedding_distance(self, embeddings: F64) -> F64:
+        """Mahalanobis distance of ``embeddings`` (N, D) to the training fit; (N,)."""
         return mahalanobis(np.asarray(embeddings, dtype=np.float64), self.mean, self.precision)
 
     def score(self, embeddings: F64, input_rms: F64, epistemic: F64) -> dict[str, F64]:
+        """Normalised ``embedding``, ``input``, ``disagreement`` signals and their weighted ``score``.
+
+        Each value has shape (N,); ≈ 1 marks the edge of the training distribution.
+        """
         comp = {
             "embedding": self.embedding_distance(embeddings) / self.ref_embedding,
             "input": np.asarray(input_rms, dtype=np.float64) / self.ref_input,
@@ -85,6 +95,7 @@ class OODDetector:
         return comp
 
     def to_dict(self) -> dict[str, Any]:
+        """JSON-serialisable state."""
         return {
             "mean": self.mean.tolist(),
             "precision": self.precision.tolist(),
@@ -97,6 +108,7 @@ class OODDetector:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> OODDetector:
+        """Rebuild a detector from :meth:`to_dict` output."""
         w = d["weights"]
         return cls(
             mean=np.asarray(d["mean"], dtype=np.float64),

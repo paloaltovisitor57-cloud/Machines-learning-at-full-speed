@@ -21,6 +21,8 @@ Array = npt.NDArray[Any]
 
 @dataclass
 class EmbeddingTable:
+    """Per-observation embeddings, expert gate weights, predictions, targets and extras."""
+
     observation_ids: Array
     timestamps: Array
     embeddings: Array  # (N, D)
@@ -35,6 +37,10 @@ class EmbeddingTable:
         return len(self.observation_ids)
 
     def to_polars(self) -> pl.DataFrame:
+        """Flat DataFrame with ``emb_<j>``, ``gate_<expert>`` and ``<key>.<horizon>`` columns.
+
+        1-D arrays become single columns; other multi-dimensional arrays are left out.
+        """
         cols: dict[str, Any] = {
             "observation_id": self.observation_ids.astype(str),
             "timestamp": self.timestamps.astype(np.float64),
@@ -55,6 +61,10 @@ class EmbeddingTable:
         return pl.DataFrame(cols)
 
     def save(self, path: str | Path) -> Path:
+        """Write to ``.parquet`` (flat table) or ``.npz`` (all arrays) by suffix; returns the path.
+
+        Parent directories are created; any other suffix raises ValueError.
+        """
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         if p.suffix == ".parquet":
@@ -78,6 +88,7 @@ class EmbeddingTable:
 
     @classmethod
     def load_npz(cls, path: str | Path) -> EmbeddingTable:
+        """Load a table written by save() to an ``.npz`` file."""
         with np.load(path, allow_pickle=False) as d:
             return cls(
                 observation_ids=d["observation_ids"],
@@ -95,6 +106,9 @@ class EmbeddingTable:
 def extract_embeddings(
     engine: NeuralEngine, dataset: MarketDataset, batch_size: int | None = None
 ) -> EmbeddingTable:
+    """Run ``engine`` over ``dataset`` and collect embeddings, gate weights and key predictions,
+    plus targets and true regimes when the dataset has them.
+    """
     preds = engine.predict_dataset(dataset, batch_size=batch_size)
     keep = [
         "return.mean",

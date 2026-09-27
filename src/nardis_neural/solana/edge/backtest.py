@@ -22,6 +22,8 @@ I64 = npt.NDArray[np.int64]
 
 @dataclass
 class Candidates:
+    """Candidate trades: signal time, mint, executable net return, exit time and ticket size in SOL."""
+
     t: F64
     mint: npt.NDArray[np.str_]
     net: F64
@@ -50,6 +52,9 @@ def simulate(c: Candidates, selected: npt.NDArray[np.bool_], max_positions: int 
 
 
 def trade_stats(c: Candidates, trades: I64, n_boot: int = 2000, seed: int = 0) -> dict[str, float]:
+    """Per-trade statistics of ``trades``: hit rate, net-return mean / median / t-stat, bootstrap
+    95 % CI of the mean, profit factor, and total PnL / max drawdown in SOL (by exit time).
+    """
     r = c.net[trades]
     n = len(r)
     if n == 0:

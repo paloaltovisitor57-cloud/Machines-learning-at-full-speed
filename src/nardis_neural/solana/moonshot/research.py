@@ -47,6 +47,8 @@ def _quiet(_: str) -> None:
 
 @dataclass
 class MoonshotLabels:
+    """Per-candidate peak, ladder and final multiples; ``valid`` marks rows that have a label."""
+
     valid: npt.NDArray[np.bool_]
     peak: F64
     censored: npt.NDArray[np.bool_]
@@ -56,6 +58,8 @@ class MoonshotLabels:
 
 @dataclass
 class MoonshotDataset:
+    """Entry-window snapshots (moonshot ticket candidates) with a hindsight market to label them."""
+
     base: SolanaDataset
     rows: I64
     """Indices into ``base`` of the early snapshots that are ticket candidates."""
@@ -67,10 +71,12 @@ class MoonshotDataset:
 
     @property
     def timestamps(self) -> F64:
+        """Snapshot time of every candidate."""
         return np.asarray(self.base.arrays["timestamp"], dtype=np.float64)[self.rows]
 
     @property
     def mints(self) -> npt.NDArray[np.str_]:
+        """Mint of every candidate."""
         return self.base.mints[self.rows]
 
     def __len__(self) -> int:
@@ -105,6 +111,9 @@ def build_moonshot_dataset(
     archetypes: dict[str, str] | None = None,
     base: SolanaDataset | None = None,
 ) -> MoonshotDataset:
+    """Pick the entry-window snapshots of ``base`` (built from ``store`` if omitted) as ticket
+    candidates; raises ``ValueError`` if there are none.
+    """
     base = base or build_solana_dataset(store, cfg, neural_cfg, archetypes=archetypes)
     market = hindsight_market(store, cfg)
     ts = np.asarray(base.arrays["timestamp"], dtype=np.float64)
@@ -119,6 +128,7 @@ def build_moonshot_dataset(
 def moonshot_features(
     mds: MoonshotDataset, oof: OOFPredictions | None, horizons: list[str]
 ) -> tuple[npt.NDArray[np.float32], list[str]]:
+    """Tail-model inputs: raw current features, or the edge meta-feature stack when ``oof`` is given."""
     current = mds.base.current[mds.rows]
     if oof is None:
         return np.nan_to_num(current).astype(np.float32), list(CURRENT_FEATURES)
@@ -141,6 +151,9 @@ def first_signal(order_t: F64, mints: npt.NDArray[np.str_], selected: npt.NDArra
 def ticket_stats(
     ladder: F64, peak: F64, size_sol: float, n_boot: int = 2000, seed: int = 0
 ) -> dict[str, float]:
+    """Statistics of a set of tickets from their ladder and peak multiples: PnL in SOL, mean / median
+    multiple with a bootstrap 95 % CI of the mean, hit rates and profit concentration.
+    """
     n = len(ladder)
     if n == 0:
         return {"tickets": 0.0}
@@ -169,6 +182,8 @@ def ticket_stats(
 # ---------------------------------------------------------------------------- research
 @dataclass
 class MoonshotResearch:
+    """Result of :func:`run_moonshot_research`: report, production tail model and dataset."""
+
     report: dict[str, Any]
     model: TailModel
     dataset: MoonshotDataset
@@ -210,6 +225,11 @@ def run_moonshot_research(
     log: Logger = _quiet,
     seed: int = 0,
 ) -> MoonshotResearch:
+    """Run the causal moonshot protocol (see the module docstring) on an event history.
+
+    Returns the out-of-sample report together with a tail model refitted on every token.  Raises
+    ``ValueError`` for unknown ``inputs`` or too few tokens for the split.
+    """
     if inputs not in ("raw", "neural"):
         raise ValueError("inputs must be 'raw' or 'neural'")
     spec = spec or MoonshotSpec()
@@ -334,6 +354,7 @@ def run_moonshot_research(
 
 
 def moonshot_markdown(report: dict[str, Any]) -> str:
+    """Render a moonshot research report as Markdown."""
     p, b, v = report["portfolio"], report["baselines"], report["verdict"]
     lines = [
         "# Moonshot research report (out-of-sample tokens)",

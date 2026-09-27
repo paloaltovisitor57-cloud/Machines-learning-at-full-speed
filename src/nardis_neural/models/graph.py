@@ -22,6 +22,7 @@ Tensor = torch.Tensor
 
 
 def scatter_mean(src: Tensor, index: Tensor, n: int) -> Tensor:
+    """Mean of rows ``src`` (E, D) grouped by ``index`` into ``n`` rows; empty groups are 0."""
     out = torch.zeros(n, src.shape[1], dtype=src.dtype, device=src.device)
     out.index_add_(0, index, src)
     count = torch.zeros(n, dtype=src.dtype, device=src.device)
@@ -41,6 +42,8 @@ def scatter_softmax(scores: Tensor, index: Tensor, n: int) -> Tensor:
 
 
 class RelationalSAGELayer(nn.Module):
+    """Relational GraphSAGE layer with residual connection and LayerNorm."""
+
     def __init__(self, dim: int, num_relations: int, dropout: float) -> None:
         super().__init__()
         self.self_lin = nn.Linear(dim, dim)
@@ -49,6 +52,7 @@ class RelationalSAGELayer(nn.Module):
         self.drop = nn.Dropout(dropout)
 
     def forward(self, h: Tensor, edge_index: Tensor, edge_type: Tensor) -> Tensor:
+        """Update node states (N, D) from mean neighbour messages per edge type."""
         n = h.shape[0]
         src, dst = edge_index[0], edge_index[1]
         agg = self.self_lin(h)
@@ -61,6 +65,8 @@ class RelationalSAGELayer(nn.Module):
 
 
 class RelationalGATLayer(nn.Module):
+    """Multi-head graph attention with self loops and a learned per-relation bias."""
+
     def __init__(self, dim: int, heads: int, num_relations: int, dropout: float) -> None:
         super().__init__()
         if dim % heads:
@@ -76,6 +82,7 @@ class RelationalGATLayer(nn.Module):
         self.num_relations = num_relations
 
     def forward(self, h: Tensor, edge_index: Tensor, edge_type: Tensor) -> Tensor:
+        """Update node states (N, D) by attention over incoming edges and a self loop."""
         n = h.shape[0]
         loops = torch.arange(n, device=h.device)
         src = torch.cat([edge_index[0], loops])
@@ -117,6 +124,10 @@ class GraphEncoder(nn.Module):
         target_node: Tensor,
         batch_size: int,
     ) -> Tensor:
+        """Encode the merged graph to (batch_size, out_dim) from target-node and mean-node states.
+
+        Samples with ``target_node < 0`` use a zero target-node state.
+        """
         h = F.gelu(self.inp(node_features))
         edge_type = edge_type.clamp(0, self.num_relations - 1)
         for layer in self.layers:

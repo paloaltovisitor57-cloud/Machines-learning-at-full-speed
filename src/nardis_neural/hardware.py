@@ -30,6 +30,8 @@ PROFILES = ("cpu-lite", "cpu", "gpu", "gpu-frontier")
 
 @dataclass(frozen=True)
 class HardwareInfo:
+    """Detected compute device and resources, plus the profile recommended for them."""
+
     device: str
     cpu_cores: int
     gpu_name: str | None
@@ -37,10 +39,16 @@ class HardwareInfo:
     recommended_profile: str
 
     def to_dict(self) -> dict[str, Any]:
+        """Plain dict of the fields."""
         return asdict(self)
 
 
 def detect() -> HardwareInfo:
+    """Detect CUDA, then Apple MPS, then CPU, and recommend a compute profile.
+
+    CUDA with ≥ 16 GB → ``gpu-frontier``; other CUDA or MPS → ``gpu``; ≥ 8 CPU cores →
+    ``cpu``; otherwise ``cpu-lite``.
+    """
     cores = os.cpu_count() or 1
     if torch.cuda.is_available():
         props = torch.cuda.get_device_properties(0)

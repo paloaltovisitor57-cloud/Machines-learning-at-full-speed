@@ -18,11 +18,14 @@ Idx = npt.NDArray[np.int64]
 
 @dataclass(frozen=True)
 class Split:
+    """Row indices of a chronological train / validation / optional test split."""
+
     train: Idx
     validation: Idx
     test: Idx | None = None
 
     def check_no_leakage(self, timestamps: npt.NDArray[np.float64], embargo: float = 0.0) -> None:
+        """Assert each split ends at least ``embargo`` seconds before the next one starts."""
         both = len(self.train) and len(self.validation)
         if both and timestamps[self.train].max() > timestamps[self.validation].min() - embargo:
             raise AssertionError("training data overlaps validation period")

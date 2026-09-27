@@ -26,6 +26,12 @@ DEFAULT_PROGRAMS: tuple[str, ...] = (PUMP_FUN_PROGRAM, PUMP_SWAP_PROGRAM)
 
 
 class ChainStreamer:
+    """Polls the watched programs for new transactions and decodes them into events.
+
+    Per-program cursors persist in ``state_file``; a bounded set of seen signatures drops
+    duplicates.  The default decoder looks up mint authorities through ``rpc``.
+    """
+
     def __init__(
         self,
         rpc: SolanaRpc,
@@ -85,6 +91,10 @@ class ChainStreamer:
         return list(reversed(collected))
 
     def poll(self) -> list[Event]:
+        """Fetch and decode everything since the last poll; returns events in time order and saves cursors.
+
+        Failed transactions are skipped; every fetched raw transaction goes to ``raw_sink`` if set.
+        """
         sigs: list[dict[str, Any]] = []
         for program in self.programs:
             for s in self._new_signatures(program):

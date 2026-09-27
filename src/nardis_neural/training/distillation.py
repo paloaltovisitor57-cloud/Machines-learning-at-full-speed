@@ -22,6 +22,7 @@ Tensor = torch.Tensor
 
 
 def binary_kl(teacher_logits: Tensor, student_logits: Tensor, temperature: float) -> Tensor:
+    """Mean KL(teacher ‖ student) between tempered Bernoulli distributions, scaled by T²."""
     t = torch.sigmoid(teacher_logits / temperature)
     log_s = F.logsigmoid(student_logits / temperature)
     log_1ms = F.logsigmoid(-student_logits / temperature)
@@ -31,6 +32,8 @@ def binary_kl(teacher_logits: Tensor, student_logits: Tensor, temperature: float
 
 
 class DistillationLoss:
+    """Distillation terms towards a frozen teacher (its parameters are frozen in place)."""
+
     def __init__(
         self,
         teacher: NardisNeuralNetwork,
@@ -49,11 +52,13 @@ class DistillationLoss:
         self.embedding_weight = embedding_weight
 
     def to(self, device: torch.device) -> DistillationLoss:
+        """Move the teacher to ``device``; returns self."""
         self.teacher.to(device)
         return self
 
     @torch.no_grad()
     def teacher_output(self, batch: Batch) -> ModelOutput:
+        """Teacher forward pass in eval mode without gradients."""
         self.teacher.eval()
         out: ModelOutput = self.teacher(batch)
         return out

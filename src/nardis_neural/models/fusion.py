@@ -26,6 +26,10 @@ class TimescaleFusion(nn.Module):
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, tokens: Tensor, available: Tensor) -> tuple[Tensor, Tensor]:
+        """Fuse tokens (B, S, D) with availability (B, S) into (B, D); also return weights (B, S).
+
+        Weights are all zero for samples with no available timescale.
+        """
         x = tokens + self.timescale_embedding.unsqueeze(0)
         scores = self.score(x).squeeze(-1).float()
         any_avail = available.any(dim=1, keepdim=True)
@@ -67,5 +71,6 @@ class LatentEncoder(nn.Module):
         self.norm = nn.LayerNorm(latent_dim)
 
     def forward(self, x: Tensor) -> Tensor:
+        """Map (B, d_in) to the (B, latent_dim) MarketStateEmbedding."""
         out: Tensor = self.norm(self.blocks(self.inp(x)))
         return out

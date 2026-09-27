@@ -49,6 +49,8 @@ class HorizonHeads(nn.Module):
 
 
 class MultiTaskHeads(nn.Module):
+    """Per-(task, horizon) heads: regression mean/log-variance, event logits, quantiles."""
+
     def __init__(
         self, latent_dim: int, hidden: int, n_horizons: int, n_quantiles: int, dropout: float
     ) -> None:
@@ -72,6 +74,11 @@ class MultiTaskHeads(nn.Module):
     def forward(
         self, z: Tensor
     ) -> tuple[dict[str, Tensor], dict[str, Tensor], dict[str, Tensor], Tensor | None]:
+        """Map embeddings (B, latent_dim) to ``(means, logvars, logits, quantiles)``.
+
+        The first three are task → (B, H) float32 dicts; quantiles is a monotone (B, H, Q)
+        tensor, or None when no quantiles are configured.
+        """
         means: dict[str, Tensor] = {}
         logvars: dict[str, Tensor] = {}
         for task, head in self.regression.items():

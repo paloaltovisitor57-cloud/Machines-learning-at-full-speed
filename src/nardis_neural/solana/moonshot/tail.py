@@ -79,6 +79,10 @@ def censored_nll(
 
 @dataclass
 class TailPrediction:
+    """Per-row tail outputs: P(M ≥ k), its epistemic spread, median / expected multiple, lottery
+    Kelly fraction and tail index.
+    """
+
     survival: F64
     """(N, len(levels)) ensemble-mean P(M ≥ k)."""
     survival_std: F64
@@ -92,6 +96,8 @@ class TailPrediction:
 
 
 class TailModel:
+    """Deep ensemble of logistic-mixture networks on the log peak multiple, trained with right-censoring."""
+
     def __init__(
         self,
         d_in: int,
@@ -270,6 +276,7 @@ class TailModel:
         return np.asarray((pi[..., None, :] * sig).sum(-1), dtype=np.float64)
 
     def survival(self, x: npt.NDArray[Any], k: list[float] | F64, calibrated: bool = True) -> F64:
+        """Ensemble-mean P(M ≥ k) per row at multiples ``k`` (calibrated unless ``calibrated`` is False)."""
         kk = np.asarray(k, dtype=np.float64)
         pi, mu, s = self._params(x)
         sf = np.asarray(self._survival(pi, mu, s, kk).mean(0))
@@ -285,6 +292,9 @@ class TailModel:
         return np.asarray(-np.log(np.maximum(np.where(censored, sf, pdf), 1e-300)))
 
     def predict(self, x: npt.NDArray[Any]) -> TailPrediction:
+        """Calibrated survival at ``spec.levels``, median and expected ladder multiple, capped lottery
+        Kelly and tail index for every row.
+        """
         pi, mu, s = self._params(x)
         levels = np.asarray(self.spec.levels, dtype=np.float64)
         member_sf = self._calibrate(self._survival(pi, mu, s, levels), levels)
@@ -314,6 +324,7 @@ class TailModel:
 
     # ------------------------------------------------------------------ persistence
     def save(self, directory: str | Path) -> None:
+        """Write members, scaler, training range, calibration and ``tail.json`` to ``directory``."""
         d = Path(directory)
         d.mkdir(parents=True, exist_ok=True)
         torch.save({f"m{i}": m.state_dict() for i, m in enumerate(self.members)}, d / "tail.pt")
@@ -343,6 +354,7 @@ class TailModel:
 
     @classmethod
     def load(cls, directory: str | Path) -> TailModel:
+        """Load a model written by :meth:`save`."""
         d = Path(directory)
         meta = json.loads((d / "tail.json").read_text())
         model = cls(

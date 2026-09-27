@@ -38,22 +38,33 @@ MIN_MULTIPLE = 1e-3
 
 
 class MoonshotSpec(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    """Ticket size, latency, horizon, entry window and ladder-exit policy of moonshot outcomes."""
+
+    model_config = ConfigDict(extra="forbid", use_attribute_docstrings=True)
 
     size_sol: float = Field(default=0.5, gt=0)
+    """Ticket size in SOL, used for fees and price impact on entry and exits."""
     latency_seconds: float = Field(default=1.0, ge=0)
+    """Delay in seconds between a signal or exit decision and its fill."""
     horizon_seconds: float = Field(default=6 * 3600.0, gt=0)
+    """Seconds after entry over which the peak multiple and ladder exits are measured."""
     resolve_idle_seconds: float = Field(default=1800.0, gt=0)
     """A token with no activity for this long before the end of the data is treated as
     finished: its peak so far is final even if the horizon is incomplete (known causally)."""
     max_entry_age_seconds: float = Field(default=600.0, gt=0)
     """Moonshot tickets are only considered this early in a token's life."""
     min_entry_age_seconds: float = Field(default=20.0, ge=0)
+    """Moonshot tickets are only considered once a token is at least this old (seconds)."""
     ladder: list[float] = Field(default_factory=lambda: [2.0, 10.0, 100.0, 1000.0])
+    """Multiples of the stake at which ladder tranches are sold (strictly increasing)."""
     ladder_fractions: list[float] = Field(default_factory=lambda: [0.35, 0.15, 0.15, 0.15])
+    """Fraction of the position sold at each ladder level (sum at most 1)."""
     trail_activation: float = Field(default=2.0, gt=1)
+    """Multiple the ticket must reach before the trailing stop on the remainder activates."""
     trail_drop: float = Field(default=0.6, gt=0, lt=1)
+    """Once active, the remainder exits when value falls this fraction below its running peak."""
     stop_loss: float = Field(default=0.5, gt=0, lt=1)
+    """Before trail activation, the remainder exits when value falls by this fraction of stake."""
     levels: list[float] = Field(default_factory=lambda: [2.0, 5.0, 10.0, 100.0, 1000.0])
     """Multiples reported as P(M ≥ k)."""
 
@@ -70,6 +81,8 @@ class MoonshotSpec(BaseModel):
 
 @dataclass(frozen=True)
 class MoonshotOutcome:
+    """Executable outcome of one ticket: peak, ladder and final multiples of the stake, with timing."""
+
     peak_multiple: float
     censored: bool
     """The horizon ran past the end of the data: ``peak_multiple`` is a lower bound."""

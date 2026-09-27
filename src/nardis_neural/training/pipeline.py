@@ -49,6 +49,8 @@ def _silent(_: str) -> None:
 
 @dataclass
 class TrainingReport:
+    """Summary of one train_engine() run: member results, validation metrics, calibration."""
+
     version: str
     member_results: list[TrainResult] = field(default_factory=list)
     validation_metrics: dict[str, float] = field(default_factory=dict)
@@ -58,6 +60,7 @@ class TrainingReport:
     seconds: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
+        """JSON-friendly summary without the calibration report (stored as training stats)."""
         return {
             "version": self.version,
             "n_train": self.n_train,
@@ -69,6 +72,9 @@ class TrainingReport:
 
 
 def dataset_targets(dataset: MarketDataset) -> tuple[dict[str, Array], Array]:
+    """Real-unit regression targets (N, H) and validity mask; non-finite targets are masked
+    and zeroed.
+    """
     targets = {t: dataset.target_array(t) for t in REGRESSION_TASKS}
     store = dataset.store
     if KEY_TARGET_MASK in store:
@@ -84,6 +90,7 @@ def dataset_targets(dataset: MarketDataset) -> tuple[dict[str, Array], Array]:
 def evaluate_engine(
     engine: NeuralEngine, dataset: MarketDataset, mc_samples: int | None = None
 ) -> tuple[dict[str, float], dict[str, Array]]:
+    """Predict ``dataset`` with ``engine`` and score it; returns (metrics, predictions)."""
     preds = engine.predict_dataset(dataset, mc_samples=mc_samples)
     targets, mask = dataset_targets(dataset)
     return evaluate_predictions(preds, targets, engine.config, mask), preds
@@ -107,6 +114,12 @@ def build_objective(
     distillation_weight: float = 0.0,
     ewc: EWCPenalty | None = None,
 ) -> TrainingObjective:
+    """Training objective: multi-task loss, optional distillation from a copy of ``teacher``
+    and optional EWC.
+
+    For weighted BCE, ``pos_weight`` is estimated from ``train_ds`` (``auto``) or taken from
+    the config.
+    """
     pos_weight = None
     if config.loss.classification_loss == "weighted_bce":
         h = len(config.targets.horizons)
@@ -136,6 +149,7 @@ def estimate_ewc(
     trainer: Trainer,
     weight: float,
 ) -> EWCPenalty:
+    """EWC penalty anchored at ``model``'s current parameters, Fisher estimated on ``dataset``."""
     loss = MultiTaskLoss(config).to(trainer.device)
     model.to(trainer.device)
 
@@ -210,6 +224,13 @@ def train_engine(
     fit_regimes: bool = True,
     log: Logger = _silent,
 ) -> tuple[NeuralEngine, TrainingReport]:
+    """Train, calibrate and assemble a complete NeuralEngine; returns it with its report.
+
+    Without explicit indices the store is split chronologically with an embargo.  Each
+    ensemble member is trained independently (optionally bootstrapped, warm-started,
+    distilled and EWC-regularised).  With ``run_dir``, per-member metrics and resumable
+    trainer state are written there; nothing is registered or saved as a checkpoint.
+    """
     t0 = time.time()
     tc = config.training
     trainer = Trainer(config, device)
