@@ -427,11 +427,13 @@ The trading system never touches model internals.
 
 ```python
 from nardis_neural.solana import SolanaBrain, EventStore
+
 brain = SolanaBrain.bootstrap("workspaces/sol", EventStore.load("history/"))
-brain.ingest(event)                       # decoded on-chain events, in time order
-for report in brain.assess_active():      # one batched forward pass per round
+brain.ingest(event)  # decoded on-chain events, in time order
+for report in brain.assess_active():  # one batched forward pass per round
     report.risk["rug"], report.expected_net_return["60s"], report.flags
-brain.resolve(); brain.maintenance()
+brain.resolve()
+brain.maintenance()
 ```
 
 ## Optional / not included
