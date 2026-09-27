@@ -363,3 +363,15 @@ def test_learner_persists_state(workspace: Path, later_arrays: dict[str, Any]) -
     )
     status = again.status()
     assert status["champion"] == learner.champion.version and status["replay_size"] == 20
+
+
+def test_holdout_split_is_chronological_and_disjoint() -> None:
+    from nardis_neural.training.continual import split_holdout
+
+    ts = np.array([5.0, 1.0, 9.0, 3.0] * 10)
+    idx = np.arange(40, dtype=np.int64)
+    fit, hold = split_holdout(idx, ts)
+    assert not set(fit) & set(hold) and len(fit) + len(hold) == 40
+    assert ts[fit].max() <= ts[hold].min()
+    small_fit, small_hold = split_holdout(idx[:8], ts)
+    assert np.array_equal(small_fit, small_hold)

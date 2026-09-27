@@ -87,6 +87,22 @@ class CandidateReport(BaseModel):
     created_at: float = Field(default_factory=time.time)
 
 
+def split_holdout(
+    indices: np.ndarray[Any, np.dtype[np.int64]], timestamps: np.ndarray[Any, np.dtype[np.float64]]
+) -> tuple[np.ndarray[Any, np.dtype[np.int64]], np.ndarray[Any, np.dtype[np.int64]]]:
+    """Chronological halves of a validation window: (fit, holdout).
+
+    The earlier half drives early stopping and calibration; the later half is never seen
+    by the candidate and is used only for the offline champion-vs-candidate comparison.
+    Windows too small to split are returned as (window, window).
+    """
+    order = indices[np.argsort(timestamps[indices], kind="stable")]
+    if len(order) < 20:
+        return order, order
+    mid = len(order) // 2
+    return order[:mid], order[mid:]
+
+
 def offline_degradation(champion: dict[str, float], candidate: dict[str, float]) -> float:
     """Mean relative change of key validation losses (positive = candidate worse)."""
     ratios = [
@@ -324,11 +340,12 @@ class ContinualLearner:
                 hist = [e for e in exps if e.seq in eligible]
             hist = hist[-4096:]
             ewc_ds = MarketDataset(ArrayStore(concat_arrays([e.row for e in hist])), champion.config)
-        engine, report = train_engine(
+        fit_idx, holdout_idx = split_holdout(val_idx, store.timestamps)
+        engine, _ = train_engine(
             champion.config,
             store,
             train_idx,
-            val_idx,
+            fit_idx,
             version=candidate.version,
             parent_version=champion.version,
             origin="adapt",
@@ -342,10 +359,10 @@ class ContinualLearner:
             ewc_dataset=ewc_ds,
             ewc_weight=cc.ewc_weight if cc.ewc_enabled else 0.0,
         )
-        champ_metrics, _ = evaluate_engine(champion, MarketDataset(store, champion.config, val_idx))
-        rep = self._register_candidate(
-            "adapt", engine, champ_metrics, report.validation_metrics, len(train), len(val), t0
-        )
+        holdout = MarketDataset(store, champion.config, holdout_idx)
+        champ_metrics, _ = evaluate_engine(champion, holdout)
+        cand_metrics, _ = evaluate_engine(engine, holdout)
+        rep = self._register_candidate("adapt", engine, champ_metrics, cand_metrics, len(train), len(val), t0)
         self.state.new_since_adapt = 0
         self.state.last_adapt_seq = max(e.seq for e in exps)
         self.state.adaptations += 1
@@ -404,11 +421,12 @@ class ContinualLearner:
         split = chronological_split(
             store.timestamps, cfg.training.validation_fraction, embargo_seconds=cfg.embargo_seconds
         )
-        engine, report = train_engine(
+        fit_idx, holdout_idx = split_holdout(split.validation, store.timestamps)
+        engine, _ = train_engine(
             cfg,
             store,
             split.train,
-            split.validation,
+            fit_idx,
             version=new_version_id("full"),
             parent_version=champion.version,
             origin="full_retrain",
@@ -416,12 +434,14 @@ class ContinualLearner:
             epochs=cc.full_retrain_epochs,
             sample_weights=sw[split.train],
         )
-        champ_metrics, _ = evaluate_engine(champion, MarketDataset(store, cfg, split.validation))
+        holdout = MarketDataset(store, cfg, holdout_idx)
+        champ_metrics, _ = evaluate_engine(champion, holdout)
+        cand_metrics, _ = evaluate_engine(engine, holdout)
         rep = self._register_candidate(
             "full_retrain",
             engine,
             champ_metrics,
-            report.validation_metrics,
+            cand_metrics,
             len(split.train),
             len(split.validation),
             t0,

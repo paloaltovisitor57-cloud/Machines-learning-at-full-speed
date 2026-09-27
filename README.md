@@ -83,7 +83,7 @@ flowchart TB
 | Continual learning | 3-pool replay (recent FIFO, historical reservoir, protected rare events), 5 sampling strategies, candidate cloning, distillation, EWC, full retraining with configurable weights |
 | Lifecycle | immutable checkpoints, champion/candidate/challenger/retired/failed registry with audit log, shadow mode, 10-gate promotion, manual and optional automatic rollback |
 | Representation | self-supervised pretraining (masked timestep, masked feature, contrastive), embedding export to Parquet/NumPy, KMeans / GMM / HDBSCAN regime discovery |
-| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 147 tests |
+| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 148 tests |
 
 ## Quick start
 
@@ -343,7 +343,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │   ├── regimes/             embeddings · clustering
 │   ├── lifecycle/           checkpoints · champion · candidate · shadow · promotion · rollback
 │   └── monitoring/          drift
-└── tests/                   147 tests incl. synthetic end-to-end pipeline
+└── tests/                   148 tests incl. synthetic end-to-end pipeline
 ```
 
 ## Testing & quality gates
@@ -352,7 +352,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 ruff check .        # lint
 ruff format --check .
 mypy                # strict mode: src, tests and examples
-pytest              # 147 tests; CUDA / MPS tests auto-skip when unavailable
+pytest              # 148 tests; CUDA / MPS tests auto-skip when unavailable
 ```
 
 The suite covers:
@@ -403,6 +403,8 @@ The trading system never touches model internals.
   `.npz` or `.pt` for graph data.
 - **Regime cluster ids are per model version**: each adaptation refits clusters on its own
   embedding space.
+- **Offline candidate validation** uses a held-out half of the newest window, which is
+  small by design. Shadow mode on genuinely new data is the decisive test.
 - **Distributed or multi-node training** is intentionally out of scope (no Ray, Spark,
   Kafka and so on). Single-GPU or CPU training is supported.
 - **Real-market data ingestion** is out of scope: the trading system produces the datasets.

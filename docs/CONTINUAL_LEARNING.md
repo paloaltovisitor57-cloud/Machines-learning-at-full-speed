@@ -75,9 +75,12 @@ Triggered when `continual.min_new_samples` new experiences have arrived.
    + **EWC** penalty `λ/2 Σ F_i(θ_i − θ*_i)²`, with the diagonal Fisher estimated on
    historical replay at the champion's parameters and normalised to mean 1.
 7. Refit calibration, OOD and regimes for the candidate.
-8. **Offline gate**: compare mean relative change in return RMSE and event log losses
-   against the champion on the same validation window. Above
-   `offline_max_degradation` → status `failed`; otherwise → `challenger` (shadow mode).
+8. **Offline gate on a true holdout**: the validation window is split chronologically.
+   The earlier half drives early stopping and calibration; the later half is never seen
+   by the candidate. On that holdout, compare the mean relative change in return RMSE and
+   event log losses against the champion. Above `offline_max_degradation` → status
+   `failed`; otherwise → `challenger` (shadow mode). Windows under 20 samples are not
+   split.
 
 ## 4. Periodic full retraining (`full_retrain`)
 
@@ -92,7 +95,8 @@ recent replay pools (`full_retrain_on_drift`).
   `recent_weight` (last `full_retrain_recent_window` experiences) versus
   `historical_weight`, multiplied by `rare_weight` for rare events and by
   `difficult_weight` for the top-20 % priority samples. Weights are normalised to mean 1.
-* Chronological split with embargo; same offline gate; enters shadow mode as a challenger.
+* Chronological split with embargo; the same held-out offline gate; enters shadow mode as a
+  challenger.
 
 ## 5. Self-supervised pretraining
 
