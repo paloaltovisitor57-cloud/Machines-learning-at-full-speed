@@ -114,7 +114,7 @@ def test_embedding_extraction_and_persistence(
     table = extract_embeddings(trained_engine, ds)
     assert len(table) == 300 and table.embeddings.shape == (300, trained_engine.config.model.latent_dim)
     assert (
-        table.expert_weights.shape == (300, 4) and "return" in table.targets and "true_regime" in table.extra
+        table.expert_weights.shape == (300, 5) and "return" in table.targets and "true_regime" in table.extra
     )
     table.save(tmp_path / "e.parquet")
     df = pl.read_parquet(tmp_path / "e.parquet")

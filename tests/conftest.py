@@ -38,11 +38,13 @@ def make_tiny_config(graph: bool = False) -> NeuralConfig:
     m.transformer.heads = 2
     m.recurrent.hidden_dim = 16
     m.tcn.channels = [16, 16]
+    m.ssm.state_dim = 8
+    m.ssm.layers = 1
     m.tabular.width = 32
     m.tabular.depth = 1
     m.graph.hidden_dim = 16
     if graph:
-        m.experts = ["transformer", "recurrent", "tcn", "tabular", "graph"]
+        m.experts = ["transformer", "recurrent", "tcn", "ssm", "tabular", "graph"]
         m.graph.enabled = True
     c.ensemble.size = 2
     c.ensemble.mc_dropout_samples = 1

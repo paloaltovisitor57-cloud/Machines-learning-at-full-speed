@@ -31,6 +31,7 @@ from nardis_neural.models.common import TimeEncoding, last_valid, masked_mean
 from nardis_neural.models.fusion import TimescaleFusion
 from nardis_neural.models.graph import GraphEncoder
 from nardis_neural.models.recurrent import RecurrentCore
+from nardis_neural.models.ssm import SSMCore
 from nardis_neural.models.tabular import ResidualMLP
 from nardis_neural.models.tcn import TCNCore
 from nardis_neural.models.transformer import TemporalTransformerCore
@@ -75,6 +76,8 @@ def _make_core(kind: str, config: NeuralConfig) -> nn.Module:
         return RecurrentCore(mc.d_model, mc.recurrent, mc.dropout)
     if kind == "tcn":
         return TCNCore(mc.d_model, mc.tcn, mc.dropout)
+    if kind == "ssm":
+        return SSMCore(mc.d_model, mc.ssm, mc.dropout)
     raise ValueError(f"unknown sequence expert {kind}")
 
 

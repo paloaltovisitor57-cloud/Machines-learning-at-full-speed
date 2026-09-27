@@ -24,7 +24,7 @@ CLASSIFICATION_TASKS: tuple[str, ...] = ("upside", "downside")
 
 ALL_TASKS: tuple[str, ...] = REGRESSION_TASKS + CLASSIFICATION_TASKS
 
-EXPERT_NAMES: tuple[str, ...] = ("transformer", "recurrent", "tcn", "tabular", "graph")
+EXPERT_NAMES: tuple[str, ...] = ("transformer", "recurrent", "tcn", "ssm", "tabular", "graph")
 
 
 class _Base(BaseModel):
@@ -146,6 +146,15 @@ class TCNConfig(_Base):
     kernel_size: int = Field(default=3, ge=2)
 
 
+class SSMConfig(_Base):
+    """Selective state-space (Mamba-style) expert."""
+
+    state_dim: int = Field(default=8, ge=1)
+    expand: int = Field(default=2, ge=1)
+    conv_kernel: int = Field(default=4, ge=1)
+    layers: int = Field(default=1, ge=1)
+
+
 class TabularConfig(_Base):
     width: int = Field(default=128, gt=0)
     depth: int = Field(default=3, ge=1)
@@ -177,11 +186,12 @@ class ModelConfig(_Base):
     latent_dim: int = Field(default=64, gt=0)
     head_hidden_dim: int = Field(default=64, gt=0)
     dropout: float = Field(default=0.1, ge=0, lt=1)
-    experts: list[str] = Field(default_factory=lambda: ["transformer", "recurrent", "tcn", "tabular"])
+    experts: list[str] = Field(default_factory=lambda: ["transformer", "recurrent", "tcn", "ssm", "tabular"])
     share_encoder_across_timescales: bool = True
     transformer: TransformerConfig = Field(default_factory=TransformerConfig)
     recurrent: RecurrentConfig = Field(default_factory=RecurrentConfig)
     tcn: TCNConfig = Field(default_factory=TCNConfig)
+    ssm: SSMConfig = Field(default_factory=SSMConfig)
     tabular: TabularConfig = Field(default_factory=TabularConfig)
     graph: GraphModelConfig = Field(default_factory=GraphModelConfig)
     gating: GatingConfig = Field(default_factory=GatingConfig)

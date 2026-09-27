@@ -32,6 +32,10 @@ DeviceOpt = Annotated[str | None, typer.Option("--device", help="cpu | cuda | cu
 ModelOpt = Annotated[Path, typer.Option("--model", "-m", help="workspace or model directory")]
 WorkspaceOpt = Annotated[Path, typer.Option("--workspace", "-w", help="registry workspace directory")]
 DataOpt = Annotated[Path, typer.Option("--data", "-d", help="dataset (.npy dir, .npz, .pt, .parquet)")]
+ProfileOpt = Annotated[
+    str | None,
+    typer.Option("--profile", help="auto | cpu-lite | cpu | gpu | gpu-frontier (scales the model)"),
+]
 
 
 def _echo(obj: Any) -> None:
@@ -57,6 +61,14 @@ def _dataset(path: Path, config: NeuralConfig) -> Any:
 
     cache = path.with_name(path.stem + "_cache") if path.suffix == ".parquet" else None
     return MarketDataset(load_store(path, config, cache_dir=cache), config)
+
+
+@app.command()
+def hardware() -> None:
+    """Detect CPU / CUDA / Apple GPU and show the recommended compute profile."""
+    from nardis_neural.hardware import detect
+
+    _echo(detect().to_dict())
 
 
 @app.command("init-config")
@@ -118,6 +130,7 @@ def train(
     ] = None,
     run_dir: Annotated[Path | None, typer.Option("--run-dir", help="per-epoch checkpoints / metrics")] = None,
     resume: Annotated[bool, typer.Option("--resume")] = False,
+    profile: ProfileOpt = None,
     device: DeviceOpt = None,
 ) -> None:
     """Train a calibrated deep ensemble on a labelled dataset."""
@@ -130,6 +143,10 @@ def train(
     if workspace is None and out is None:
         raise typer.BadParameter("pass --workspace and/or --out")
     cfg = load_config(config)
+    if profile is not None:
+        from nardis_neural.hardware import apply_profile
+
+        cfg = apply_profile(cfg, profile)
     if ensemble_size is not None:
         cfg.ensemble.size = ensemble_size
         cfg.ensemble.embedding_member = min(cfg.ensemble.embedding_member, ensemble_size - 1)

@@ -154,7 +154,7 @@ def test_engine_prediction_schema(trained_engine: NeuralEngine, later_arrays: di
     assert pred.total_uncertainty >= pred.aleatoric_uncertainty - 1e-6
     assert len(pred.market_embedding) == cfg.model.latent_dim
     assert sum(pred.expert_weights.values()) == pytest.approx(1.0, abs=1e-4)
-    assert set(pred.expert_weights) == {"transformer", "recurrent", "tcn", "tabular"}
+    assert set(pred.expert_weights) == {"transformer", "recurrent", "tcn", "ssm", "tabular"}
     assert pred.return_quantiles["5m"]["q10"] < pred.return_quantiles["5m"]["q90"]
     assert pred.regime_cluster is not None
     forbidden = {"action", "signal", "buy", "sell", "order", "side", "size", "position"}

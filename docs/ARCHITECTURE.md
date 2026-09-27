@@ -56,16 +56,17 @@ flowchart TB
         TR[Transformer expert<br/>pre-LN, causal, masked,<br/>time + recency encoding]
         RN[Recurrent expert<br/>GRU / LSTM, packed,<br/>gap-aware]
         TC[TCN expert<br/>dilated causal conv,<br/>multi-scale skips]
+        SM[SSM expert<br/>selective state space,<br/>input-dependent Δ]
         TB[Tabular expert<br/>residual MLP]
         GR[Graph expert<br/>relational SAGE / GAT]
     end
 
-    fast & med & slow --> TR & RN & TC
+    fast & med & slow --> TR & RN & TC & SM
     cur --> TB
     graph --> GR
 
-    TR & RN & TC & TB & GR --> Gate[Dynamic gating network<br/>softmax over available experts<br/>load-balance + entropy + z-loss]
-    TR & RN & TC & TB & GR --> Mix[Expert adapters<br/>Σ w_e · A_e h_e]
+    TR & RN & TC & SM & TB & GR --> Gate[Dynamic gating network<br/>softmax over available experts<br/>load-balance + entropy + z-loss]
+    TR & RN & TC & SM & TB & GR --> Mix[Expert adapters<br/>Σ w_e · A_e h_e]
     Gate -- per-observation weights --> Mix
     Mix --> Lat[Latent encoder<br/>MarketStateEmbedding]
     Lat --> H1[return heads<br/>μ, log σ², quantiles]
@@ -99,7 +100,8 @@ that behave very differently.
 At inference, a shared core encodes **all timescales in one call**: projected sequences
 are left-padded to a common length and stacked on the batch axis. This is exact, not an
 approximation: every core is invariant to extra left padding (key masking in the
-Transformer, packed sequences in the RNN, zero-held unobserved steps in the TCN), and a
+Transformer, packed sequences in the RNN, zero-held unobserved steps in the TCN, Δ = 0
+on unobserved steps in the SSM), and a
 test asserts equality with per-timescale encoding. Training keeps per-timescale calls
 so it doesn't pay for padding compute.
 
@@ -110,6 +112,7 @@ so it doesn't pay for padding compute.
 | Transformer | pre-LayerNorm blocks, `scaled_dot_product_attention` with combined causal + key-padding mask, recency positional embedding + continuous time encoding, GELU feed-forward, residuals, dropout | long-range, content-addressed dependencies |
 | Recurrent | GRU (default) or LSTM; observed steps are compacted chronologically and run as a *packed* sequence, so padding and interior gaps never touch the recurrent state | smooth sequential state accumulation |
 | TCN | dilated causal convolutions (left padding only) in residual blocks; per-timestep LayerNorm (batch/group norm over time would leak the future); a learned softmax mixture of every block's output (multi-receptive-field skips) | local patterns, bursts, short shocks |
+| SSM | selective state-space layers (Mamba-style): pre-LN, input projection into signal and gate, causal depthwise conv, input-dependent step Δ and B / C, diagonal scan `s_t = exp(Δ_t A) s_{t−1} + Δ_t B_t x_t`, `y_t = C_t s_t + D x_t`, SiLU gate, residual. Unobserved steps get Δ = 0 and zero input, so the state passes through gaps and padding unchanged. The scan is sequential in pure PyTorch: linear in length, no custom kernels | per-step choice of what to remember: bursts reset state, quiet periods keep it |
 | Tabular | residual MLP (pre-LN residual blocks, GELU/SiLU, dropout) | immediate state without history |
 | Graph (optional) | pure-PyTorch relational GraphSAGE or GAT (per-relation weights / attention bias), readout = target node ‖ mean pool | wallet→token, wallet→wallet, token→token structure |
 
@@ -277,13 +280,32 @@ reload gives bit-identical outputs.
 ## 9. Performance
 
 Measured on a 4-core Intel Xeon @ 2.1 GHz (CPU only) with the **default** configuration
-(3 members × ~664 k parameters, sequence lengths 64/48/32):
+(3 members × ~729 k parameters, five experts including the SSM, sequence lengths 64/48/32):
 
 | MC samples | single obs p50 | batch 32 | batch 256 |
 |---|---|---|---|
-| 2 (default) | ~40 ms | ~130 ms (≈250 obs/s) | ~650 ms (≈390 obs/s) |
-| 0 | ~27 ms | ~81 ms (≈395 obs/s) | ~600 ms (≈430 obs/s) |
+| 2 (default) | ~49 ms | ~190 ms (≈170 obs/s) | ~1.2 s (≈215 obs/s) |
+| 0 | ~39 ms | ~150 ms (≈210 obs/s) | ~1.1 s (≈235 obs/s) |
+| `cpu-lite` profile (2 × 168 k, MC 0) | ~21 ms | ~88 ms (≈365 obs/s) | ~0.4 s (≈640 obs/s) |
 
-Peak RSS was about 0.8 GB, including PyTorch itself. A GPU is much faster; widths, depths
+The SSM scan is a plain loop over time. On CPUs it measured faster than a parallel prefix
+scan, which is memory-bound at these batch sizes.
+Peak RSS was about 1 GB (0.8 GB for `cpu-lite`), including PyTorch itself. A GPU is much faster; widths, depths
 and sequence lengths can be scaled up or down in YAML. Measure your own hardware with
 `nardis-neural benchmark`.
+
+### 9.1 Hardware profiles
+
+`nardis_neural.hardware` scales one architecture to the machine. `nardis-neural hardware`
+prints what was detected, and `train --profile auto` (or `solana bootstrap --profile …`)
+applies it:
+
+| profile | model per member | ensemble / MC passes | parameters per member | picked when |
+|---|---|---|---|---|
+| `cpu-lite` | d = 32, 1-layer experts, SSM state 8 | 2 / 0 | ≈ 0.17 M | CPU with < 8 cores |
+| `cpu` | d = 48, 2-layer experts, SSM state 16 | 3 / 1 | ≈ 0.39 M | CPU with ≥ 8 cores |
+| `gpu` | d = 128, 3-layer experts, 2 SSM layers | 5 / 2 | ≈ 3.2 M | CUDA or Apple MPS |
+| `gpu-frontier` | d = 256, 6-layer Transformer, 4 SSM layers with state 32 | 5 / 4 | ≈ 16.6 M | CUDA with ≥ 16 GB |
+
+Every profile produces the same inputs and outputs, so checkpoints, the lifecycle and the
+Solana modules work unchanged. GPU profiles use mixed precision where it is safe.

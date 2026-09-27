@@ -22,7 +22,7 @@ from nardis_neural.schemas import GraphInput, NeuralObservation, NeuralOutcome, 
 
 def test_default_config_is_valid_and_roundtrips(tmp_path: Path) -> None:
     cfg = NeuralConfig()
-    assert cfg.model.enabled_experts == ["transformer", "recurrent", "tcn", "tabular"]
+    assert cfg.model.enabled_experts == ["transformer", "recurrent", "tcn", "ssm", "tabular"]
     assert cfg.horizon_names == ["30s", "2m", "5m"]
     assert cfg.embargo_seconds == 300
     path = tmp_path / "c.yaml"

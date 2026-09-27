@@ -103,7 +103,13 @@ def test_init_config(tmp_path: Path) -> None:
 
 def test_inspect_evaluate_predict(cli_env: dict[str, Path]) -> None:
     info = _last_json(run("inspect-model", "--model", cli_env["model"], "--device", "cpu"))
-    assert info["ensemble_size"] == 2 and info["experts"] == ["transformer", "recurrent", "tcn", "tabular"]
+    assert info["ensemble_size"] == 2 and info["experts"] == [
+        "transformer",
+        "recurrent",
+        "tcn",
+        "ssm",
+        "tabular",
+    ]
     metrics = _last_json(
         run(
             "evaluate",

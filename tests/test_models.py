@@ -193,9 +193,9 @@ def test_full_forward_shapes(
     for t in ("max_upside", "max_drawdown", "volatility"):
         assert (out.means[t] >= 0).all()
     assert out.embedding.shape == (b, tiny_config.model.latent_dim)
-    assert out.expert_weights.shape == (b, 4)
+    assert out.expert_weights.shape == (b, 5)
     assert torch.allclose(out.expert_weights.sum(-1), torch.ones(b), atol=1e-5)
-    assert set(out.timescale_weights) == {"transformer", "recurrent", "tcn"}
+    assert set(out.timescale_weights) == {"transformer", "recurrent", "tcn", "ssm"}
     for tensor in [*out.means.values(), *out.logvars.values(), *out.logits.values(), out.embedding]:
         assert torch.isfinite(tensor).all()
 
@@ -259,7 +259,7 @@ def test_missing_sequences_mark_experts_unavailable(
         for k, s in batch.sequences.items()
     }
     out = model(replace(batch, sequences=empty))
-    seq_idx = [model.expert_names.index(n) for n in ("transformer", "recurrent", "tcn")]
+    seq_idx = [model.expert_names.index(n) for n in ("transformer", "recurrent", "tcn", "ssm")]
     assert (out.expert_weights[:, seq_idx] == 0).all()
     assert torch.allclose(out.expert_weights[:, model.expert_names.index("tabular")], torch.ones(batch.size))
     # a batch without some timescales entirely still works
@@ -316,3 +316,30 @@ def test_batched_timescales_match_per_timescale_encoding(
             ref = expert.summarize(expert.encode_timesteps(ts, seq), seq.mask)
             a = avail[:, i]
             assert torch.allclose(tokens[a, i], ref[a], atol=1e-5), f"{name}/{ts}"
+
+
+# ---------------------------------------------------------------- selective SSM
+def test_ssm_causal_masked_and_padding_invariant() -> None:
+    from nardis_neural.config import SSMConfig
+    from nardis_neural.models.ssm import SSMCore
+
+    torch.manual_seed(0)
+    core = SSMCore(D, SSMConfig(state_dim=8, layers=2), 0.0).eval()
+    x = torch.randn(2, 20, D)
+    mask = torch.ones(2, 20, dtype=torch.bool)
+    base = core(x, mask)
+    assert base.shape == (2, 20, D) and torch.isfinite(base).all()
+    x2 = x.clone()
+    x2[:, 12:] += 4.0
+    assert torch.allclose(core(x2, mask)[:, :12], base[:, :12], atol=1e-5), "SSM leaked future information"
+    gap = mask.clone()
+    gap[0, 5] = False
+    x3 = x.clone()
+    x3[0, 5] = 1e3
+    assert torch.allclose(core(x3, gap), core(x, gap), atol=1e-5), "masked steps must not influence the state"
+    padded = torch.cat([torch.zeros(2, 7, D), x], dim=1)
+    pmask = torch.cat([torch.zeros(2, 7, dtype=torch.bool), mask], dim=1)
+    assert torch.allclose(core(padded, pmask)[:, 7:], base, atol=1e-5), "left padding must not change outputs"
+    out = core.train()(x, mask)
+    out.pow(2).mean().backward()
+    assert all(p.grad is not None for p in core.parameters())
