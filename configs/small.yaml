@@ -1,0 +1,231 @@
+features:
+  current_dim: 16
+  timescales:
+  - name: fast
+    feature_dim: 6
+    max_len: 32
+    resolution_seconds: 1.0
+  - name: medium
+    feature_dim: 6
+    max_len: 24
+    resolution_seconds: 5.0
+  - name: slow
+    feature_dim: 7
+    max_len: 16
+    resolution_seconds: 30.0
+  graph:
+    node_feature_dim: 8
+    num_edge_types: 3
+targets:
+  horizons:
+  - name: 30s
+    seconds: 30.0
+    upside_threshold: 0.01
+    downside_threshold: 0.01
+  - name: 2m
+    seconds: 120.0
+    upside_threshold: 0.02
+    downside_threshold: 0.02
+  - name: 5m
+    seconds: 300.0
+    upside_threshold: 0.03
+    downside_threshold: 0.03
+  quantiles:
+  - 0.1
+  - 0.5
+  - 0.9
+model:
+  d_model: 32
+  latent_dim: 32
+  head_hidden_dim: 32
+  dropout: 0.1
+  experts:
+  - transformer
+  - recurrent
+  - tcn
+  - tabular
+  share_encoder_across_timescales: true
+  transformer:
+    layers: 1
+    heads: 4
+    ff_multiplier: 2
+    causal: true
+    max_positions: 512
+  recurrent:
+    cell: gru
+    hidden_dim: 32
+    layers: 1
+  tcn:
+    channels:
+    - 32
+    - 32
+    - 32
+    kernel_size: 3
+  tabular:
+    width: 64
+    depth: 2
+    activation: gelu
+  graph:
+    enabled: false
+    kind: sage
+    hidden_dim: 64
+    layers: 2
+    heads: 2
+  gating:
+    hidden_dim: 64
+    temperature: 1.0
+    noise_std: 0.1
+    expert_dropout: 0.05
+    load_balance_weight: 0.01
+    entropy_weight: 0.001
+    z_loss_weight: 0.0001
+loss:
+  regression_loss: gaussian
+  huber_delta: 1.0
+  variance_loss_weight: 0.5
+  quantile_loss_weight: 0.25
+  classification_loss: bce
+  focal_gamma: 2.0
+  focal_alpha: null
+  pos_weight: auto
+  task_weights:
+    return: 1.0
+    max_upside: 0.5
+    max_drawdown: 0.5
+    volatility: 0.5
+    upside: 1.0
+    downside: 1.0
+  learned_uncertainty_weighting: false
+training:
+  epochs: 6
+  batch_size: 128
+  eval_batch_size: 512
+  optimizer: adamw
+  learning_rate: 0.002
+  weight_decay: 0.0001
+  scheduler: cosine
+  warmup_fraction: 0.05
+  grad_clip_norm: 1.0
+  grad_accumulation_steps: 1
+  early_stopping_patience: 5
+  early_stopping_min_delta: 0.0001
+  mixed_precision: auto
+  device: auto
+  seed: 7
+  deterministic: false
+  num_workers: 0
+  max_nonfinite_steps: 10
+  balanced_sampling: false
+  rare_event_oversampling: 1.0
+  rare_event_return_quantile: 0.95
+  validation_fraction: 0.2
+  embargo_seconds: null
+  bootstrap_members: false
+  max_train_batches_per_epoch: null
+normalization:
+  method: robust
+  clip: 8.0
+  max_fit_rows: 200000
+ensemble:
+  size: 3
+  mc_dropout_samples: 2
+  mc_seed: 1234
+  embedding_member: 0
+calibration:
+  method: temperature
+  n_bins: 10
+  min_samples: 50
+ood:
+  shrinkage: 0.1
+  reference_quantile: 0.99
+  embedding_weight: 0.5
+  input_weight: 0.25
+  disagreement_weight: 0.25
+  confidence_penalty: 1.0
+replay:
+  recent_capacity: 5000
+  historical_capacity: 20000
+  rare_capacity: 5000
+  recency_half_life: 3600.0
+  priority_alpha: 0.6
+  priority_beta: 0.4
+  priority_epsilon: 0.001
+  rare_return_threshold: 0.15
+  seed: 11
+continual:
+  min_new_samples: 300
+  adapt_samples: 1500
+  adapt_epochs: 3
+  adapt_learning_rate: 0.0002
+  adapt_validation_fraction: 0.2
+  recent_fraction: 0.5
+  historical_fraction: 0.3
+  rare_fraction: 0.1
+  difficult_fraction: 0.1
+  distillation_weight: 0.5
+  distillation_temperature: 2.0
+  ewc_enabled: true
+  ewc_weight: 10.0
+  ewc_fisher_batches: 20
+  offline_max_degradation: 0.25
+  full_retrain_min_new_samples: 1500
+  full_retrain_recent_weight: 3.0
+  full_retrain_historical_weight: 1.0
+  full_retrain_rare_weight: 2.0
+  full_retrain_difficult_weight: 1.5
+  full_retrain_recent_window: 5000
+  full_retrain_epochs: null
+  full_retrain_on_drift: true
+pretrain:
+  tasks:
+  - masked_timestep
+  - masked_feature
+  - contrastive
+  mask_ratio: 0.25
+  epochs: 5
+  batch_size: 128
+  learning_rate: 0.001
+  contrastive_temperature: 0.2
+  augmentation_noise: 0.1
+  contrastive_weight: 0.5
+regimes:
+  method: kmeans
+  n_clusters: 6
+  auto_select: false
+  k_min: 2
+  k_max: 10
+  hdbscan_min_cluster_size: 25
+  max_fit_samples: 50000
+  seed: 0
+drift:
+  psi_bins: 10
+  psi_threshold: 0.2
+  ks_pvalue_threshold: 0.01
+  wasserstein_threshold: 0.5
+  embedding_distance_threshold: 1.5
+  error_ratio_threshold: 1.3
+  feature_fraction_threshold: 0.25
+promotion:
+  min_observations: 150
+  max_rmse_ratio: 1.0
+  max_log_loss_ratio: 1.0
+  max_brier_ratio: 1.0
+  max_ece_increase: 0.02
+  min_rank_corr_delta: -0.02
+  max_tail_mae_ratio: 1.05
+  max_nll_increase: 0.05
+  min_window_win_fraction: 0.5
+  time_windows: 4
+  max_regime_degradation: 0.15
+  min_regime_observations: 30
+  required_gates:
+  - min_observations
+  - return_rmse
+  - log_loss
+  - tail_mae
+  min_passed_fraction: 0.7
+lifecycle:
+  keep_champions: 5
+  auto_rollback: false
+  auto_rollback_min_observations: 200
+  auto_rollback_degradation: 0.3
