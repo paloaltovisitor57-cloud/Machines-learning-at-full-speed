@@ -36,6 +36,7 @@ from nardis_neural.solana.edge.model import EdgeModel
 from nardis_neural.solana.edge.research import edge_features, research_markdown, run_edge_research
 from nardis_neural.solana.events import Event
 from nardis_neural.solana.features import SolanaFeatureBuilder
+from nardis_neural.solana.forward import ForwardLedger
 from nardis_neural.solana.labels import SolanaLabeler
 from nardis_neural.solana.market import EventStore, SolanaMarket
 from nardis_neural.solana.moonshot import MoonshotSpec, TailModel, moonshot_markdown, run_moonshot_research
@@ -190,6 +191,12 @@ class SolanaBrain:
         online = self.root / "moonshot" / "online.npz"
         self.tracker = MoonshotTracker.load(online, spec) if online.exists() else MoonshotTracker(spec)
         """Samples, labels and buffers moonshot rows as events stream past (online learning)."""
+        self.forward = ForwardLedger.load(
+            self.root / "forward",
+            self.moonshot.spec if self.moonshot is not None else MoonshotSpec(),
+            self._ledger_alarm(),
+        )
+        """Paper tickets opened and settled from the assessments (forward test)."""
         self.moonshot_last_refit = float(state.get("moonshot_last_refit", -np.inf))
         self.pending: list[_Pending] = []
         self._vetoes: dict[str, list[str]] = {}
@@ -263,7 +270,7 @@ class SolanaBrain:
         """Label finished moonshot rows, then drop tokens idle for ``evict_idle_seconds``."""
         now = self.market.now
         self.tracker.resolve(self.market, now)
-        busy = {p.mint for p in self.pending} | set(self.tracker.pending)
+        busy = {p.mint for p in self.pending} | set(self.tracker.pending) | set(self.forward.open)
         idle = max(self.evict_idle_seconds, self.market.reputation_seconds + 1.0)
         return self.market.evict(now, idle, keep=busy.__contains__)
 
@@ -348,6 +355,7 @@ class SolanaBrain:
                     features=feats,
                 )
             )
+        self.forward.observe(reports, now)
         return reports
 
     def _moonshot_view(
@@ -463,6 +471,7 @@ class SolanaBrain:
                 self.risk_t.append(p.t)
             done += 1
         self.pending = still
+        self.forward.settle(self.market, now)
         if len(self.risk_y) > self.max_risk_samples:  # rolling window for long streams
             cut = len(self.risk_y) - self.max_risk_samples
             del self.risk_x[:cut], self.risk_y[:cut], self.risk_t[:cut]
@@ -499,6 +508,7 @@ class SolanaBrain:
             "risk_refit": refit,
             "champion": self.learner.registry.champion_version,
             "pending": len(self.pending),
+            "forward": self.forward.summary(),
         }
 
     def refit_moonshot_online(
@@ -588,6 +598,16 @@ class SolanaBrain:
         self.edge, self.edge_meta = research.model, research.report
         return research.report
 
+    def _ledger_alarm(self) -> tuple[str, float] | None:
+        """Exit alarm chosen by the last tape research (window key, threshold), if any."""
+        f = self.root / "tape" / "research.json"
+        if not f.exists():
+            return None
+        chosen = json.loads(f.read_text()).get("exit_policy", {}).get("tune", {}).get("chosen", {})
+        if chosen.get("theta") is None:
+            return None
+        return str(chosen["window"]), float(chosen["theta"])
+
     def _tape_view(self, mints: list[str], current: npt.NDArray[Any], now: float) -> list[dict[str, float]]:
         """Tape Transformer outputs for each mint (empty dicts when no tape model is installed)."""
         model = self.tape_model
@@ -644,6 +664,7 @@ class SolanaBrain:
         (d / "research.json").write_text(json.dumps(research.report, indent=2, default=float))
         (d / "REPORT.md").write_text(tape_markdown(research.report))
         self.tape_model = research.model
+        self.forward.alarm = self._ledger_alarm()
         return research.report
 
     def fit_moonshot(
@@ -677,6 +698,7 @@ class SolanaBrain:
         (d / "research.json").write_text(json.dumps(research.report, indent=2, default=float))
         (d / "REPORT.md").write_text(moonshot_markdown(research.report))
         self.moonshot = research.model
+        self.forward.spec = research.model.spec
         return research.report
 
     # ------------------------------------------------------------------ persistence
@@ -704,6 +726,7 @@ class SolanaBrain:
             self.history.save(self.root / "events")
         (self.root / "moonshot").mkdir(exist_ok=True)
         self.tracker.save(self.root / "moonshot" / "online.npz")
+        self.forward.save()
         if self.risk_y:
             np.savez(
                 self.root / "risk_samples.npz",

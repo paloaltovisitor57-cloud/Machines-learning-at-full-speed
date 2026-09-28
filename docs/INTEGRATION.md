@@ -130,3 +130,32 @@ Parquet layout: `observation_id` (string), `timestamp` (float), `current` (list<
   lifecycle state.
 * **Safety**: the champion directory is immutable. Promotions and rollbacks only move a
   pointer in `registry.json`, and every transition is appended to its audit log.
+
+## Forward test: score the ML signals before trusting them
+
+`SolanaBrain` keeps a **forward-test ledger** (`nardis_neural.solana.forward`) that records
+what the signals would have done, as they fire, with nothing chosen in hindsight:
+
+* a paper ticket opens the first time a token is inside the moonshot entry window, is not
+  vetoed by the manipulation guard, and its expected ladder payoff is at least the ticket;
+* the Tape Transformer's collapse alarm (window and threshold chosen by `tape-research` on
+  its tune period) arms an early exit;
+* the ticket settles once its run is over, by simulating the ladder plus the alarm on the
+  real pool path (latency, impact and fees included).
+
+It runs inside every assessment round, so:
+
+* during `solana stream` it is the **paper-trading scorecard** of the ML layer;
+* during `solana stream-train` over weeks of history it is a **walk-forward backtest of the
+  live system** at scale: every model refit, promotion and eviction happens exactly as it
+  would live.
+
+```bash
+nardis-neural solana forward-report --workspace workspaces/sol
+```
+
+The report gives tickets, total paper PnL, mean and median multiple with a bootstrap CI,
+hit rates, the number of alarm exits, predicted versus observed P(≥10x), and how the top
+quintile by `chase_score` did compared with the rest. Compare it with your own algorithm's
+paper results on the same days before letting the signals size real positions.
+

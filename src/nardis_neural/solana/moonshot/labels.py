@@ -115,9 +115,13 @@ def _shift_scale(log: TokenEventLog, ts: F64, sol: F64) -> F64:
 
 
 def moonshot_outcome(
-    log: TokenEventLog, t: float, spec: MoonshotSpec, data_end: float
+    log: TokenEventLog, t: float, spec: MoonshotSpec, data_end: float, exit_at: float | None = None
 ) -> MoonshotOutcome | None:
-    """Outcome of a ticket for a signal at ``t`` using only data up to ``data_end``."""
+    """Outcome of a ticket for a signal at ``t`` using only data up to ``data_end``.
+
+    ``exit_at`` is an external exit signal (e.g. a learned collapse alarm): whatever is still
+    held is sold at the first decision point at or after it, with the usual latency.
+    """
     entry_t = t + spec.latency_seconds
     if entry_t + spec.latency_seconds > data_end:
         return None
@@ -157,6 +161,8 @@ def moonshot_outcome(
         int(stop_hits[0]) if len(stop_hits) else len(marks) - 1,
         int(trail_hits[0]) if len(trail_hits) else len(marks) - 1,
     )
+    if exit_at is not None:
+        close = min(close, int(np.searchsorted(decide_t, max(exit_at, entry_t), side="left")), len(marks) - 1)
     events: list[tuple[int, float]] = []
     for level, frac in zip(spec.ladder, spec.ladder_fractions, strict=True):
         hit = np.flatnonzero(marks[:close] >= level)

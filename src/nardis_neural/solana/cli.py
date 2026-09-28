@@ -516,3 +516,15 @@ def tape_research(
     )
     typer.echo(tape_markdown(report))
     typer.echo(f"tape model installed in {workspace / 'tape'}")
+
+
+@app.command("forward-report")
+def forward_report(
+    workspace: Annotated[Path, typer.Option("--workspace", "-w", help="Solana workspace")],
+) -> None:
+    """Paper-ticket scorecard of the ML signals (forward test recorded during stream / stream-train)."""
+    from nardis_neural.solana.forward import ForwardLedger
+    from nardis_neural.solana.moonshot.labels import MoonshotSpec
+
+    ledger = ForwardLedger.load(workspace / "forward", MoonshotSpec())
+    _echo({"alarm": ledger.alarm} | ledger.summary())

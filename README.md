@@ -95,7 +95,7 @@ flowchart TB
 | Continual learning | 3-pool replay (recent FIFO, historical reservoir, protected rare events), 5 sampling strategies, candidate cloning, distillation, EWC, full retraining with configurable weights |
 | Lifecycle | immutable checkpoints, champion/candidate/challenger/retired/failed registry with audit log, shadow mode, 10-gate promotion, manual and optional automatic rollback |
 | Representation | self-supervised pretraining (masked timestep, masked feature, contrastive), embedding export to Parquet/NumPy, KMeans / GMM / HDBSCAN regime discovery |
-| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 188 test functions |
+| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 191 test functions |
 
 ## Quick start
 
@@ -367,7 +367,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │                            edge/ (barriers · model · trees · backtest · research)
 │                            moonshot/ (labels · tail · guard · online · research)
 │                            tape/ (features · dataset · model · research)
-└── tests/                   188 test functions incl. synthetic end-to-end pipeline
+└── tests/                   191 test functions incl. synthetic end-to-end pipeline
 ```
 
 ## Testing & quality gates
@@ -1185,6 +1185,34 @@ Parquet layout: `observation_id` (string), `timestamp` (float), `current` (list<
   lifecycle state.
 * **Safety**: the champion directory is immutable. Promotions and rollbacks only move a
   pointer in `registry.json`, and every transition is appended to its audit log.
+
+### Forward test: score the ML signals before trusting them
+
+`SolanaBrain` keeps a **forward-test ledger** (`nardis_neural.solana.forward`) that records
+what the signals would have done, as they fire, with nothing chosen in hindsight:
+
+* a paper ticket opens the first time a token is inside the moonshot entry window, is not
+  vetoed by the manipulation guard, and its expected ladder payoff is at least the ticket;
+* the Tape Transformer's collapse alarm (window and threshold chosen by `tape-research` on
+  its tune period) arms an early exit;
+* the ticket settles once its run is over, by simulating the ladder plus the alarm on the
+  real pool path (latency, impact and fees included).
+
+It runs inside every assessment round, so:
+
+* during `solana stream` it is the **paper-trading scorecard** of the ML layer;
+* during `solana stream-train` over weeks of history it is a **walk-forward backtest of the
+  live system** at scale: every model refit, promotion and eviction happens exactly as it
+  would live.
+
+```bash
+nardis-neural solana forward-report --workspace workspaces/sol
+```
+
+The report gives tickets, total paper PnL, mean and median multiple with a bootstrap CI,
+hit rates, the number of alarm exits, predicted versus observed P(≥10x), and how the top
+quintile by `chase_score` did compared with the rest. Compare it with your own algorithm's
+paper results on the same days before letting the signals size real positions.
 
 ## Solana intelligence layer (`nardis_neural.solana`)
 
@@ -2377,6 +2405,14 @@ score it against the raw-feature tail model on later tokens; installs the model.
 | `--archetypes` | path | null | simulator archetypes.json for diagnostics |
 | `--device` | str | null | cpu \| cuda \| cuda:0 \| mps (default: auto) |
 
+### `nardis-neural solana forward-report`
+
+Paper-ticket scorecard of the ML signals (forward test recorded during stream / stream-train).
+
+| option | type | default | description |
+|---|---|---|---|
+| `--workspace`, `-w` | path | required | Solana workspace |
+
 
 ## Configuration
 
@@ -3542,6 +3578,7 @@ SolanaBrain — the complete Solana ML module behind one small API.
 - `build_dataset(events: "Annotated[Path, typer.Option('--events', '-e', help='event directory (Parquet tables)')]", out: "Annotated[Path, typer.Option('--out', '-o', help='output .npy dataset directory')]", solana_config: 'SolCfg' = None, config: 'BaseCfg' = None) -> 'None'` — Causal replay + hindsight labelling → canonical neural dataset (+ risk labels).
 - `decode(input_file: "Annotated[Path, typer.Option('--input', '-i', help='JSONL of getTransaction results')]", out: "Annotated[Path, typer.Option('--out', '-o', help='event directory (Parquet tables)')]", min_transfer_sol: "Annotated[float, typer.Option('--min-transfer-sol', help='ignore SOL transfers below this amount, SOL')]" = 0.05) -> 'None'` — Decode raw Solana transactions (pump.fun, AMMs, SOL transfers) into market events.
 - `edge_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history + champion)')]", folds: "Annotated[int, typer.Option('--folds', help='walk-forward folds')]" = 4, take_profit: "Annotated[float, typer.Option('--take-profit', help='take-profit barrier, fractional return (0.25 = +25%)')]" = 0.25, stop_loss: "Annotated[float, typer.Option('--stop-loss', help='stop-loss barrier, fractional loss (0.15 = -15%)')]" = 0.15, max_hold: "Annotated[float, typer.Option('--max-hold', help='max holding time (time barrier), seconds')]" = 180.0, latency: "Annotated[float, typer.Option('--latency', help='entry/exit latency, seconds')]" = 1.0, max_positions: "Annotated[int, typer.Option('--max-positions', help='max concurrent open positions in the backtest')]" = 5, device: 'DeviceOpt' = None) -> 'None'` — Walk-forward edge research on the workspace history; installs the edge model.
+- `forward_report(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace')]") -> 'None'` — Paper-ticket scorecard of the ML signals (forward test recorded during stream / stream-train).
 - `init_config(out: "Annotated[Path, typer.Option('--out', '-o', help='YAML file to write')]" = PosixPath('configs/solana.yaml')) -> 'None'` — Write the default Solana configuration.
 - `moonshot_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history + champion)')]", inputs: "Annotated[str, typer.Option('--inputs', help='raw (on-chain features) or neural (walk-forward OOF stack)')]" = 'raw', size: "Annotated[float, typer.Option('--size', help='ticket size, SOL')]" = 0.5, latency: "Annotated[float, typer.Option('--latency', help='entry/exit latency, seconds')]" = 1.0, horizon_hours: "Annotated[float, typer.Option('--horizon-hours', help='outcome horizon after entry, hours')]" = 6.0, max_entry_age: "Annotated[float, typer.Option('--max-entry-age', help='latest entry after launch, seconds')]" = 600.0, min_ev: "Annotated[float, typer.Option('--min-ev', help='ticket when E[ladder payoff] per SOL is at least this')]" = 1.0, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of later tokens held out for the test')]" = 0.35, folds: "Annotated[int, typer.Option('--folds', help='walk-forward folds (neural inputs)')]" = 4, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Fat-tail research: P(≥2x … ≥1000x) per token, ladder payoff, lottery-Kelly sizing hints.
 - `replay(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace directory')]", events: "Annotated[Path, typer.Option('--events', '-e', help='new events to stream in')]", every: "Annotated[float, typer.Option('--assess-every', help='seconds between assessment rounds')]" = 10.0, out: "Annotated[Path | None, typer.Option('--out', '-o', help='JSONL of assessments')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Stream events through the brain as if live: assess, resolve outcomes, then maintain.
@@ -3662,6 +3699,18 @@ Solana feature engineering: market state → :class:`NeuralObservation`.
   - `explain(current: 'F64') -> 'dict[str, float]'` — Map a current-feature vector to ``{name: value}`` in :data:`CURRENT_FEATURES` order.
   - `graph(self, log: 'TokenEventLog', wallets: 'WalletIntel', now: 'float') -> 'GraphInput'` — Wallet graph at ``now``: the token node plus its ``graph_top_k`` wallets by SOL volume in the last ``graph_window_seconds``.
   - `observation(self, market: 'SolanaMarket', mint: 'str', now: 'float | None' = None) -> 'NeuralObservation'` — Full model input for ``mint`` at ``now`` (default: market time), from state known at ``now``.
+
+### `nardis_neural.solana.forward`
+
+Forward-test ledger: what the ML signals would have earned, recorded as they fire.
+
+- **class `ForwardLedger`** — Paper tickets opened and settled from live (or replayed) assessments.
+  - `load(cls, path: 'str | Path', spec: 'MoonshotSpec', alarm: 'tuple[str, float] | None' = None) -> 'ForwardLedger'` — Restore a saved ledger (or start an empty one); ``alarm`` overrides the saved alarm.
+  - `observe(self, reports: 'list[Any]', now: 'float') -> 'int'` — Open tickets and arm exit alarms from a round of ``SolanaAssessment`` objects.
+  - `save(self) -> 'None'` — Write the ledger (open and closed tickets) and its summary as JSON.
+  - `settle(self, market: 'SolanaMarket', now: 'float', force: 'bool' = False) -> 'int'` — Settle tickets whose run is over (or all of them with ``force``).
+  - `summary(self) -> 'dict[str, Any]'` — Realised ticket statistics and how well the entry signals ranked the outcomes.
+- **class `Ticket`** — One paper ticket and the signals it was opened on.
 
 ### `nardis_neural.solana.ingest`
 
@@ -3789,7 +3838,7 @@ Manipulation guard for the moonshot view.
 Executable moonshot outcomes: how far could a ticket bought *now* really have run?
 
 - `ladder_payoff(peak: 'F64', spec: 'MoonshotSpec') -> 'F64'` — Model-implied ladder multiple as a function of the peak multiple ``M``.
-- `moonshot_outcome(log: 'TokenEventLog', t: 'float', spec: 'MoonshotSpec', data_end: 'float') -> 'MoonshotOutcome | None'` — Outcome of a ticket for a signal at ``t`` using only data up to ``data_end``.
+- `moonshot_outcome(log: 'TokenEventLog', t: 'float', spec: 'MoonshotSpec', data_end: 'float', exit_at: 'float | None' = None) -> 'MoonshotOutcome | None'` — Outcome of a ticket for a signal at ``t`` using only data up to ``data_end``.
 - **class `MoonshotOutcome`** — Executable outcome of one ticket: peak, ladder and final multiples of the stake, with timing.
 - **class `MoonshotSpec`** — Ticket size, latency, horizon, entry window and ladder-exit policy of moonshot outcomes.
 
@@ -3905,11 +3954,21 @@ Tape Transformer: reads the raw trade tape and predicts the tail and the collaps
 - **class `TapePrediction`** — Tail view (same fields as the tail model) plus the collapse curve.
 - `window_label(seconds: 'float') -> 'str'` — Compact name of a time window: 60 → ``1m``, 3600 → ``1h``, 45 → ``45s``.
 
+### `nardis_neural.solana.tape.policy`
+
+Entry + exit policies evaluated on executable outcomes.
+
+- `alarm_times(entries: 'dict[str, float]', mon_t: 'F64', mon_mint: 'npt.NDArray[np.str_]', risk: 'F64', theta: 'float') -> 'dict[str, float | None]'` — First monitored time after each entry where ``risk`` ≥ ``theta`` (None: never).
+- `monitor_rows(times: 'F64', mints: 'npt.NDArray[np.str_]', tokens: 'set[str]', every_seconds: 'float') -> 'I64'` — Snapshot indices of ``tokens`` thinned to at most one per ``every_seconds`` per token.
+- **class `PolicyOutcome`** — Executable results of one entry/exit policy over a set of tokens.
+- `run_policy(market: 'SolanaMarket', entries: 'dict[str, float]', spec: 'MoonshotSpec', data_end: 'float', exits: 'dict[str, float | None] | None' = None) -> 'PolicyOutcome'` — Simulate every entry (with optional exit alarms) against the real pool path.
+- `tune_exit(market: 'SolanaMarket', entries: 'dict[str, float]', spec: 'MoonshotSpec', data_end: 'float', mon_t: 'F64', mon_mint: 'npt.NDArray[np.str_]', collapse: 'F64', window_names: 'list[str]') -> 'dict[str, Any]'` — Grid-search the alarm window and threshold on the tune period (total PnL); keeps 'no alarm' unless an alarm strictly improves on it.
+
 ### `nardis_neural.solana.tape.research`
 
 Tape research: does reading the raw tape beat the aggregate-feature tail model?
 
-- `run_tape_research(store: 'EventStore', cfg: 'SolanaConfig', ncfg: 'NeuralConfig', spec: 'MoonshotSpec | None' = None, tape: 'TapeSpec | None' = None, test_fraction: 'float' = 0.35, members: 'int' = 3, epochs: 'int' = 40, min_expected_multiple: 'float' = 1.0, archetypes: 'dict[str, str] | None' = None, log: 'Logger' = <function _quiet>, seed: 'int' = 0) -> 'TapeResearch'` — Build tapes causally, train and score the Tape Transformer against the tail model.
+- `run_tape_research(store: 'EventStore', cfg: 'SolanaConfig', ncfg: 'NeuralConfig', spec: 'MoonshotSpec | None' = None, tape: 'TapeSpec | None' = None, test_fraction: 'float' = 0.35, members: 'int' = 3, epochs: 'int' = 40, min_expected_multiple: 'float' = 1.0, archetypes: 'dict[str, str] | None' = None, log: 'Logger' = <function _quiet>, seed: 'int' = 0, tune_fraction: 'float' = 0.15, monitor_seconds: 'float' = 30.0) -> 'TapeResearch'` — Build tapes causally, train and score the Tape Transformer against the tail model, then evaluate entry policies (tail / tape / blend) and a learned collapse-exit policy.
 - `tape_markdown(report: 'dict[str, Any]') -> 'str'` — Human-readable research report (tail vs tape, collapse windows, tickets).
 - **class `TapeResearch`** — Report, production model (refitted on every token) and the candidate dataset.
 
@@ -4082,7 +4141,7 @@ Transparent PyTorch training engine.
 
 ## Test inventory
 
-188 test functions (some are parametrised over devices, experts or formats).
+191 test functions (some are parametrised over devices, experts or formats).
 
 ### `tests/test_cli.py`
 
@@ -4302,6 +4361,12 @@ Edge engine: executable triple-barrier labels, backtester, meta-labeling model, 
 - `test_walk_forward_edge_research_and_brain_integration`
 - `test_exported_trees_match_sklearn`
 
+### `tests/test_solana_forward.py`
+
+Forward-test ledger: tickets open on live signals, alarms arm, settlement is executable.
+
+- `test_ledger_opens_alarms_settles_and_roundtrips`
+
 ### `tests/test_solana_ingest.py`
 
 Real-chain ingestion: base58, pump.fun event codec, transaction decoding, read-only RPC, polling streamer and the live loop into a SolanaBrain.
@@ -4359,6 +4424,8 @@ Tape Transformer: causal tape extraction, discrete-time collapse targets, the ne
 - `test_network_ignores_padding_content`
 - `test_tape_model_learns_wallets_and_crashes`
 - `test_tape_research_and_brain_integration`
+- `test_exit_alarm_sells_the_remainder_early`
+- `test_monitor_rows_and_alarm_times`
 
 ### `tests/test_splits.py`
 

@@ -155,3 +155,33 @@ def test_tape_research_and_brain_integration(tmp_path: Path) -> None:
     a = reloaded.assess(next(iter(reloaded.market.tokens)))
     assert {"p_ge_10x", "expected_multiple", "p_collapse_1m", "p_collapse_1h"} <= set(a.tape)
     assert 0 <= a.tape["p_collapse_1m"] <= a.tape["p_collapse_1h"] <= 1
+
+
+# ---------------------------------------------------------------- exit policy
+def test_exit_alarm_sells_the_remainder_early() -> None:
+    from nardis_neural.solana.moonshot import moonshot_outcome
+
+    pump = [(1, "a", True, 0.5)] + [(10 + i, f"b{i}", True, 2.0) for i in range(10)]
+    dump = [(100 + i, f"b{i}", False, 1.0) for i in range(10)]
+    m = _market(pump + dump)
+    log = m.token("TOK")
+    spec = MoonshotSpec(size_sol=0.2, horizon_seconds=3600, min_entry_age_seconds=0, trail_activation=50.0)
+    hold = moonshot_outcome(log, T0 + 2, spec, T0 + 10_000)
+    early = moonshot_outcome(log, T0 + 2, spec, T0 + 10_000, exit_at=T0 + 30)
+    assert hold is not None and early is not None
+    assert early.ladder_multiple > hold.ladder_multiple, (
+        "selling at the top of the pump beats riding the dump"
+    )
+    assert early.peak_multiple == hold.peak_multiple, "the alarm changes the exit, not the path"
+
+
+def test_monitor_rows_and_alarm_times() -> None:
+    from nardis_neural.solana.tape.policy import alarm_times, monitor_rows
+
+    t = np.array([0.0, 10.0, 20.0, 35.0, 5.0, 40.0])
+    m = np.array(["A", "A", "A", "A", "B", "C"])
+    rows = monitor_rows(t, m, {"A", "B"}, every_seconds=15)
+    assert sorted(rows.tolist()) == [0, 2, 3, 4]
+    risk = np.array([0.9, 0.2, 0.7, 0.95, 0.99, 0.99])
+    out = alarm_times({"A": 5.0, "B": 10.0}, t, m, risk, theta=0.6)
+    assert out == {"A": 20.0, "B": None}, "first alarm strictly after entry; B's only alarm was before"
