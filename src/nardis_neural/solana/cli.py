@@ -479,3 +479,40 @@ def stream_train_cmd(
         log=typer.echo,
     )
     _echo(stats)
+
+
+@app.command("tape-research")
+def tape_research(
+    workspace: Annotated[
+        Path, typer.Option("--workspace", "-w", help="Solana workspace (history + champion)")
+    ],
+    max_trades: Annotated[int, typer.Option("--max-trades", help="trades per tape (most recent kept)")] = 96,
+    members: Annotated[int, typer.Option("--members", help="ensemble members")] = 3,
+    epochs: Annotated[int, typer.Option("--epochs", help="maximum training epochs per member")] = 40,
+    test_fraction: Annotated[
+        float,
+        typer.Option("--test-fraction", help="share of the latest-launched tokens held out for the test"),
+    ] = 0.35,
+    archetypes: Annotated[
+        Path | None, typer.Option("--archetypes", help="simulator archetypes.json for diagnostics")
+    ] = None,
+    device: DeviceOpt = None,
+) -> None:
+    """Train the Tape Transformer (trade tape + wallet embeddings → tail and collapse) and
+    score it against the raw-feature tail model on later tokens; installs the model."""
+    from nardis_neural.solana.brain import SolanaBrain
+    from nardis_neural.solana.tape.features import TapeSpec
+    from nardis_neural.solana.tape.research import tape_markdown
+
+    brain = SolanaBrain(workspace, device=device)
+    arch = json.loads(archetypes.read_text()) if archetypes is not None else None
+    report = brain.fit_tape(
+        tape=TapeSpec(max_trades=max_trades),
+        test_fraction=test_fraction,
+        members=members,
+        epochs=epochs,
+        archetypes=arch,
+        log=typer.echo,
+    )
+    typer.echo(tape_markdown(report))
+    typer.echo(f"tape model installed in {workspace / 'tape'}")

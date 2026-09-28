@@ -22,6 +22,9 @@ def test_every_feature_is_documented() -> None:
     assert list(BAR_FEATURE_DOCS) == list(BAR_FEATURES)
     assert list(NODE_FEATURE_DOCS) == list(NODE_FEATURES)
     assert all(doc.strip() for doc in (*FEATURE_DOCS.values(), *BAR_FEATURE_DOCS.values()))
+    from nardis_neural.solana.tape.features import TRADE_FEATURE_DOCS, TRADE_FEATURES
+
+    assert list(TRADE_FEATURE_DOCS) == list(TRADE_FEATURES)
 
 
 def test_readme_is_generated_and_up_to_date() -> None:

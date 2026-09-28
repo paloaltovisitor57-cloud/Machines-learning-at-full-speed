@@ -67,6 +67,8 @@ class MoonshotSpec(BaseModel):
     """Before trail activation, the remainder exits when value falls by this fraction of stake."""
     levels: list[float] = Field(default_factory=lambda: [2.0, 5.0, 10.0, 100.0, 1000.0])
     """Multiples reported as P(M ≥ k)."""
+    collapse_drop: float = Field(default=0.5, gt=0, lt=1)
+    """A collapse is the ticket's value falling this fraction below its value at entry."""
 
     @model_validator(mode="after")
     def _check(self) -> MoonshotSpec:
@@ -92,6 +94,11 @@ class MoonshotOutcome:
     time_to_peak: float
     exit_time: float
     """When the ladder position was fully closed (or the end of the observed window)."""
+    collapse_time: float | None = None
+    """Seconds from entry until the value first fell ``collapse_drop`` below its entry value;
+    None if that never happened within the observed window."""
+    observed_seconds: float = 0.0
+    """Length of the observed window after entry (what a collapse-free label is censored at)."""
 
 
 def _shift_scale(log: TokenEventLog, ts: F64, sol: F64) -> F64:
@@ -120,7 +127,7 @@ def moonshot_outcome(
         return None
     pool = _pool(float(sol[i0]), float(tok[i0]), float(virt[i0]))
     if pool.sol <= 1e-9 or pool.tokens <= 1e-9:
-        return MoonshotOutcome(0.0, False, 0.0, 0.0, 0.0, entry_t)
+        return MoonshotOutcome(0.0, False, 0.0, 0.0, 0.0, entry_t, collapse_time=0.0)
     bought, after = pool.buy(spec.size_sol)
     d_sol, d_tok = after.sol - pool.sol, pool.tokens - after.tokens
     horizon_end = entry_t + spec.horizon_seconds
@@ -137,6 +144,8 @@ def moonshot_outcome(
     marks = liquidation_values(bought, sol[fill] + ds, tok[fill] - dt, virt[fill]) / spec.size_sol
     k_peak = int(np.argmax(marks))
     peak = float(max(marks[k_peak], 0.0))
+    crashed = np.flatnonzero(marks <= (1 - spec.collapse_drop) * marks[0])
+    collapse_time = float(decide_t[crashed[0]] - entry_t) if len(crashed) else None
 
     # ---- ladder policy on the same path
     run_max = np.maximum.accumulate(marks)
@@ -176,6 +185,8 @@ def moonshot_outcome(
         final_multiple=float(marks[-1]),
         time_to_peak=float(decide_t[k_peak] - entry_t),
         exit_time=float(ts[fill[close]]) if fill[close] >= 0 else entry_t,
+        collapse_time=collapse_time,
+        observed_seconds=float(end - entry_t) if censored else float(spec.horizon_seconds),
     )
 
 

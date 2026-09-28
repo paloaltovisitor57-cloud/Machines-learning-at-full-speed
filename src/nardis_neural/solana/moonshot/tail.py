@@ -44,6 +44,85 @@ GRID = np.exp(np.linspace(np.log(MIN_MULTIPLE), np.log(1e5), 361))
 KELLY_GRID = np.concatenate([[0.0], np.geomspace(1e-4, 0.5, 60)])
 
 
+def mixture_survival(pi: F64, mu: F64, s: F64, k: F64) -> F64:
+    """P(M ≥ k) of logistic mixtures on log M: ``(..., N, K)`` parameters → ``(..., N, len(k))``."""
+    z = (mu[..., None, :] - np.log(k)[:, None]) / s[..., None, :]
+    sig = 0.5 * (1 + np.tanh(0.5 * z))
+    return np.asarray((pi[..., None, :] * sig).sum(-1), dtype=np.float64)
+
+
+def mixture_nll(pi: F64, mu: F64, s: F64, peak: F64, censored: npt.NDArray[np.bool_]) -> F64:
+    """Per-row NLL of an ensemble of mixtures ``(E, N, K)``, members averaged in probability space."""
+    y = np.log(np.maximum(peak, MIN_MULTIPLE))
+    z = (y[None, :, None] - mu) / s
+    pdf = (pi * np.exp(-z - np.log(s) - 2 * np.logaddexp(0, -z))).sum(-1).mean(0)
+    sf = (pi * 0.5 * (1 + np.tanh(-0.5 * z))).sum(-1).mean(0)
+    return np.asarray(-np.log(np.maximum(np.where(censored, sf, pdf), 1e-300)))
+
+
+def apply_calibration(sf: F64, k: F64, levels: list[float], ratio: F64) -> F64:
+    """Rescale survival values at multiples ``k`` (last axis) by the per-level ratios (interpolated
+    in log k, 1 at k ≤ 1) and keep them within [0, 1] and non-increasing in k."""
+    lv = np.log(np.asarray(levels, dtype=np.float64))
+    lk = np.log(np.maximum(k, MIN_MULTIPLE))
+    r = np.interp(lk, np.concatenate([[0.0], lv]), np.concatenate([[1.0], ratio]))
+    r = np.where(lk <= 0, 1.0, r)
+    out = np.clip(sf * r, 0.0, 1.0)
+    return np.asarray(np.minimum.accumulate(out, axis=-1), dtype=np.float64)
+
+
+def fit_calibration_ratio(
+    p: F64, peak: F64, censored: npt.NDArray[np.bool_], w: npt.NDArray[Any], levels: F64, prior: float = 0.5
+) -> F64:
+    """Observed / predicted hit count per level on held-out rows (weighted), shrunk towards 1 by
+    ``prior`` pseudo-tokens and clipped to [0.05, 2]; ``p`` is (N, len(levels))."""
+    ratio = np.ones(len(levels))
+    for j, k in enumerate(levels):
+        reached = peak >= k
+        known = reached | ~censored  # censored rows below k are unresolved
+        hits = float((w * reached)[known].sum())
+        pred = float((w * p[:, j])[known].sum())
+        ratio[j] = (hits + prior) / (pred + prior)
+    return np.asarray(np.clip(ratio, 0.05, 2.0), dtype=np.float64)
+
+
+def summarize_tail(
+    pi: F64,
+    mu: F64,
+    s: F64,
+    spec: MoonshotSpec,
+    calibration: F64,
+    kelly_multiplier: float,
+    max_kelly: float,
+) -> TailPrediction:
+    """Decision view of ensemble mixtures ``(E, N, K)``: calibrated survival at ``spec.levels``,
+    median, expected ladder payoff, capped lottery Kelly and far-tail index."""
+    levels = np.asarray(spec.levels, dtype=np.float64)
+    member_sf = apply_calibration(mixture_survival(pi, mu, s, levels), levels, spec.levels, calibration)
+    grid_sf = apply_calibration(mixture_survival(pi, mu, s, GRID).mean(0), GRID, spec.levels, calibration)
+    mass = np.concatenate(
+        [1 - grid_sf[:, :1], grid_sf[:, :-1] - grid_sf[:, 1:], grid_sf[:, -1:]], axis=1
+    ).clip(0, None)
+    mid = np.concatenate([[GRID[0]], np.sqrt(GRID[:-1] * GRID[1:]), [GRID[-1]]])
+    pay = ladder_payoff(mid, spec)  # (G + 1,)
+    expected = mass @ pay
+    median = np.array([np.interp(-0.5, -row, GRID) for row in grid_sf])
+    # lottery Kelly: fraction of bankroll maximising E[log(1 + f (payoff − 1))]
+    growth = np.log1p(KELLY_GRID[:, None] * (pay[None, :] - 1)) @ mass.T  # (F, N)
+    best = KELLY_GRID[np.argmax(growth, axis=0)]
+    kelly = np.clip(best * kelly_multiplier, 0.0, max_kelly)
+    # far-tail exponent: the heaviest component with non-negligible weight dominates
+    s_eff = np.where(pi.mean(0) > 0.02, s.mean(0), 0.0).max(axis=1)
+    return TailPrediction(
+        survival=member_sf.mean(0),
+        survival_std=member_sf.std(0),
+        median_multiple=median,
+        expected_multiple=expected,
+        lottery_kelly=kelly,
+        tail_index=1.0 / np.maximum(s_eff, 1e-3),
+    )
+
+
 class _TailNet(nn.Module):
     def __init__(self, d_in: int, hidden: int, components: int, dropout: float) -> None:
         super().__init__()
@@ -145,12 +224,7 @@ class TailModel:
 
     def _calibrate(self, sf: F64, k: F64) -> F64:
         """Apply the per-level calibration to survival values at multiples ``k`` (last axis)."""
-        levels = np.log(np.asarray(self.spec.levels, dtype=np.float64))
-        lk = np.log(np.maximum(k, MIN_MULTIPLE))
-        ratio = np.interp(lk, np.concatenate([[0.0], levels]), np.concatenate([[1.0], self.calibration]))
-        ratio = np.where(lk <= 0, 1.0, ratio)
-        out = np.clip(sf * ratio, 0.0, 1.0)
-        return np.asarray(np.minimum.accumulate(out, axis=-1), dtype=np.float64)
+        return apply_calibration(sf, k, self.spec.levels, self.calibration)
 
     # ------------------------------------------------------------------ training
     def fit(
@@ -248,15 +322,9 @@ class TailModel:
         """Observed / predicted hit count per level on held-out tokens (token-weighted), shrunk to 1."""
         pi, mu, s = self._params(x)
         levels = np.asarray(self.spec.levels, dtype=np.float64)
-        p = self._survival(pi, mu, s, levels).mean(0)
-        ratio = np.ones(len(levels))
-        for j, k in enumerate(levels):
-            reached = peak >= k
-            known = reached | ~censored  # censored rows below k are unresolved
-            hits = float((w * reached)[known].sum())
-            pred = float((w * p[:, j])[known].sum())
-            ratio[j] = (hits + prior) / (pred + prior)  # a pseudo-token of prior agreement
-        return np.asarray(np.clip(ratio, 0.05, 2.0), dtype=np.float64)
+        return fit_calibration_ratio(
+            mixture_survival(pi, mu, s, levels).mean(0), peak, censored, w, levels, prior
+        )
 
     # ------------------------------------------------------------------ inference
     @torch.no_grad()
@@ -271,9 +339,7 @@ class TailModel:
     @staticmethod
     def _survival(pi: F64, mu: F64, s: F64, k: F64) -> F64:
         """(E, N, len(k)) member survival functions at multiples ``k``."""
-        z = (mu[..., None, :] - np.log(k)[:, None]) / s[..., None, :]
-        sig = 0.5 * (1 + np.tanh(0.5 * z))
-        return np.asarray((pi[..., None, :] * sig).sum(-1), dtype=np.float64)
+        return mixture_survival(pi, mu, s, k)
 
     def survival(self, x: npt.NDArray[Any], k: list[float] | F64, calibrated: bool = True) -> F64:
         """Ensemble-mean P(M ≥ k) per row at multiples ``k`` (calibrated unless ``calibrated`` is False)."""
@@ -284,43 +350,15 @@ class TailModel:
 
     def nll(self, x: npt.NDArray[Any], peak: F64, censored: npt.NDArray[np.bool_]) -> F64:
         """Per-row NLL of the ensemble mixture (members averaged in probability space)."""
-        y = np.log(np.maximum(peak, MIN_MULTIPLE))
         pi, mu, s = self._params(x)
-        z = (y[None, :, None] - mu) / s
-        pdf = (pi * np.exp(-z - np.log(s) - 2 * np.logaddexp(0, -z))).sum(-1).mean(0)
-        sf = (pi * 0.5 * (1 + np.tanh(-0.5 * z))).sum(-1).mean(0)
-        return np.asarray(-np.log(np.maximum(np.where(censored, sf, pdf), 1e-300)))
+        return mixture_nll(pi, mu, s, peak, censored)
 
     def predict(self, x: npt.NDArray[Any]) -> TailPrediction:
         """Calibrated survival at ``spec.levels``, median and expected ladder multiple, capped lottery
         Kelly and tail index for every row.
         """
         pi, mu, s = self._params(x)
-        levels = np.asarray(self.spec.levels, dtype=np.float64)
-        member_sf = self._calibrate(self._survival(pi, mu, s, levels), levels)
-        grid_sf = self._calibrate(self._survival(pi, mu, s, GRID).mean(0), GRID)  # (N, G)
-        mass = np.concatenate(
-            [1 - grid_sf[:, :1], grid_sf[:, :-1] - grid_sf[:, 1:], grid_sf[:, -1:]], axis=1
-        ).clip(0, None)
-        mid = np.concatenate([[GRID[0]], np.sqrt(GRID[:-1] * GRID[1:]), [GRID[-1]]])
-        pay = ladder_payoff(mid, self.spec)  # (G + 1,)
-        expected = mass @ pay
-        median = np.array([np.interp(-0.5, -row, GRID) for row in grid_sf])
-        # lottery Kelly: fraction of bankroll maximising E[log(1 + f (payoff − 1))]
-        growth = np.log1p(KELLY_GRID[:, None] * (pay[None, :] - 1)) @ mass.T  # (F, N)
-        best = KELLY_GRID[np.argmax(growth, axis=0)]
-        kelly = np.clip(best * self.kelly_multiplier, 0.0, self.max_kelly)
-        # far-tail exponent: the heaviest component with non-negligible weight dominates
-        w_pi = pi.mean(0)
-        s_eff = np.where(w_pi > 0.02, s.mean(0), 0.0).max(axis=1)
-        return TailPrediction(
-            survival=member_sf.mean(0),
-            survival_std=member_sf.std(0),
-            median_multiple=median,
-            expected_multiple=expected,
-            lottery_kelly=kelly,
-            tail_index=1.0 / np.maximum(s_eff, 1e-3),
-        )
+        return summarize_tail(pi, mu, s, self.spec, self.calibration, self.kelly_multiplier, self.max_kelly)
 
     # ------------------------------------------------------------------ persistence
     def save(self, directory: str | Path) -> None:

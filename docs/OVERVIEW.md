@@ -41,9 +41,10 @@ champion → challenger lifecycle.
 - [Solana intelligence layer](#solana-intelligence-layer)
 - [Edge engine](#edge-engine)
 - [Moonshot engine](#moonshot-engine)
+- [Tape Transformer](#tape-transformer)
 - [Optional / not included](#optional--not-included)
 - **[Part II — In depth](#part-ii--in-depth)**: architecture, continual learning, integration,
-  Solana layer, edge engine, moonshot engine (the full contents of `docs/`)
+  Solana layer, edge engine, moonshot engine, Tape Transformer (the full contents of `docs/`)
 - **[Part III — Generated reference](#part-iii--generated-reference)**: every CLI command and
   option, every configuration field and default, every feature, every output field, the
   public Python API and the test inventory
@@ -339,7 +340,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 ├── configs/                 default.yaml · small.yaml
 ├── README.md                generated: python -m nardis_neural.docgen (a test keeps it in sync)
 ├── docs/                    OVERVIEW.md · ARCHITECTURE.md · CONTINUAL_LEARNING.md · INTEGRATION.md ·
-│                            SOLANA.md · EDGE.md · MOONSHOT.md (the README's hand-written sources)
+│                            SOLANA.md · EDGE.md · MOONSHOT.md · TAPE.md (the README's hand-written sources)
 ├── examples/                nardis_integration.py (runnable, tested)
 ├── src/nardis_neural/
 │   ├── config.py            Pydantic config tree
@@ -363,6 +364,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │                            ingest/ (decoder · rpc · stream · history · encode · pumpfun · base58)
 │                            edge/ (barriers · model · trees · backtest · research)
 │                            moonshot/ (labels · tail · guard · online · research)
+│                            tape/ (features · dataset · model · research)
 └── tests/                   {{TESTS}} test functions incl. synthetic end-to-end pipeline
 ```
 
@@ -508,6 +510,23 @@ that runs 100x to 1000x. See [docs/MOONSHOT.md](MOONSHOT.md).
   100–1000x+ tails to find; `nardis-neural solana moonshot-research` installs the model and
   every `SolanaAssessment` then carries `moonshot` (`p_ge_10x`, `p_ge_1000x`,
   `expected_multiple`, `lottery_kelly`, `tail_index`, `in_entry_window`, …).
+
+## Tape Transformer
+
+`nardis_neural.solana.tape` reads the **raw trade tape** instead of aggregates. See
+[docs/TAPE.md](TAPE.md).
+
+- the last 96 trades, each with 18 features (side, size, timing, price move, fees, and the
+  trader's skill, runner skill, cluster, creator link and freshness as known now), plus a
+  **learned wallet embedding** keyed by a stable hash of the address;
+- a small pre-LayerNorm **Transformer** with a summary token, fused with the 67 current
+  features. Frequency gating and wallet dropout stop the wallet table from memorising noise;
+- two heads: the censored power-law **tail** (P ≥ 2x … 1000x) and a discrete-time **collapse
+  hazard** (P value halves within 1 min / 5 min / 15 min / 1 h), which is the exit signal;
+- causal tape replay, research scored head-to-head against the tail model on identical rows,
+  `nardis-neural solana tape-research`, and `SolanaAssessment.tape` on every assessment.
+  On the simulator the collapse head reaches AUC 0.93–0.97; the tail model still ranks
+  the far tail better.
 
 ## Optional / not included
 

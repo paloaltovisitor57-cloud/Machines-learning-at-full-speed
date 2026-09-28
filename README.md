@@ -43,9 +43,10 @@ champion → challenger lifecycle.
 - [Solana intelligence layer](#solana-intelligence-layer)
 - [Edge engine](#edge-engine)
 - [Moonshot engine](#moonshot-engine)
+- [Tape Transformer](#tape-transformer)
 - [Optional / not included](#optional--not-included)
 - **[Part II — In depth](#part-ii--in-depth)**: architecture, continual learning, integration,
-  Solana layer, edge engine, moonshot engine (the full contents of `docs/`)
+  Solana layer, edge engine, moonshot engine, Tape Transformer (the full contents of `docs/`)
 - **[Part III — Generated reference](#part-iii--generated-reference)**: every CLI command and
   option, every configuration field and default, every feature, every output field, the
   public Python API and the test inventory
@@ -94,7 +95,7 @@ flowchart TB
 | Continual learning | 3-pool replay (recent FIFO, historical reservoir, protected rare events), 5 sampling strategies, candidate cloning, distillation, EWC, full retraining with configurable weights |
 | Lifecycle | immutable checkpoints, champion/candidate/challenger/retired/failed registry with audit log, shadow mode, 10-gate promotion, manual and optional automatic rollback |
 | Representation | self-supervised pretraining (masked timestep, masked feature, contrastive), embedding export to Parquet/NumPy, KMeans / GMM / HDBSCAN regime discovery |
-| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 182 test functions |
+| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 188 test functions |
 
 ## Quick start
 
@@ -341,7 +342,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 ├── configs/                 default.yaml · small.yaml
 ├── README.md                generated: python -m nardis_neural.docgen (a test keeps it in sync)
 ├── docs/                    OVERVIEW.md · ARCHITECTURE.md · CONTINUAL_LEARNING.md · INTEGRATION.md ·
-│                            SOLANA.md · EDGE.md · MOONSHOT.md (the README's hand-written sources)
+│                            SOLANA.md · EDGE.md · MOONSHOT.md · TAPE.md (the README's hand-written sources)
 ├── examples/                nardis_integration.py (runnable, tested)
 ├── src/nardis_neural/
 │   ├── config.py            Pydantic config tree
@@ -365,7 +366,8 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │                            ingest/ (decoder · rpc · stream · history · encode · pumpfun · base58)
 │                            edge/ (barriers · model · trees · backtest · research)
 │                            moonshot/ (labels · tail · guard · online · research)
-└── tests/                   182 test functions incl. synthetic end-to-end pipeline
+│                            tape/ (features · dataset · model · research)
+└── tests/                   188 test functions incl. synthetic end-to-end pipeline
 ```
 
 ## Testing & quality gates
@@ -510,6 +512,23 @@ that runs 100x to 1000x. See [docs/MOONSHOT.md](docs/MOONSHOT.md).
   100–1000x+ tails to find; `nardis-neural solana moonshot-research` installs the model and
   every `SolanaAssessment` then carries `moonshot` (`p_ge_10x`, `p_ge_1000x`,
   `expected_multiple`, `lottery_kelly`, `tail_index`, `in_entry_window`, …).
+
+## Tape Transformer
+
+`nardis_neural.solana.tape` reads the **raw trade tape** instead of aggregates. See
+[docs/TAPE.md](docs/TAPE.md).
+
+- the last 96 trades, each with 18 features (side, size, timing, price move, fees, and the
+  trader's skill, runner skill, cluster, creator link and freshness as known now), plus a
+  **learned wallet embedding** keyed by a stable hash of the address;
+- a small pre-LayerNorm **Transformer** with a summary token, fused with the 67 current
+  features. Frequency gating and wallet dropout stop the wallet table from memorising noise;
+- two heads: the censored power-law **tail** (P ≥ 2x … 1000x) and a discrete-time **collapse
+  hazard** (P value halves within 1 min / 5 min / 15 min / 1 h), which is the exit signal;
+- causal tape replay, research scored head-to-head against the tail model on identical rows,
+  `nardis-neural solana tape-research`, and `SolanaAssessment.tape` on every assessment.
+  On the simulator the collapse head reaches AUC 0.93–0.97; the tail model still ranks
+  the far tail better.
 
 ## Optional / not included
 
@@ -1821,6 +1840,141 @@ Nothing here guarantees 1000x, and no model can promise it. What it gives you is
 manipulation-aware estimate of *how likely* a large run is, how uncertain that estimate is,
 and how much of a bankroll such a lottery ticket can justify.
 
+## Tape Transformer (`nardis_neural.solana.tape`)
+
+Every other model in this repository sees a token through aggregates: per-minute bars and
+67 summary features. That throws away the two things that decide a memecoin launch: **who**
+is trading, and **in what order**. The Tape Transformer reads the raw trade tape directly.
+
+```mermaid
+flowchart LR
+    subgraph TAPE[last 96 trades, oldest → newest]
+        T1[trade features<br/>side · size · timing · price move · fees ·<br/>wallet skill · runner skill · cluster · creator link · freshness]
+        W1[hashed wallet id<br/>→ learned embedding]
+        R1[recency embedding]
+    end
+    TAPE --> ENC[pre-LayerNorm Transformer<br/>+ learned summary token<br/>padding masked]
+    CUR[67 current features] --> MLP[MLP]
+    ENC --> FUSE[fuse: summary ‖ mean ‖ current]
+    MLP --> FUSE
+    FUSE --> TAIL[tail head<br/>mixture of log-logistics<br/>P ≥ 2x … 1000x]
+    FUSE --> HAZ[collapse head<br/>discrete-time hazard<br/>1 m · 5 m · 15 m · 1 h]
+```
+
+### 1. The tape (`features.py`)
+
+For a snapshot at `now`, the last `max_trades` (96) trades at or before `now` are kept,
+left-padded, with the most recent last. Each trade is a vector of 18 features; the full
+list is in the generated reference, *Trade tape*. They cover the trade itself (side, SOL,
+signed flow, time since the previous trade, age, time until now, price relative to now,
+priority fee, Jito tip) and the trader as the market knows them at `now` (60-s skill,
+runner skill, creator, creator's cluster, fresh funding, cluster size, lifetime trades,
+first trade in this token, bought within the launch slots).
+
+Each trade also carries a **wallet hash bucket**: a blake2b hash of the wallet address. It
+is stable, so the learned embedding means the same wallet in every workspace, replay and
+live session. Training tapes are cut by a causal replay (`dataset.py`) under the same rule
+as every other snapshot. A test checks that a replayed tape equals the tape from a market
+that has only seen the past.
+
+### 2. The network (`model.py`)
+
+* **Trade embedding** is `Linear(trade features) + Linear(wallet embedding)`, plus a learned
+  recency embedding counted from the most recent trade, so left padding changes nothing.
+* **Wallet embeddings** start at unit scale; a small initialisation left wallet identity
+  drowned out by the trade features. Two defences stop the table from memorising noise:
+  * **frequency gating**: only wallets seen in at least `min_wallet_tokens` (3) distinct
+    training tokens get their own embedding. Everyone else shares an "unknown wallet" slot,
+    and their trades still count through their features;
+  * **wallet dropout**: 20 % of identities are hidden during training, so no single wallet
+    becomes a crutch.
+* A learned **summary token** is appended, and a 2-layer pre-LayerNorm Transformer (d = 64,
+  4 heads) attends over the tape with padding masked. The summary token keeps an empty
+  tape well defined.
+* The summary token, the masked mean of the trades and an MLP of the 67 current features
+  are fused into one vector.
+* **Tail head**: a mixture of logistics on `log` peak multiple. It uses the same censored
+  likelihood, per-level calibration, expected ladder payoff and lottery Kelly as the
+  [moonshot tail model](docs/MOONSHOT.md), sharing the code.
+* **Collapse head**: a discrete-time hazard over 1 min, 5 min, 15 min and 1 h. It gives the
+  probability that the ticket's value falls to half of its entry value within each window.
+  It is trained with the censored survival likelihood: a row survives every bin it was
+  fully observed through, and its event bin if it collapsed. This is the **exit signal**.
+* **Ensemble**: 3 members by default, trained on token-bootstrap resamples, with early
+  stopping on the most recently launched tokens. Every token carries the same total weight.
+
+About 2.2 M parameters per member, most of them in the wallet table (131 k buckets × 16).
+It runs comfortably on a laptop CPU, an M1, or a 4-vCPU cloud VM.
+
+### 3. Research (`research.py`)
+
+The protocol matches the moonshot research: entry-window snapshots, tokens split by launch
+time, training labels censored at the cutoff, and one scoring pass on the later tokens. The
+raw-feature tail model is trained on the **same** rows and scored on the **same** test rows,
+so the comparison is direct:
+
+* tail: NLL, calibration and AUC per level for both models;
+* collapse: for each window, predicted vs observed collapse rate, AUC and Brier score on
+  rows whose outcome for that window is known;
+* one ticket per token for both models, against buying every launch.
+
+```bash
+nardis-neural solana tape-research --workspace ws --archetypes sim/degen/archetypes.json
+cat ws/tape/REPORT.md
+```
+
+### 4. Results on the simulator
+
+One `degen` market: 150 launches over 8 hours (seed 7, the same market as market A in
+[MOONSHOT.md](docs/MOONSHOT.md)). There were 98 training tokens and 52 test tokens, with 3
+ensemble members of about 2.2 M parameters each; 851 wallets earned their own embedding.
+Both models were trained and scored on identical rows. Training and scoring took about
+20 minutes on a 4-core CPU, including the production refit.
+
+| | Tape Transformer | raw-feature tail model |
+|---|---|---|
+| test NLL of log peak multiple | **0.210** | 0.300 |
+| AUC P(≥2x) | 0.916 | 0.914 |
+| AUC P(≥10x) | 0.958 | **0.982** |
+| AUC P(≥100x) | 0.935 | **0.982** |
+| AUC P(≥1000x) | 0.809 | **0.980** |
+
+Collapse, the new exit signal (value halves within the window, 3,016 test rows):
+
+| window | predicted | observed | AUC | Brier |
+|---|---|---|---|---|
+| 1 min | 0.035 | 0.042 | 0.926 | 0.034 |
+| 5 min | 0.126 | 0.138 | 0.973 | 0.048 |
+| 15 min | 0.148 | 0.157 | 0.970 | 0.050 |
+| 1 h | 0.189 | 0.164 | 0.966 | 0.054 |
+
+How to read this:
+
+* **The collapse head is the win.** It separates tokens that are about to break from those
+  that are not (AUC 0.93–0.97), and it is well calibrated at every window. No other model
+  in the repository produces an exit signal.
+* **The whole distribution fits better** (lower NLL), but the tape model **ranks the far
+  tail worse** than the aggregate model. Runners are rare, and a tape of the last 96 trades
+  sees less of a token's history than the 67 aggregate features. For picking moonshot
+  entries, keep using the tail model's `chase_score`; use the tape for exits.
+* In this generous simulator every token cleared the "expected payoff ≥ ticket" rule for
+  both models, so the one-ticket-per-token comparison could not separate them.
+* One market, one seed. This is a synthetic benchmark, not evidence of live performance.
+
+### 5. Using it
+
+```python
+brain = SolanaBrain("workspaces/sol")  # the tape model loads if tape-research was run
+for a in brain.assess_active():
+    a.tape["p_ge_10x"], a.tape["expected_multiple"]  # entry view from the tape
+    a.tape["p_collapse_1m"], a.tape["p_collapse_5m"]  # exit view: will the run break soon?
+```
+
+The collapse probabilities are meant for positions you already hold. A sharp rise in
+`p_collapse_1m` or `p_collapse_5m` is the model's view that the run is about to break. As
+everywhere in this module, it is a probability for the trading system to act on, not an
+order.
+
 # Part III — Generated reference
 
 Generated from the code; it cannot drift.
@@ -2208,6 +2362,21 @@ only pump.fun / PumpSwap transactions. A new workspace bootstraps from the first
 | `--profile` | str | "auto" | auto \| cpu-lite \| cpu \| gpu \| gpu-frontier |
 | `--device` | str | null | cpu \| cuda \| cuda:0 \| mps (default: auto) |
 
+### `nardis-neural solana tape-research`
+
+Train the Tape Transformer (trade tape + wallet embeddings → tail and collapse) and
+score it against the raw-feature tail model on later tokens; installs the model.
+
+| option | type | default | description |
+|---|---|---|---|
+| `--workspace`, `-w` | path | required | Solana workspace (history + champion) |
+| `--max-trades` | int | 96 | trades per tape (most recent kept) |
+| `--members` | int | 3 | ensemble members |
+| `--epochs` | int | 40 | maximum training epochs per member |
+| `--test-fraction` | float | 0.35 | share of the latest-launched tokens held out for the test |
+| `--archetypes` | path | null | simulator archetypes.json for diagnostics |
+| `--device` | str | null | cpu \| cuda \| cuda:0 \| mps (default: auto) |
+
 
 ## Configuration
 
@@ -2484,6 +2653,7 @@ Every field, its type, its default and its description. Nested keys use dots, as
 | `trail_drop` | float | 0.6 | Once active, the remainder exits when value falls this fraction below its running peak. |
 | `stop_loss` | float | 0.5 | Before trail activation, the remainder exits when value falls by this fraction of stake. |
 | `levels` | list[float] | [2.0, 5.0, 10.0, 100.0, 1000.0] | Multiples reported as P(M ≥ k). |
+| `collapse_drop` | float | 0.5 | A collapse is the ticket's value falling this fraction below its value at entry. |
 
 ### Manipulation guard — `GuardConfig`
 
@@ -2495,6 +2665,13 @@ Every field, its type, its default and its description. Nested keys use dots, as
 | `veto_bot_share` | float | 0.8 | Veto when at least this share of the last 60 s's traders are bots (wash trading). |
 | `veto_ood_score` | float | 4.0 | Veto when the out-of-distribution score of the market state is at least this. |
 | `veto_out_of_range_share` | float | 0.25 | Veto when this share of the inputs lies outside anything seen in training. |
+
+### Trade tape — `TapeSpec`
+
+| key | type | default | description |
+|---|---|---|---|
+| `max_trades` | int | 96 | Most recent trades kept per snapshot (left-padded when fewer). |
+| `wallet_buckets` | int | 131072 | Hash buckets of the wallet embedding (bucket 0 is padding). |
 
 ## Solana features
 
@@ -2600,6 +2777,29 @@ Every field, its type, its default and its description. Nested keys use dots, as
 
 Edge types: `wallet_trades_token`, `wallet_funded_wallet`, `wallet_same_cluster`.
 
+### Trade tape (last 96 trades, one vector per trade + a hashed wallet id)
+
+| # | trade feature | meaning |
+|---|---|---|
+| 0 | `is_buy` | 1 for a buy, 0 for a sell |
+| 1 | `sol_log` | log1p of the trade's SOL amount |
+| 2 | `signed_flow` | log1p of SOL, positive for buys and negative for sells |
+| 3 | `dt_prev_log` | log1p of seconds since the previous trade (since launch for the first) |
+| 4 | `age_log` | log1p of the token's age at the trade |
+| 5 | `since_now_log` | log1p of seconds between the trade and now |
+| 6 | `price_vs_now` | log price after the trade minus log price now |
+| 7 | `priority_fee_log` | log1p of the priority fee (micro-SOL) |
+| 8 | `jito` | 1 if the trade paid a Jito tip |
+| 9 | `wallet_skill` | wallet's 60-s reputation skill as known now |
+| 10 | `wallet_tail_skill` | wallet's runner skill as known now |
+| 11 | `is_creator` | 1 if the trader is the token's creator |
+| 12 | `creator_cluster` | 1 if the trader shares the creator's funding cluster |
+| 13 | `fresh_wallet` | 1 if the trader was funded within fresh_wallet_seconds before the trade |
+| 14 | `cluster_size_log` | log1p of the trader's funding-cluster size |
+| 15 | `wallet_trades_log` | log1p of the trader's lifetime trades (bot signal) |
+| 16 | `first_trade_in_token` | 1 on the trader's first trade in this token |
+| 17 | `launch_slots` | 1 if the trade landed within sniper_slots of the launch slot |
+
 Launch-risk labels: `rug`, `graduation`, `dev_dump`.
 
 Forecast horizons: `15s` (15 s, up ≥ 0.05, down ≥ 0.05), `60s` (60 s, up ≥ 0.12, down ≥ 0.1), `5m` (300 s, up ≥ 0.25, down ≥ 0.2).
@@ -2673,6 +2873,7 @@ Forecast horizons: `15s` (15 s, up ≥ 0.05, down ≥ 0.05), `60s` (60 s, up ≥
 | `features` | dict[str, float] |   |
 | `edge` | dict[str, float] | Meta-labeling edge estimate for an executable round trip (latency, impact, fees): p_win, expected_net, uncertainty, edge_score (lower confidence bound), kelly_fraction, threshold and above_threshold (1.0 / 0.0). Empty until ``fit_edge`` has been run. |
 | `moonshot` | dict[str, float] | Fat-tail view of a ticket bought now: calibrated P(peak ≥ k) for every level (``p_ge_10x`` …), median and expected ladder multiple, lottery-Kelly fraction, tail index, epistemic spread, ``in_entry_window``, and the manipulation guard's ``trust``, ``vetoed`` (1.0 / 0.0), ``chase_score`` (trust-adjusted expected multiple, 0 when vetoed) and ``chase_rank`` within the assessed batch (1 = best). Empty until ``fit_moonshot``. |
+| `tape` | dict[str, float] | Tape Transformer view (reads the raw trade tape with learned wallet embeddings): calibrated ``p_ge_*x``, ``expected_multiple``, ``median_multiple``, ``lottery_kelly``, ``tail_index``, ``epistemic``, and the exit signal ``p_collapse_1m`` / ``_5m`` / ``_15m`` / ``_1h`` (probability the value halves within that window). Empty until ``fit_tape``. |
 
 ### `SolanaAssessment.edge` keys
 
@@ -2719,6 +2920,25 @@ Forecast horizons: `15s` (15 s, up ≥ 0.05, down ≥ 0.05), `60s` (60 s, up ≥
 | `guard.ood` | guard factor `ood` (1 = no concern; the product is trust) |
 | `guard.out_of_range` | guard factor `out_of_range` (1 = no concern; the product is trust) |
 | `guard.epistemic` | guard factor `epistemic` (1 = no concern; the product is trust) |
+
+### `SolanaAssessment.tape` keys
+
+| key | meaning |
+|---|---|
+| `p_ge_2x` | calibrated P(peak multiple ≥ 2x) from the tape |
+| `p_ge_5x` | calibrated P(peak multiple ≥ 5x) from the tape |
+| `p_ge_10x` | calibrated P(peak multiple ≥ 10x) from the tape |
+| `p_ge_100x` | calibrated P(peak multiple ≥ 100x) from the tape |
+| `p_ge_1000x` | calibrated P(peak multiple ≥ 1000x) from the tape |
+| `expected_multiple` | expected ladder payoff per SOL |
+| `median_multiple` | median predicted peak multiple |
+| `lottery_kelly` | lottery-Kelly bankroll fraction (not trust-adjusted) |
+| `tail_index` | power-law exponent of the predicted far tail |
+| `epistemic` | largest ensemble spread of P(peak ≥ k) |
+| `p_collapse_1m` | P(the ticket's value halves within 1m) |
+| `p_collapse_5m` | P(the ticket's value halves within 5m) |
+| `p_collapse_15m` | P(the ticket's value halves within 15m) |
+| `p_collapse_1h` | P(the ticket's value halves within 1h) |
 
 ## Python API
 
@@ -3303,6 +3523,7 @@ SolanaBrain — the complete Solana ML module behind one small API.
   - `evict(self) -> 'list[str]'` — Label finished moonshot rows, then drop tokens idle for ``evict_idle_seconds``.
   - `fit_edge(self, spec: 'BarrierSpec | None' = None, n_folds: 'int' = 4, max_positions: 'int' = 5, history: 'EventStore | None' = None, log: 'Callable[[str], None] | None' = None) -> 'dict[str, Any]'` — Walk-forward edge research on the workspace history; installs the edge model.
   - `fit_moonshot(self, spec: 'MoonshotSpec | None' = None, inputs: 'str' = 'raw', n_folds: 'int' = 4, test_fraction: 'float' = 0.35, min_expected_multiple: 'float' = 1.0, history: 'EventStore | None' = None, archetypes: 'dict[str, str] | None' = None, log: 'Callable[[str], None] | None' = None) -> 'dict[str, Any]'` — Fat-tail research on the workspace history; installs the tail model.
+  - `fit_tape(self, spec: 'MoonshotSpec | None' = None, tape: 'TapeSpec | None' = None, test_fraction: 'float' = 0.35, members: 'int' = 3, epochs: 'int' = 40, history: 'EventStore | None' = None, archetypes: 'dict[str, str] | None' = None, log: 'Callable[[str], None] | None' = None) -> 'dict[str, Any]'` — Tape Transformer research on the workspace history; installs the refitted model.
   - `ingest(self, event: 'Event') -> 'None'` — Feed one event, in time order, into the market (and the event history unless streaming).
   - `ingest_many(self, events: 'Iterable[Event]') -> 'None'` — Ingest events in order (see :meth:`ingest`).
   - `maintenance(self, risk_refit_min_new: 'int' = 200) -> 'dict[str, Any]'` — Periodic upkeep: neural adaptation / retraining / promotion, risk refit, online tail refit, then :meth:`save`; returns a status summary.
@@ -3327,6 +3548,7 @@ SolanaBrain — the complete Solana ML module behind one small API.
 - `simulate(out: "Annotated[Path, typer.Option('--out', '-o', help='event directory (Parquet tables)')]", tokens: "Annotated[int, typer.Option('--tokens', help='number of token launches to simulate')]" = 40, seed: "Annotated[int, typer.Option('--seed', help='random seed')]" = 0, prefix: "Annotated[str, typer.Option('--prefix', help='mint/wallet name prefix (distinguishes eras)')]" = 'Mint', start_time: "Annotated[float, typer.Option('--start-time', help='simulation start, unix seconds')]" = 1750000000.0, hours: "Annotated[float, typer.Option('--hours', help='simulated duration, hours')]" = 3.0, market: "Annotated[str, typer.Option('--market', help='archetype mix: default, or degen (mostly duds + runners)')]" = 'default', runners: "Annotated[float | None, typer.Option('--runners', help='override the share of 100–1000x runner launches')]" = None) -> 'None'` — Simulate memecoin launches (snipers, bundles, rugs, graduations, runners, smart money, bots).
 - `stream(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace directory')]", rpc: 'RpcOpt' = None, out: "Annotated[Path | None, typer.Option('--out', '-o', help='append assessments as JSONL')]" = None, polls: "Annotated[int | None, typer.Option('--polls', help='stop after N polls (default: run forever)')]" = None, poll_interval: "Annotated[float, typer.Option('--poll-interval', help='seconds between RPC polls')]" = 2.0, assess_every: "Annotated[float, typer.Option('--assess-every', help='seconds between assessment rounds')]" = 10.0, maintenance_every: "Annotated[float, typer.Option('--maintenance-every', help='seconds between maintenance runs')]" = 600.0, device: 'DeviceOpt' = None) -> 'None'` — Stream live chain activity into a Solana workspace (read-only) and emit assessments.
 - `stream_train_cmd(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (created if new, else resumed)')]", events: "Annotated[Path | None, typer.Option('--events', '-e', help='stream a saved event directory instead of RPC')]" = None, rpc: 'RpcOpt' = None, start: "Annotated[str | None, typer.Option('--start', help='unix seconds or ISO date (RPC mode)')]" = None, end: "Annotated[str | None, typer.Option('--end', help='unix seconds or ISO date (RPC mode)')]" = None, segment_minutes: "Annotated[float, typer.Option('--segment-minutes', help='history segment length, minutes (RPC mode)')]" = 60.0, workers: "Annotated[int, typer.Option('--workers', help='parallel getTransaction calls')]" = 8, warmup_hours: "Annotated[float, typer.Option('--warmup-hours', help='hours of stream used to bootstrap a new workspace')]" = 6.0, evict_idle_hours: "Annotated[float, typer.Option('--evict-idle-hours', help='forget tokens idle this many hours')]" = 2.0, solana_config: 'SolCfg' = None, config: 'BaseCfg' = None, profile: "Annotated[str | None, typer.Option('--profile', help='auto | cpu-lite | cpu | gpu | gpu-frontier')]" = 'auto', device: 'DeviceOpt' = None) -> 'None'` — Learn by streaming history through the brain — nothing is downloaded to disk.
+- `tape_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history + champion)')]", max_trades: "Annotated[int, typer.Option('--max-trades', help='trades per tape (most recent kept)')]" = 96, members: "Annotated[int, typer.Option('--members', help='ensemble members')]" = 3, epochs: "Annotated[int, typer.Option('--epochs', help='maximum training epochs per member')]" = 40, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of the latest-launched tokens held out for the test')]" = 0.35, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Train the Tape Transformer (trade tape + wallet embeddings → tail and collapse) and score it against the raw-feature tail model on later tokens; installs the model.
 
 ### `nardis_neural.solana.config`
 
@@ -3602,7 +3824,12 @@ Moonshot research: can the tail model find the rare launches that run 100–1000
 
 Conditional power-law tail model of a ticket's peak multiple.
 
+- `apply_calibration(sf: 'F64', k: 'F64', levels: 'list[float]', ratio: 'F64') -> 'F64'` — Rescale survival values at multiples ``k`` (last axis) by the per-level ratios (interpolated in log k, 1 at k ≤ 1) and keep them within [0, 1] and non-increasing in k.
 - `censored_nll(log_pi: 'torch.Tensor', mu: 'torch.Tensor', s: 'torch.Tensor', y: 'torch.Tensor', censored: 'torch.Tensor') -> 'torch.Tensor'` — Per-row negative log-likelihood of a logistic mixture on ``y`` with right-censoring.
+- `fit_calibration_ratio(p: 'F64', peak: 'F64', censored: 'npt.NDArray[np.bool_]', w: 'npt.NDArray[Any]', levels: 'F64', prior: 'float' = 0.5) -> 'F64'` — Observed / predicted hit count per level on held-out rows (weighted), shrunk towards 1 by ``prior`` pseudo-tokens and clipped to [0.05, 2]; ``p`` is (N, len(levels)).
+- `mixture_nll(pi: 'F64', mu: 'F64', s: 'F64', peak: 'F64', censored: 'npt.NDArray[np.bool_]') -> 'F64'` — Per-row NLL of an ensemble of mixtures ``(E, N, K)``, members averaged in probability space.
+- `mixture_survival(pi: 'F64', mu: 'F64', s: 'F64', k: 'F64') -> 'F64'` — P(M ≥ k) of logistic mixtures on log M: ``(..., N, K)`` parameters → ``(..., N, len(k))``.
+- `summarize_tail(pi: 'F64', mu: 'F64', s: 'F64', spec: 'MoonshotSpec', calibration: 'F64', kelly_multiplier: 'float', max_kelly: 'float') -> 'TailPrediction'` — Decision view of ensemble mixtures ``(E, N, K)``: calibrated survival at ``spec.levels``, median, expected ladder payoff, capped lottery Kelly and far-tail index.
 - **class `TailModel`** — Deep ensemble of logistic-mixture networks on the log peak multiple, trained with right-censoring.
   - `fit(self, x: 'npt.NDArray[Any]', peak: 'F64', censored: 'npt.NDArray[np.bool_]', timestamps: 'F64', groups: 'npt.NDArray[Any]', validation_fraction: 'float' = 0.25, epochs: 'int' = 150, lr: 'float' = 0.002, patience: 'int' = 15, weight_decay: 'float' = 0.001) -> 'dict[str, Any]'` — Fit on rows ordered in time; the latest groups (tokens) are held out for early stopping.
   - `load(cls, directory: 'str | Path') -> 'TailModel'` — Load a model written by :meth:`save`.
@@ -3639,6 +3866,52 @@ Agent-based simulator of Solana memecoin launches — for testing and demos only
 Train by streaming: feed months of history (or the live chain) through the brain.
 
 - `stream_train(workspace: 'str | Path', events: 'Iterable[Event]', cfg: 'SolanaConfig | None' = None, neural_cfg: 'NeuralConfig | None' = None, *, warmup_seconds: 'float' = 21600.0, assess_every: 'float' = 10.0, evict_every: 'float' = 600.0, maintenance_every: 'float' = 3600.0, checkpoint_every: 'float' = 21600.0, evict_idle_seconds: 'float' = 7200.0, decoder: 'TransactionDecoder | None' = None, max_events: 'int | None' = None, device: 'torch.device | str | None' = None, log: 'Callable[[str], None]' = <function _quiet>) -> 'dict[str, Any]'` — Learn online from a time-ordered event stream into ``workspace``; returns run statistics.
+
+### `nardis_neural.solana.tape`
+
+Tape Transformer: attention over the raw trade tape with learned wallet embeddings, predicting fat-tailed peak multiples and the collapse hazard (exit signal).
+
+
+### `nardis_neural.solana.tape.dataset`
+
+Causal tape extraction for training snapshots.
+
+- `replay_tapes(store: 'EventStore', cfg: 'SolanaConfig', spec: 'TapeSpec', requests: 'list[tuple[str, float]]') -> 'tuple[npt.NDArray[np.float32], npt.NDArray[np.int64], npt.NDArray[np.bool_]]'` — Tapes for every ``(mint, t)`` in ``requests`` (in request order), built causally.
+
+### `nardis_neural.solana.tape.features`
+
+The trade tape: the last ``max_trades`` individual trades of a token, as the model sees them.
+
+- `extract_tape(log: 'TokenEventLog', wallets: 'WalletIntel', now: 'float', spec: 'TapeSpec', cfg: 'SolanaConfig | None' = None) -> 'Tape'` — The last ``spec.max_trades`` trades at or before ``now``, left-padded.
+- `stack_tapes(tapes: 'list[Tape]') -> 'tuple[F32, I64, npt.NDArray[np.bool_]]'` — Batch tapes into ``(N, T, F)`` features, ``(N, T)`` wallet buckets and ``(N, T)`` masks.
+- **class `Tape`** — One snapshot's tape: trade features, wallet buckets and the observed-trade mask.
+- **class `TapeSpec`** — Shape of the trade tape and of the wallet-embedding hash space.
+- `wallet_bucket(address: 'str', buckets: 'int') -> 'int'` — Stable hash bucket of a wallet address in ``[1, buckets)`` (0 is reserved for padding).
+
+### `nardis_neural.solana.tape.model`
+
+Tape Transformer: reads the raw trade tape and predicts the tail and the collapse.
+
+- `hazard_nll(logits: 'torch.Tensor', event: 'torch.Tensor', survive: 'torch.Tensor') -> 'torch.Tensor'` — Per-row negative log-likelihood of the discrete-time hazard model.
+- `hazard_targets(collapse_time: 'F64', observed: 'F64', bins: 'tuple[float, ...]') -> 'tuple[F32, F32]'` — Discrete-time survival targets: (event one-hot, survived-bin mask), each (N, len(bins)).
+- **class `TapeModel`** — Deep ensemble of :class:`TapeNet` with input scaling, tail calibration and persistence.
+  - `fit(self, tx: 'F32', tw: 'I64', tm: 'B', cur: 'npt.NDArray[Any]', peak: 'F64', censored: 'B', collapse_time: 'F64', observed: 'F64', timestamps: 'F64', groups: 'npt.NDArray[Any]', validation_fraction: 'float' = 0.25, epochs: 'int' = 40, lr: 'float' = 0.001, patience: 'int' = 6, batch_size: 'int' = 256, weight_decay: 'float' = 0.01) -> 'dict[str, Any]'` — Fit every member; the latest ``validation_fraction`` of tokens drive early stopping and the tail calibration.
+  - `load(cls, directory: 'str | Path') -> 'TapeModel'` — Rebuild a model saved by :meth:`save`.
+  - `nll(self, tx: 'F32', tw: 'I64', tm: 'B', cur: 'npt.NDArray[Any]', peak: 'F64', censored: 'B') -> 'F64'` — Per-row NLL of the log peak multiple under the ensemble (comparable to the tail model).
+  - `predict(self, tx: 'F32', tw: 'I64', tm: 'B', cur: 'npt.NDArray[Any]') -> 'TapePrediction'` — Calibrated tail view and collapse curve for a batch of tapes.
+  - `save(self, directory: 'str | Path') -> 'None'` — Write members, scalers, calibration and ``tape.json`` to ``directory``.
+- **class `TapeNet`** — One ensemble member: trade/wallet embeddings, Transformer over the tape, two heads.
+  - `forward(self, x: 'torch.Tensor', wallets: 'torch.Tensor', mask: 'torch.Tensor', current: 'torch.Tensor') -> 'tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]'` — (log π, μ, s) of the tail mixture and the collapse hazard logits for a batch.
+- **class `TapePrediction`** — Tail view (same fields as the tail model) plus the collapse curve.
+- `window_label(seconds: 'float') -> 'str'` — Compact name of a time window: 60 → ``1m``, 3600 → ``1h``, 45 → ``45s``.
+
+### `nardis_neural.solana.tape.research`
+
+Tape research: does reading the raw tape beat the aggregate-feature tail model?
+
+- `run_tape_research(store: 'EventStore', cfg: 'SolanaConfig', ncfg: 'NeuralConfig', spec: 'MoonshotSpec | None' = None, tape: 'TapeSpec | None' = None, test_fraction: 'float' = 0.35, members: 'int' = 3, epochs: 'int' = 40, min_expected_multiple: 'float' = 1.0, archetypes: 'dict[str, str] | None' = None, log: 'Logger' = <function _quiet>, seed: 'int' = 0) -> 'TapeResearch'` — Build tapes causally, train and score the Tape Transformer against the tail model.
+- `tape_markdown(report: 'dict[str, Any]') -> 'str'` — Human-readable research report (tail vs tape, collapse windows, tickets).
+- **class `TapeResearch`** — Report, production model (refitted on every token) and the candidate dataset.
 
 ### `nardis_neural.solana.wallets`
 
@@ -3809,7 +4082,7 @@ Transparent PyTorch training engine.
 
 ## Test inventory
 
-182 test functions (some are parametrised over devices, experts or formats).
+188 test functions (some are parametrised over devices, experts or formats).
 
 ### `tests/test_cli.py`
 
@@ -4075,6 +4348,17 @@ Streaming training: forward history walker over an archival RPC, bounded-memory 
 - `test_market_eviction_keeps_what_was_learned`
 - `test_stream_train_bootstraps_bounds_memory_learns_online_and_resumes`
 - `test_tracker_labels_censors_and_roundtrips`
+
+### `tests/test_solana_tape.py`
+
+Tape Transformer: causal tape extraction, discrete-time collapse targets, the network's masking invariances, learning from wallet identity, persistence and brain integration.
+
+- `test_tape_is_causal_left_padded_and_stable`
+- `test_replay_matches_a_past_only_market`
+- `test_hazard_targets`
+- `test_network_ignores_padding_content`
+- `test_tape_model_learns_wallets_and_crashes`
+- `test_tape_research_and_brain_integration`
 
 ### `tests/test_splits.py`
 

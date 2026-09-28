@@ -35,6 +35,7 @@ PARTS = (
     ("SOLANA", "Solana intelligence layer"),
     ("EDGE", "Edge engine"),
     ("MOONSHOT", "Moonshot engine"),
+    ("TAPE", "Tape Transformer"),
 )
 _ADDR = re.compile(r" at 0x[0-9a-fA-F]+")
 
@@ -146,6 +147,7 @@ def _config() -> Iterator[str]:
     from nardis_neural.solana.edge.barriers import BarrierSpec
     from nardis_neural.solana.moonshot.guard import GuardConfig
     from nardis_neural.solana.moonshot.labels import MoonshotSpec
+    from nardis_neural.solana.tape.features import TapeSpec
 
     yield "## Configuration"
     yield ""
@@ -161,6 +163,7 @@ def _config() -> Iterator[str]:
         ("Edge labels — `BarrierSpec`", BarrierSpec),
         ("Moonshot labels and ladder — `MoonshotSpec`", MoonshotSpec),
         ("Manipulation guard — `GuardConfig`", GuardConfig),
+        ("Trade tape — `TapeSpec`", TapeSpec),
     ]
     for title, model in sections:
         yield ""
@@ -209,6 +212,15 @@ def _features() -> Iterator[str]:
         yield f"| {i} | `{name}` | {_cell(doc)} |"
     yield ""
     yield "Edge types: " + ", ".join(f"`{e}`" for e in EDGE_TYPES) + "."
+    from nardis_neural.solana.tape.features import TRADE_FEATURE_DOCS, TapeSpec
+
+    yield ""
+    yield f"### Trade tape (last {TapeSpec().max_trades} trades, one vector per trade + a hashed wallet id)"
+    yield ""
+    yield "| # | trade feature | meaning |"
+    yield "|---|---|---|"
+    for i, (name, doc) in enumerate(TRADE_FEATURE_DOCS.items()):
+        yield f"| {i} | `{name}` | {_cell(doc)} |"
     yield ""
     yield "Launch-risk labels: " + ", ".join(f"`{r}`" for r in RISK_LABELS) + "."
     horizons = ", ".join(
@@ -273,9 +285,21 @@ def _outputs() -> Iterator[str]:
     }
     for factor in assess_manipulation(clean, None, 0.0, 0.0, 0.0).factors:
         moon_keys[f"guard.{factor}"] = f"guard factor `{factor}` (1 = no concern; the product is trust)"
+    from nardis_neural.solana.tape.model import DEFAULT_BINS, window_label
+
+    tape_keys = {f"p_ge_{k:g}x": f"calibrated P(peak multiple ≥ {k:g}x) from the tape" for k in levels} | {
+        "expected_multiple": "expected ladder payoff per SOL",
+        "median_multiple": "median predicted peak multiple",
+        "lottery_kelly": "lottery-Kelly bankroll fraction (not trust-adjusted)",
+        "tail_index": "power-law exponent of the predicted far tail",
+        "epistemic": "largest ensemble spread of P(peak ≥ k)",
+    }
+    for b in DEFAULT_BINS:
+        tape_keys[f"p_collapse_{window_label(b)}"] = f"P(the ticket's value halves within {window_label(b)})"
     for title, keys in (
         ("`SolanaAssessment.edge` keys", edge_keys),
         ("`SolanaAssessment.moonshot` keys", moon_keys),
+        ("`SolanaAssessment.tape` keys", tape_keys),
     ):
         yield ""
         yield f"### {title}"

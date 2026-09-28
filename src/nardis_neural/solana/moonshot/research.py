@@ -54,6 +54,10 @@ class MoonshotLabels:
     censored: npt.NDArray[np.bool_]
     ladder: F64
     final: F64
+    collapse_time: F64 = field(default_factory=lambda: np.zeros(0))
+    """Seconds from entry to the first collapse; NaN when none was observed."""
+    observed: F64 = field(default_factory=lambda: np.zeros(0))
+    """Seconds of path observed after entry (collapse labels are censored there)."""
 
 
 @dataclass
@@ -90,6 +94,7 @@ class MoonshotDataset:
             valid = np.zeros(n, dtype=bool)
             peak, ladder, final = np.zeros(n), np.zeros(n), np.zeros(n)
             cens = np.zeros(n, dtype=bool)
+            collapse, observed = np.full(n, np.nan), np.zeros(n)
             for i, (mint, t) in enumerate(zip(self.mints, self.timestamps, strict=True)):
                 if t >= end:
                     continue
@@ -99,7 +104,9 @@ class MoonshotDataset:
                 valid[i] = True
                 peak[i], ladder[i], final[i] = out.peak_multiple, out.ladder_multiple, out.final_multiple
                 cens[i] = out.censored
-            self._cache[end] = MoonshotLabels(valid, peak, cens, ladder, final)
+                collapse[i] = np.nan if out.collapse_time is None else out.collapse_time
+                observed[i] = out.observed_seconds
+            self._cache[end] = MoonshotLabels(valid, peak, cens, ladder, final, collapse, observed)
         return self._cache[end]
 
 

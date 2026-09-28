@@ -42,6 +42,9 @@ from nardis_neural.solana.moonshot import MoonshotSpec, TailModel, moonshot_mark
 from nardis_neural.solana.moonshot.guard import GuardConfig, assess_manipulation
 from nardis_neural.solana.moonshot.online import MoonshotTracker
 from nardis_neural.solana.risk import SolanaRiskModel
+from nardis_neural.solana.tape.features import TapeSpec, extract_tape, stack_tapes
+from nardis_neural.solana.tape.model import TapeModel, window_label
+from nardis_neural.solana.tape.research import run_tape_research, tape_markdown
 from nardis_neural.training.continual import ContinualLearner
 from nardis_neural.training.pipeline import train_engine
 
@@ -79,6 +82,11 @@ class SolanaAssessment(BaseModel):
     index, epistemic spread, ``in_entry_window``, and the manipulation guard's ``trust``,
     ``vetoed`` (1.0 / 0.0), ``chase_score`` (trust-adjusted expected multiple, 0 when vetoed)
     and ``chase_rank`` within the assessed batch (1 = best).  Empty until ``fit_moonshot``."""
+    tape: dict[str, float] = Field(default_factory=dict)
+    """Tape Transformer view (reads the raw trade tape with learned wallet embeddings):
+    calibrated ``p_ge_*x``, ``expected_multiple``, ``median_multiple``, ``lottery_kelly``,
+    ``tail_index``, ``epistemic``, and the exit signal ``p_collapse_1m`` / ``_5m`` / ``_15m``
+    / ``_1h`` (probability the value halves within that window).  Empty until ``fit_tape``."""
 
 
 def _normal_sf(z: float) -> float:
@@ -170,6 +178,10 @@ class SolanaBrain:
             self.edge = EdgeModel.load(self.root / "edge")
             self.edge_meta = json.loads((self.root / "edge" / "research.json").read_text())
         self.moonshot: TailModel | None = None
+        self.tape_model: TapeModel | None = (
+            TapeModel.load(self.root / "tape") if (self.root / "tape" / "tape.json").exists() else None
+        )
+        """Tape Transformer (tail + collapse), installed by :meth:`fit_tape`."""
         self.guard = GuardConfig()
         """Thresholds of the moonshot manipulation guard (hard vetoes)."""
         if (self.root / "moonshot" / "tail.json").exists():
@@ -289,6 +301,7 @@ class SolanaBrain:
             edge = self.edge.predict(ex)
             threshold = float(self.edge_meta.get("threshold", 0.0))
         moon = self._moonshot_view(mints, out, probs, current, now)
+        tape_views = self._tape_view(mints, current, now)
         reports = []
         for i, (mint, obs, pred) in enumerate(zip(mints, observations, preds, strict=True)):
             self.learner.record_prediction(pred)
@@ -331,6 +344,7 @@ class SolanaBrain:
                         "above_threshold": float(edge.edge_score[i] >= threshold),
                     },
                     moonshot=moon[i],
+                    tape=tape_views[i],
                     features=feats,
                 )
             )
@@ -572,6 +586,64 @@ class SolanaBrain:
         (self.root / "edge" / "research.json").write_text(report_json)
         (self.root / "edge" / "REPORT.md").write_text(research_markdown(research.report))
         self.edge, self.edge_meta = research.model, research.report
+        return research.report
+
+    def _tape_view(self, mints: list[str], current: npt.NDArray[Any], now: float) -> list[dict[str, float]]:
+        """Tape Transformer outputs for each mint (empty dicts when no tape model is installed)."""
+        model = self.tape_model
+        if model is None:
+            return [{} for _ in mints]
+        tapes = [
+            extract_tape(self.market.token(m), self.market.wallets, now, model.tape, self.cfg) for m in mints
+        ]
+        tx, tw, tm = stack_tapes(tapes)
+        pred = model.predict(tx, tw, tm, current)
+        views = []
+        for i in range(len(mints)):
+            v = {f"p_ge_{k:g}x": float(pred.tail.survival[i, j]) for j, k in enumerate(model.spec.levels)}
+            v |= {
+                "expected_multiple": float(pred.tail.expected_multiple[i]),
+                "median_multiple": float(pred.tail.median_multiple[i]),
+                "lottery_kelly": float(pred.tail.lottery_kelly[i]),
+                "tail_index": float(pred.tail.tail_index[i]),
+                "epistemic": float(pred.tail.survival_std[i].max()),
+            }
+            v |= {
+                f"p_collapse_{window_label(b)}": float(pred.collapse[i, j])
+                for j, b in enumerate(model.collapse_bins)
+            }
+            views.append(v)
+        return views
+
+    def fit_tape(
+        self,
+        spec: MoonshotSpec | None = None,
+        tape: TapeSpec | None = None,
+        test_fraction: float = 0.35,
+        members: int = 3,
+        epochs: int = 40,
+        history: EventStore | None = None,
+        archetypes: dict[str, str] | None = None,
+        log: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        """Tape Transformer research on the workspace history; installs the refitted model."""
+        research = run_tape_research(
+            history or self.history,
+            self.cfg,
+            self.learner.champion.config,
+            spec or (self.moonshot.spec if self.moonshot is not None else MoonshotSpec()),
+            tape,
+            test_fraction=test_fraction,
+            members=members,
+            epochs=epochs,
+            archetypes=archetypes,
+            log=log or (lambda _: None),
+        )
+        d = self.root / "tape"
+        research.model.save(d)
+        (d / "research.json").write_text(json.dumps(research.report, indent=2, default=float))
+        (d / "REPORT.md").write_text(tape_markdown(research.report))
+        self.tape_model = research.model
         return research.report
 
     def fit_moonshot(
