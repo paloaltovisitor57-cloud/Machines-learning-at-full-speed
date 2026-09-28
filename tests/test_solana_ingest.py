@@ -460,3 +460,14 @@ def test_decode_cli(tmp_path: Path) -> None:
         app, ["solana", "stream", "--workspace", str(tmp_path)], env={"SOLANA_RPC_URL": ""}
     )
     assert res.exit_code != 0
+
+
+def test_get_transaction_accepts_version_one_transactions() -> None:
+    seen: list[Any] = []
+
+    def transport(method: str, params: list[Any]) -> Any:
+        seen.append(params)
+        return {"slot": 1}
+
+    SolanaRpc(transport=transport).get_transaction("sig")
+    assert seen[0][1]["maxSupportedTransactionVersion"] == 1

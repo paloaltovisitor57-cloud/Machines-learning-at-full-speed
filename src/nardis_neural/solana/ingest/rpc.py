@@ -115,12 +115,12 @@ class SolanaRpc:
         return list(result or [])
 
     def get_transaction(self, signature: str) -> dict[str, Any] | None:
-        """A confirmed transaction in ``jsonParsed`` encoding (v0 included), or None if unavailable."""
+        """A confirmed transaction in ``jsonParsed`` encoding (legacy, v0 and v1), or None if unavailable."""
         result = self.call(
             "getTransaction",
             [
                 signature,
-                {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"},
+                {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 1, "commitment": "confirmed"},
             ],
         )
         return dict(result) if result else None
