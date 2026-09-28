@@ -522,6 +522,32 @@ def tape_research(
     typer.echo(f"tape model installed in {workspace / 'tape'}")
 
 
+@app.command("stopping-research")
+def stopping_research(
+    workspace: Annotated[Path, typer.Option("--workspace", "-w", help="Solana workspace (history)")],
+    spacing: Annotated[
+        float, typer.Option("--spacing", help="minimum seconds between exit decisions")
+    ] = 30.0,
+    test_fraction: Annotated[
+        float,
+        typer.Option("--test-fraction", help="share of the latest-launched tokens held out for the test"),
+    ] = 0.35,
+    archetypes: Annotated[
+        Path | None, typer.Option("--archetypes", help="simulator archetypes.json for diagnostics")
+    ] = None,
+) -> None:
+    """Fit the optimal-stopping exit model (Longstaff–Schwartz, log utility), score it against
+    hold, timers and the ladder on later tokens, and install it."""
+    from nardis_neural.solana.brain import SolanaBrain
+    from nardis_neural.solana.stopping import stopping_markdown
+
+    brain = SolanaBrain(workspace)
+    arch = json.loads(archetypes.read_text()) if archetypes is not None else None
+    report = brain.fit_stopping(test_fraction=test_fraction, spacing=spacing, archetypes=arch, log=typer.echo)
+    typer.echo(stopping_markdown(report))
+    typer.echo(f"stopping model installed in {workspace / 'stopping'}")
+
+
 @app.command("forward-report")
 def forward_report(
     workspace: Annotated[Path, typer.Option("--workspace", "-w", help="Solana workspace")],

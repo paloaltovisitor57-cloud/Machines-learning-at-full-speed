@@ -38,6 +38,7 @@ PARTS = (
     ("TAPE", "Tape Transformer"),
     ("CRITICALITY", "Criticality engine"),
     ("CAPITAL", "Capital engine"),
+    ("STOPPING", "Optimal-stopping exits"),
 )
 _ADDR = re.compile(r" at 0x[0-9a-fA-F]+")
 

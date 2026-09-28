@@ -213,3 +213,32 @@ def ladder_payoff(peak: F64, spec: MoonshotSpec) -> F64:
         sold += np.where(reached, frac, 0.0)
     rest = np.where(m >= spec.trail_activation, (1 - spec.trail_drop) * m, 1 - spec.stop_loss)
     return np.asarray(out + (1 - sold) * np.minimum(rest, m), dtype=np.float64)
+
+
+def position_marks(
+    log: TokenEventLog, t: float, spec: MoonshotSpec, decision_times: F64
+) -> tuple[F64, F64] | None:
+    """Liquidation multiple of a whole ticket (signal at ``t``) if sold at each decision time.
+
+    Entry and exits use the same executable maths as :func:`moonshot_outcome`: entry at
+    ``t + latency`` with our own reserve shift carried forward (scaled through liquidity
+    changes), and a sale decided at ``s`` filling against the pool at ``s + latency``.
+    Returns ``(decision_times ≥ entry, multiples)`` or None when the entry cannot be priced.
+    """
+    entry_t = t + spec.latency_seconds
+    ts, sol, tok, virt = _states(log)
+    i0 = int(np.searchsorted(ts, entry_t, side="right")) - 1
+    if i0 < 0:
+        return None
+    pool = _pool(float(sol[i0]), float(tok[i0]), float(virt[i0]))
+    if pool.sol <= 1e-9 or pool.tokens <= 1e-9:
+        return None
+    bought, after = pool.buy(spec.size_sol)
+    d_sol, d_tok = after.sol - pool.sol, pool.tokens - after.tokens
+    scale = _shift_scale(log, ts, sol)
+    dt = np.asarray(decision_times, dtype=np.float64)
+    dt = dt[dt >= entry_t]
+    fill = np.searchsorted(ts, dt + spec.latency_seconds, side="right") - 1
+    ds, dk = d_sol * scale[fill], d_tok * scale[fill]
+    marks = liquidation_values(bought, sol[fill] + ds, tok[fill] - dk, virt[fill]) / spec.size_sol
+    return dt, np.asarray(marks, dtype=np.float64)

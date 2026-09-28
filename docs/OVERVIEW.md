@@ -44,10 +44,11 @@ champion → challenger lifecycle.
 - [Tape Transformer](#tape-transformer)
 - [Criticality engine](#criticality-engine)
 - [Capital engine](#capital-engine)
+- [Optimal-stopping exits](#optimal-stopping-exits)
 - [Optional / not included](#optional--not-included)
 - **[Part II — In depth](#part-ii--in-depth)**: architecture, continual learning, integration,
   Solana layer, edge engine, moonshot engine, Tape Transformer, criticality engine, capital
-  engine (the full contents of `docs/`)
+  engine, optimal-stopping exits (the full contents of `docs/`)
 - **[Part III — Generated reference](#part-iii--generated-reference)**: every CLI command and
   option, every configuration field and default, every feature, every output field, the
   public Python API and the test inventory
@@ -343,7 +344,8 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 ├── configs/                 default.yaml · small.yaml
 ├── README.md                generated: python -m nardis_neural.docgen (a test keeps it in sync)
 ├── docs/                    OVERVIEW.md · ARCHITECTURE.md · CONTINUAL_LEARNING.md · INTEGRATION.md ·
-│                            SOLANA.md · EDGE.md · MOONSHOT.md · TAPE.md · CRITICALITY.md · CAPITAL.md (README sources)
+│                            SOLANA.md · EDGE.md · MOONSHOT.md · TAPE.md · CRITICALITY.md · CAPITAL.md ·
+│                            STOPPING.md (README sources)
 ├── examples/                nardis_integration.py (runnable, tested)
 ├── src/nardis_neural/
 │   ├── config.py            Pydantic config tree
@@ -364,7 +366,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │   ├── monitoring/          drift
 │   └── solana/              amm · events · market · wallets · features · labels · dataset ·
 │                            risk · simulator · brain · config · cli · streaming · hawkes ·
-│                            forward · suite
+│                            forward · suite · stopping
 │                            capital/ (allocator · bankroll · overfit · research)
 │                            ingest/ (decoder · rpc · stream · history · encode · pumpfun · base58)
 │                            edge/ (barriers · model · trees · backtest · research)
@@ -569,6 +571,20 @@ is real. See [docs/CAPITAL.md](CAPITAL.md).
   payoff down;
 - **Deflated Sharpe Ratio** and **Probability of Backtest Overfitting** (combinatorially
   symmetric cross-validation) in every moonshot research report.
+
+## Optimal-stopping exits
+
+`nardis_neural.solana.stopping` treats holding a position as an American option on its own
+executable liquidation value and solves for the exit. See [docs/STOPPING.md](STOPPING.md).
+
+- **Longstaff–Schwartz** regression of the **continuation value** (the Snell envelope),
+  with **log utility** so the exit maximises compounding rather than the lottery mean;
+- **fitted policy iteration** over paths of any length, with gradient-boosted trees on the
+  full causal market state plus time held, log multiple, running peak and drawdown;
+- honest evaluation: fitted on earlier tokens with paths truncated at the cutoff, scored
+  once on later tokens against hold, timers, the take-profit ladder and the hindsight-best
+  exit (`solana stopping-research`; `brain.hold_advice` gives sell-vs-hold values, never
+  orders).
 
 ## Optional / not included
 

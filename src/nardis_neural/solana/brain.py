@@ -48,8 +48,16 @@ from nardis_neural.solana.labels import SolanaLabeler
 from nardis_neural.solana.market import EventStore, SolanaMarket
 from nardis_neural.solana.moonshot import MoonshotSpec, TailModel, moonshot_markdown, run_moonshot_research
 from nardis_neural.solana.moonshot.guard import GuardConfig, assess_manipulation
+from nardis_neural.solana.moonshot.labels import position_marks
 from nardis_neural.solana.moonshot.online import MoonshotTracker
 from nardis_neural.solana.risk import SolanaRiskModel
+from nardis_neural.solana.stopping import (
+    StoppingModel,
+    StoppingPath,
+    run_stopping_research,
+    state_matrix,
+    stopping_markdown,
+)
 from nardis_neural.solana.tape.features import TapeSpec, extract_tape, stack_tapes
 from nardis_neural.solana.tape.model import TapeModel, window_label
 from nardis_neural.solana.tape.research import run_tape_research, tape_markdown
@@ -209,6 +217,12 @@ class SolanaBrain:
             TapeModel.load(self.root / "tape") if (self.root / "tape" / "tape.json").exists() else None
         )
         """Tape Transformer (tail + collapse), installed by :meth:`fit_tape`."""
+        self.stopping: StoppingModel | None = (
+            StoppingModel.load(self.root / "stopping")
+            if (self.root / "stopping" / "stopping.json").exists()
+            else None
+        )
+        """Optimal-stopping exit model (continuation value), installed by :meth:`fit_stopping`."""
         self.guard = GuardConfig()
         """Thresholds of the moonshot manipulation guard (hard vetoes)."""
         if (self.root / "moonshot" / "tail.json").exists():
@@ -730,6 +744,60 @@ class SolanaBrain:
         self.tape_model = research.model
         self.forward.alarm = self._ledger_alarm()
         return research.report
+
+    def fit_stopping(
+        self,
+        spec: MoonshotSpec | None = None,
+        test_fraction: float = 0.35,
+        spacing: float = 30.0,
+        history: EventStore | None = None,
+        archetypes: dict[str, str] | None = None,
+        log: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        """Optimal-stopping exit research on the workspace history; installs the refitted model."""
+        report, model = run_stopping_research(
+            history or self.history,
+            self.cfg,
+            spec or (self.moonshot.spec if self.moonshot is not None else MoonshotSpec()),
+            test_fraction=test_fraction,
+            spacing=spacing,
+            archetypes=archetypes,
+            log=log,
+        )
+        d = self.root / "stopping"
+        model.report = model.report | {"research": report, "spacing": spacing}
+        model.save(d)
+        (d / "REPORT.md").write_text(stopping_markdown(report))
+        self.stopping = model
+        return report
+
+    def hold_advice(self, mint: str, t_signal: float) -> dict[str, float]:
+        """Sell-or-hold advice for a ticket signalled at ``t_signal`` (an estimate, not an order).
+
+        Marks the position at the model's decision spacing up to now, then compares the
+        utility of liquidating now with the estimated continuation value.  ``advantage > 0``
+        means holding is worth more than selling now.  Empty without a fitted model.
+        """
+        if self.stopping is None or self.stopping.trees is None:
+            return {}
+        spec = self.moonshot.spec if self.moonshot is not None else MoonshotSpec()
+        now = self.market.now
+        spacing = float(self.stopping.report.get("spacing", 30.0))
+        grid = np.r_[np.arange(t_signal + spec.latency_seconds, now, spacing), now]
+        priced = position_marks(self.market.token(mint), t_signal, spec, grid)
+        if priced is None or len(priced[0]) == 0:
+            return {}
+        times, marks = priced
+        cur = self.builder.observation(self.market, mint, now).current_features.astype(np.float32)
+        path = StoppingPath(mint, t_signal, times, marks, np.repeat(cur[None, :], len(times), axis=0))
+        cont = float(self.stopping.continuation(state_matrix(path)[-1:])[0])
+        sell = float(self.stopping.u(marks[-1:])[0])
+        return {
+            "liquidation_multiple": float(marks[-1]),
+            "sell_now_utility": sell,
+            "continuation_utility": cont,
+            "advantage": cont - sell,
+        }
 
     def fit_moonshot(
         self,

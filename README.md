@@ -46,10 +46,11 @@ champion → challenger lifecycle.
 - [Tape Transformer](#tape-transformer)
 - [Criticality engine](#criticality-engine)
 - [Capital engine](#capital-engine)
+- [Optimal-stopping exits](#optimal-stopping-exits)
 - [Optional / not included](#optional--not-included)
 - **[Part II — In depth](#part-ii--in-depth)**: architecture, continual learning, integration,
   Solana layer, edge engine, moonshot engine, Tape Transformer, criticality engine, capital
-  engine (the full contents of `docs/`)
+  engine, optimal-stopping exits (the full contents of `docs/`)
 - **[Part III — Generated reference](#part-iii--generated-reference)**: every CLI command and
   option, every configuration field and default, every feature, every output field, the
   public Python API and the test inventory
@@ -98,7 +99,7 @@ flowchart TB
 | Continual learning | 3-pool replay (recent FIFO, historical reservoir, protected rare events), 5 sampling strategies, candidate cloning, distillation, EWC, full retraining with configurable weights |
 | Lifecycle | immutable checkpoints, champion/candidate/challenger/retired/failed registry with audit log, shadow mode, 10-gate promotion, manual and optional automatic rollback |
 | Representation | self-supervised pretraining (masked timestep, masked feature, contrastive), embedding export to Parquet/NumPy, KMeans / GMM / HDBSCAN regime discovery |
-| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 205 test functions |
+| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 209 test functions |
 
 ## Quick start
 
@@ -345,7 +346,8 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 ├── configs/                 default.yaml · small.yaml
 ├── README.md                generated: python -m nardis_neural.docgen (a test keeps it in sync)
 ├── docs/                    OVERVIEW.md · ARCHITECTURE.md · CONTINUAL_LEARNING.md · INTEGRATION.md ·
-│                            SOLANA.md · EDGE.md · MOONSHOT.md · TAPE.md · CRITICALITY.md · CAPITAL.md (README sources)
+│                            SOLANA.md · EDGE.md · MOONSHOT.md · TAPE.md · CRITICALITY.md · CAPITAL.md ·
+│                            STOPPING.md (README sources)
 ├── examples/                nardis_integration.py (runnable, tested)
 ├── src/nardis_neural/
 │   ├── config.py            Pydantic config tree
@@ -366,13 +368,13 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │   ├── monitoring/          drift
 │   └── solana/              amm · events · market · wallets · features · labels · dataset ·
 │                            risk · simulator · brain · config · cli · streaming · hawkes ·
-│                            forward · suite
+│                            forward · suite · stopping
 │                            capital/ (allocator · bankroll · overfit · research)
 │                            ingest/ (decoder · rpc · stream · history · encode · pumpfun · base58)
 │                            edge/ (barriers · model · trees · backtest · research)
 │                            moonshot/ (labels · tail · guard · online · research)
 │                            tape/ (features · dataset · model · research · policy)
-└── tests/                   205 test functions incl. synthetic end-to-end pipeline
+└── tests/                   209 test functions incl. synthetic end-to-end pipeline
 ```
 
 ## Testing & quality gates
@@ -571,6 +573,20 @@ is real. See [docs/CAPITAL.md](docs/CAPITAL.md).
   payoff down;
 - **Deflated Sharpe Ratio** and **Probability of Backtest Overfitting** (combinatorially
   symmetric cross-validation) in every moonshot research report.
+
+## Optimal-stopping exits
+
+`nardis_neural.solana.stopping` treats holding a position as an American option on its own
+executable liquidation value and solves for the exit. See [docs/STOPPING.md](docs/STOPPING.md).
+
+- **Longstaff–Schwartz** regression of the **continuation value** (the Snell envelope),
+  with **log utility** so the exit maximises compounding rather than the lottery mean;
+- **fitted policy iteration** over paths of any length, with gradient-boosted trees on the
+  full causal market state plus time held, log multiple, running peak and drawdown;
+- honest evaluation: fitted on earlier tokens with paths truncated at the cutoff, scored
+  once on later tokens against hold, timers, the take-profit ladder and the hindsight-best
+  exit (`solana stopping-research`; `brain.hold_advice` gives sell-vs-hold values, never
+  orders).
 
 ## Optional / not included
 
@@ -2364,6 +2380,137 @@ How to read this:
 * Both markets are simulations. Real launch markets are harsher. The stress rows are the
   more realistic guide to what sizing does.
 
+## Optimal-stopping exits (`nardis_neural.solana.stopping`)
+
+Entries get most of the attention, but for a fat-tailed launch market the exit decides
+most of the result. A token that prints 50x and then rugs is worth 50x only to a holder who
+sold in time. This module treats the exit as what it is mathematically: an **optimal
+stopping problem**.
+
+### 1. The problem
+
+Holding a ticket is an American option on its own liquidation value. At each decision
+time `t_k` we may sell, receiving `V_k`, or continue. `V_k` is the executable multiple of
+the whole ticket if it were sold at `t_k`: the sale fills at `t_k + latency` against the
+pool, with our own reserve shift, price impact and fees (`moonshot.labels.position_marks`,
+the same maths as every other label).
+
+With a utility `u`, the value of the best possible exit rule is the **Snell envelope**
+
+```
+U_K = u(V_K)
+U_k = max( u(V_k),  C_k ),      C_k = E[ U_{k+1} | state_k ]
+```
+
+and the optimal rule stops at the first `k` with `u(V_k) ≥ C_k`. `C_k` is the
+**continuation value**: what holding on is worth, given everything known now.
+
+#### Why log utility
+
+With linear utility (maximise E[V]), fat tails dominate. A 1 % chance of 1000x is worth
+10x, so the rule learns to hold almost everything "for the lottery". With `u(V) = log V`,
+the rule maximises the expected growth rate of capital, which is the Kelly criterion
+applied to the exit. It still holds a runner while its continuation value is high, but it
+does not trade a likely 3x for a small chance at 100x. Both utilities are fitted and
+reported; the installed model uses log.
+
+### 2. The estimator
+
+**Longstaff–Schwartz** (2001) estimates `C_k` by regressing realised future values on the
+current state along observed paths. Here:
+
+* **State**: all 73 causal market features at `t_k` (flow, wallets, criticality, curve
+  state…), plus time held (log seconds), the current log multiple, the running peak log
+  multiple and the drawdown from that peak. The peak and drawdown are path-dependent;
+  they are what makes a trailing rule possible.
+* **Regressor**: gradient-boosted trees (`max_depth` 4, learning rate 0.05, L2 1.0),
+  exported to plain arrays (`continuation.npz`), so no scikit-learn object is pickled.
+* **Fitted policy iteration**: paths have different lengths, so the regression is pooled
+  across all decisions rather than run per date. Start from "hold to the end". Regress the
+  realised utility of following the current policy from `k+1` on the state at `k`. Switch
+  to "stop when `u(V_k) ≥ Ĉ(state_k)`", recompute the realised utilities and refit. Four
+  rounds are used; the report lists how many decisions changed and the realised utility in
+  each round.
+* **Decision grid**: the token's own snapshots after entry, at most one per 30 s
+  (`--spacing`), up to the moonshot horizon (6 h).
+
+### 3. Honest evaluation
+
+In-sample LSM is biased upward, because the same noise decides both the regression and
+the stop. So:
+
+* tokens are split by launch time, earliest 65 % for training;
+* training paths are **truncated at the cutoff** (the first test signal): no training
+  decision uses a sale that fills after the cutoff;
+* the policy is scored **once** on the later tokens, over their full paths;
+* **every** test token is entered at its first entry-window snapshot, so only the exit is
+  compared. Entry selection is a separate engine.
+
+Compared exits: the stopping policy (log and linear), hold to the horizon, sell after 5 or
+30 minutes, the moonshot take-profit ladder (with its trailing and hard stops, which
+react tick by tick rather than on the 30 s grid), and the **hindsight-best** exit (the
+highest mark on the grid). The hindsight exit cannot be traded; it is the ceiling.
+
+### 4. Results on the simulator
+
+Two 150-launch, 12-hour markets (seed 7): `degen` and `adversarial` with herding. There are
+52 test tokens in each, with 0.5 SOL tickets.
+
+| exit | adversarial + herding: mean log x · PnL (SOL) · share > 1x | degen: mean log x · PnL (SOL) · share > 1x |
+|---|---|---|
+| **optimal stopping, log utility** | **+1.00** · +268 · **85 %** | **+1.07** · +171 · **88 %** |
+| optimal stopping, linear utility | +0.49 · +138 · 60 % | +0.80 · +214 · 83 % |
+| hold to horizon | +0.58 · +199 · 67 % | +0.66 · **+385** · 67 % |
+| take-profit ladder | +0.52 · +37 · 73 % | +0.79 · +172 · 73 % |
+| sell after 5 min | +0.50 · +61 · 67 % | +0.24 · +28 · 69 % |
+| sell after 30 min | +0.48 · +56 · 67 % | +0.55 · +99 · 67 % |
+| hindsight-best (ceiling) | +1.33 · +379 · 88 % | +1.41 · +449 · 98 % |
+
+The log-utility policy holds for a median of about 6 minutes (355 s and 370 s).
+
+How to read this:
+
+* **Log growth per ticket, the quantity that compounds, is highest for the stopping
+  policy in both markets.** It is +1.00 and +1.07 against +0.52 to +0.79 for the ladder
+  and +0.58 to +0.66 for holding. It captures about 75 % of the hindsight ceiling in both
+  markets, out of sample.
+* **Its median ticket is the best of every rule**: 1.66x and 2.62x, against 1.15x to 1.61x
+  for the others. It also has the highest share of winning tickets, 85 % and 88 %.
+* **The trade-off is the fat right tail, and it is intended.** In the degen market,
+  holding everything to the horizon makes the most SOL (+385). A few tokens that never
+  stop running pay for all the rugs. The log policy sells some of those runners early,
+  because a Kelly bettor should. In the adversarial market, where runners are rarer and
+  rugs are staged, the log policy also wins on total PnL (+268 against +199).
+* **Linear utility behaves as theory predicts**: it holds more and gets a lower median.
+  It does not reliably beat simply holding, because the fat tail makes its regression
+  target very noisy.
+* The policy iteration converges: decisions that change per round fall from 2 600 to about
+  500, and the realised training utility plateaus by round 3 to 4.
+* These are simulations with one seed per market. Real launch markets are harsher. Paper
+  trade the advice next to the ladder and compare with the forward ledger before relying
+  on it.
+
+### 5. Use
+
+```bash
+nardis-neural solana stopping-research --workspace ws        # research + install ws/stopping/
+```
+
+```python
+brain.fit_stopping()                              # same as the command
+advice = brain.hold_advice(mint, t_signal)        # a held ticket signalled at t_signal
+advice["liquidation_multiple"]                    # executable multiple if sold now
+advice["sell_now_utility"], advice["continuation_utility"]
+advice["advantage"]                               # > 0: holding is worth more than selling now
+```
+
+`hold_advice` marks the position on the model's decision grid from the signal to now (for
+the running peak and drawdown), builds the current features and compares the two values.
+It is advice for the trading system, not an order. The workspace keeps
+`stopping/continuation.npz`, `stopping/stopping.json` (with the research report) and
+`stopping/REPORT.md`. Fitting takes seconds; the research on a 150-token market takes
+about 10 minutes on a CPU, most of it building the feature snapshots.
+
 # Part III — Generated reference
 
 Generated from the code; it cannot drift.
@@ -2766,6 +2913,18 @@ score it against the raw-feature tail model on later tokens; installs the model.
 | `--test-fraction` | float | 0.35 | share of the latest-launched tokens held out for the test |
 | `--archetypes` | path | null | simulator archetypes.json for diagnostics |
 | `--device` | str | null | cpu \| cuda \| cuda:0 \| mps (default: auto) |
+
+### `nardis-neural solana stopping-research`
+
+Fit the optimal-stopping exit model (Longstaff–Schwartz, log utility), score it against
+hold, timers and the ladder on later tokens, and install it.
+
+| option | type | default | description |
+|---|---|---|---|
+| `--workspace`, `-w` | path | required | Solana workspace (history) |
+| `--spacing` | float | 30.0 | minimum seconds between exit decisions |
+| `--test-fraction` | float | 0.35 | share of the latest-launched tokens held out for the test |
+| `--archetypes` | path | null | simulator archetypes.json for diagnostics |
 
 ### `nardis-neural solana forward-report`
 
@@ -3971,7 +4130,9 @@ SolanaBrain — the complete Solana ML module behind one small API.
   - `evict(self) -> 'list[str]'` — Label finished moonshot rows, then drop tokens idle for ``evict_idle_seconds``.
   - `fit_edge(self, spec: 'BarrierSpec | None' = None, n_folds: 'int' = 4, max_positions: 'int' = 5, history: 'EventStore | None' = None, log: 'Callable[[str], None] | None' = None) -> 'dict[str, Any]'` — Walk-forward edge research on the workspace history; installs the edge model.
   - `fit_moonshot(self, spec: 'MoonshotSpec | None' = None, inputs: 'str' = 'raw', n_folds: 'int' = 4, test_fraction: 'float' = 0.35, min_expected_multiple: 'float' = 1.0, history: 'EventStore | None' = None, archetypes: 'dict[str, str] | None' = None, log: 'Callable[[str], None] | None' = None) -> 'dict[str, Any]'` — Fat-tail research on the workspace history; installs the tail model.
+  - `fit_stopping(self, spec: 'MoonshotSpec | None' = None, test_fraction: 'float' = 0.35, spacing: 'float' = 30.0, history: 'EventStore | None' = None, archetypes: 'dict[str, str] | None' = None, log: 'Callable[[str], None] | None' = None) -> 'dict[str, Any]'` — Optimal-stopping exit research on the workspace history; installs the refitted model.
   - `fit_tape(self, spec: 'MoonshotSpec | None' = None, tape: 'TapeSpec | None' = None, test_fraction: 'float' = 0.35, members: 'int' = 3, epochs: 'int' = 40, history: 'EventStore | None' = None, archetypes: 'dict[str, str] | None' = None, log: 'Callable[[str], None] | None' = None) -> 'dict[str, Any]'` — Tape Transformer research on the workspace history; installs the refitted model.
+  - `hold_advice(self, mint: 'str', t_signal: 'float') -> 'dict[str, float]'` — Sell-or-hold advice for a ticket signalled at ``t_signal`` (an estimate, not an order).
   - `ingest(self, event: 'Event') -> 'None'` — Feed one event, in time order, into the market (and the event history unless streaming).
   - `ingest_many(self, events: 'Iterable[Event]') -> 'None'` — Ingest events in order (see :meth:`ingest`).
   - `maintenance(self, risk_refit_min_new: 'int' = 200) -> 'dict[str, Any]'` — Periodic upkeep: neural adaptation / retraining / promotion, risk refit, online tail refit, then :meth:`save`; returns a status summary.
@@ -4039,6 +4200,7 @@ Capital research: turn a research test period into bankroll and overfitting evid
 - `replay(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace directory')]", events: "Annotated[Path, typer.Option('--events', '-e', help='new events to stream in')]", every: "Annotated[float, typer.Option('--assess-every', help='seconds between assessment rounds')]" = 10.0, out: "Annotated[Path | None, typer.Option('--out', '-o', help='JSONL of assessments')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Stream events through the brain as if live: assess, resolve outcomes, then maintain.
 - `research_suite(seeds: "Annotated[str, typer.Option('--seeds', help='comma-separated simulator seeds')]" = '7,19,23', market: "Annotated[str, typer.Option('--market', help='archetype mix: default or degen')]" = 'degen', tokens: "Annotated[int, typer.Option('--tokens', help='launches per simulated market')]" = 150, hours: "Annotated[float, typer.Option('--hours', help='simulated hours per market')]" = 8.0, tape: "Annotated[bool, typer.Option('--tape/--no-tape', help='also run the (slower) tape research')]" = False, out: "Annotated[Path | None, typer.Option('--out', '-o', help='write the JSON result here')]" = None) -> 'None'` — Run the moonshot (and optionally tape) research on several independent simulated markets and report every metric as mean ± sd across seeds.
 - `simulate(out: "Annotated[Path, typer.Option('--out', '-o', help='event directory (Parquet tables)')]", tokens: "Annotated[int, typer.Option('--tokens', help='number of token launches to simulate')]" = 40, seed: "Annotated[int, typer.Option('--seed', help='random seed')]" = 0, prefix: "Annotated[str, typer.Option('--prefix', help='mint/wallet name prefix (distinguishes eras)')]" = 'Mint', start_time: "Annotated[float, typer.Option('--start-time', help='simulation start, unix seconds')]" = 1750000000.0, hours: "Annotated[float, typer.Option('--hours', help='simulated duration, hours')]" = 3.0, market: "Annotated[str, typer.Option('--market', help='archetype mix: default, or degen (mostly duds + runners)')]" = 'default', runners: "Annotated[float | None, typer.Option('--runners', help='override the share of 100–1000x runner launches')]" = None, herding: "Annotated[bool, typer.Option('--herding/--no-herding', help='self-exciting (Hawkes) retail demand')]" = False) -> 'None'` — Simulate memecoin launches (snipers, bundles, rugs, graduations, runners, smart money, bots).
+- `stopping_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history)')]", spacing: "Annotated[float, typer.Option('--spacing', help='minimum seconds between exit decisions')]" = 30.0, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of the latest-launched tokens held out for the test')]" = 0.35, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None) -> 'None'` — Fit the optimal-stopping exit model (Longstaff–Schwartz, log utility), score it against hold, timers and the ladder on later tokens, and install it.
 - `stream(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace directory')]", rpc: 'RpcOpt' = None, out: "Annotated[Path | None, typer.Option('--out', '-o', help='append assessments as JSONL')]" = None, polls: "Annotated[int | None, typer.Option('--polls', help='stop after N polls (default: run forever)')]" = None, poll_interval: "Annotated[float, typer.Option('--poll-interval', help='seconds between RPC polls')]" = 2.0, assess_every: "Annotated[float, typer.Option('--assess-every', help='seconds between assessment rounds')]" = 10.0, maintenance_every: "Annotated[float, typer.Option('--maintenance-every', help='seconds between maintenance runs')]" = 600.0, device: 'DeviceOpt' = None) -> 'None'` — Stream live chain activity into a Solana workspace (read-only) and emit assessments.
 - `stream_train_cmd(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (created if new, else resumed)')]", events: "Annotated[Path | None, typer.Option('--events', '-e', help='stream a saved event directory instead of RPC')]" = None, rpc: 'RpcOpt' = None, start: "Annotated[str | None, typer.Option('--start', help='unix seconds or ISO date (RPC mode)')]" = None, end: "Annotated[str | None, typer.Option('--end', help='unix seconds or ISO date (RPC mode)')]" = None, segment_minutes: "Annotated[float, typer.Option('--segment-minutes', help='history segment length, minutes (RPC mode)')]" = 60.0, workers: "Annotated[int, typer.Option('--workers', help='parallel getTransaction calls')]" = 8, warmup_hours: "Annotated[float, typer.Option('--warmup-hours', help='hours of stream used to bootstrap a new workspace')]" = 6.0, evict_idle_hours: "Annotated[float, typer.Option('--evict-idle-hours', help='forget tokens idle this many hours')]" = 2.0, solana_config: 'SolCfg' = None, config: 'BaseCfg' = None, profile: "Annotated[str | None, typer.Option('--profile', help='auto | cpu-lite | cpu | gpu | gpu-frontier')]" = 'auto', device: 'DeviceOpt' = None) -> 'None'` — Learn by streaming history through the brain — nothing is downloaded to disk.
 - `tape_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history + champion)')]", max_trades: "Annotated[int, typer.Option('--max-trades', help='trades per tape (most recent kept)')]" = 96, members: "Annotated[int, typer.Option('--members', help='ensemble members')]" = 3, epochs: "Annotated[int, typer.Option('--epochs', help='maximum training epochs per member')]" = 40, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of the latest-launched tokens held out for the test')]" = 0.35, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Train the Tape Transformer (trade tape + wallet embeddings → tail and collapse) and score it against the raw-feature tail model on later tokens; installs the model.
@@ -4308,6 +4470,7 @@ Executable moonshot outcomes: how far could a ticket bought *now* really have ru
 - `moonshot_outcome(log: 'TokenEventLog', t: 'float', spec: 'MoonshotSpec', data_end: 'float', exit_at: 'float | None' = None) -> 'MoonshotOutcome | None'` — Outcome of a ticket for a signal at ``t`` using only data up to ``data_end``.
 - **class `MoonshotOutcome`** — Executable outcome of one ticket: peak, ladder and final multiples of the stake, with timing.
 - **class `MoonshotSpec`** — Ticket size, latency, horizon, entry window and ladder-exit policy of moonshot outcomes.
+- `position_marks(log: 'TokenEventLog', t: 'float', spec: 'MoonshotSpec', decision_times: 'F64') -> 'tuple[F64, F64] | None'` — Liquidation multiple of a whole ticket (signal at ``t``) if sold at each decision time.
 
 ### `nardis_neural.solana.moonshot.online`
 
@@ -4376,6 +4539,23 @@ Agent-based simulator of Solana memecoin launches — for testing and demos only
 - **class `LaunchSimulator`** — Agent-based generator of launch event streams with ground-truth archetypes (tests and demos only).
   - `run(self) -> 'tuple[EventStore, dict[str, str]]'` — Simulate every launch; returns the event store and each mint's archetype.
 - `simulate_launches(spec: 'LaunchSimSpec | None' = None) -> 'tuple[EventStore, dict[str, str]]'` — Returns the event history and the ground-truth archetype of every mint.
+
+### `nardis_neural.solana.stopping`
+
+Optimal stopping for exits: Longstaff–Schwartz on executable liquidation paths.
+
+- `build_paths(mds: 'Any', mints: 'list[str]', data_end: 'float', spacing: 'float' = 30.0) -> 'tuple[list[StoppingPath], list[int]]'` — One position per token, entered at its first entry-window snapshot and marked at the token's later snapshots (at most one per ``spacing`` seconds) up to the horizon and to ``data_end`` (a sale decided at ``s`` fills at ``s + latency``, which must be observed). Returns the paths and the candidate row (into ``mds``) of each entry.
+- `run_stopping_research(store: 'Any', cfg: 'Any', spec: 'Any' = None, test_fraction: 'float' = 0.35, spacing: 'float' = 30.0, iterations: 'int' = 4, archetypes: 'dict[str, str] | None' = None, seed: 'int' = 0, log: 'Any' = None) -> 'tuple[dict[str, Any], StoppingModel]'` — Fit the exit model on earlier tokens (paths truncated at the cutoff), score it once on later tokens against hold-to-horizon, fixed timers, the take-profit ladder and the hindsight-perfect exit. Every token is entered, so only the exit decision is compared. Returns the report and a model refitted on every token's full path.
+- `state_matrix(p: 'StoppingPath') -> 'F32'` — Regression state: market features + time held + log multiple, running peak, drawdown.
+- `stopping_markdown(report: 'dict[str, Any]') -> 'str'` — Human-readable summary of :func:`run_stopping_research`.
+- **class `StoppingModel`** — Fitted-policy-iteration Longstaff–Schwartz exit model.
+  - `continuation(self, x: 'F32') -> 'F64'` — Estimated E[utility of continuing] for each state row.
+  - `fit(self, paths: 'list[StoppingPath]', max_iter: 'int' = 200) -> 'dict[str, Any]'` — Policy iteration: regress the realised utility of the current policy, re-derive it.
+  - `load(cls, directory: 'str | Path') -> 'StoppingModel'` — Rebuild a model saved by :meth:`save`.
+  - `save(self, directory: 'str | Path') -> 'None'` — Write the exported trees and ``stopping.json``.
+  - `stop_index(self, p: 'StoppingPath') -> 'int'` — First decision index at which selling beats continuing (the last index if never).
+  - `u(self, v: 'F64') -> 'F64'` — Utility of a liquidation multiple.
+- **class `StoppingPath`** — One held position observed at its decision times.
 
 ### `nardis_neural.solana.streaming`
 
@@ -4616,7 +4796,7 @@ Transparent PyTorch training engine.
 
 ## Test inventory
 
-205 test functions (some are parametrised over devices, experts or formats).
+209 test functions (some are parametrised over devices, experts or formats).
 
 ### `tests/test_cli.py`
 
@@ -4901,6 +5081,13 @@ Runner-specific wallet skill, creator-family track records, sybil-resistant clus
 - `test_cluster_counts_see_through_sybil_wallets`
 - `test_market_heat_windows`
 - `test_staged_insiders_behind_a_relay_are_seen_and_distrusted`
+
+### `tests/test_solana_stopping.py`
+
+- `test_state_matrix_tracks_peak_and_drawdown`
+- `test_stopping_beats_holding_out_of_sample`
+- `test_unfitted_model_holds_and_thin_spacing`
+- `test_stopping_research_and_brain_integration`
 
 ### `tests/test_solana_streaming.py`
 
