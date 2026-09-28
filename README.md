@@ -2468,27 +2468,47 @@ Two 150-launch, 12-hour markets (seed 7): `degen` and `adversarial` with herding
 
 The log-utility policy holds for a median of about 6 minutes (355 s and 370 s).
 
+#### Robustness: six markets
+
+The same research was repeated on seeds 19 and 23 of both markets. The table shows mean
+log multiple per ticket (52 test tokens each).
+
+| exit | adv 7 | adv 19 | adv 23 | degen 7 | degen 19 | degen 23 | mean ± sd |
+|---|---|---|---|---|---|---|---|
+| **optimal stopping, log** | **+1.00** | **+0.92** | **+0.52** | **+1.07** | **+0.86** | **+0.46** | **+0.81 ± 0.26** |
+| optimal stopping, linear | +0.49 | +0.53 | +0.14 | +0.80 | +0.61 | +0.23 | +0.47 ± 0.25 |
+| hold to horizon | +0.58 | +0.54 | +0.38 | +0.66 | +0.53 | +0.11 | +0.47 ± 0.20 |
+| take-profit ladder | +0.52 | +0.48 | +0.50 | +0.79 | +0.60 | +0.23 | +0.52 ± 0.18 |
+| hindsight-best (ceiling) | +1.33 | +1.28 | +1.16 | +1.41 | +1.24 | +0.78 | +1.20 ± 0.22 |
+
+Total PnL in SOL (0.5 SOL tickets), same order: log policy +268, +274, +46, +171, +436,
++91 (mean +214); hold +199, +271, +302, +385, +357, +275 (mean +298); ladder +37, +48,
++44, +172, +180, +61 (mean +90).
+
 How to read this:
 
-* **Log growth per ticket, the quantity that compounds, is highest for the stopping
-  policy in both markets.** It is +1.00 and +1.07 against +0.52 to +0.79 for the ladder
-  and +0.58 to +0.66 for holding. It captures about 75 % of the hindsight ceiling in both
-  markets, out of sample.
-* **Its median ticket is the best of every rule**: 1.66x and 2.62x, against 1.15x to 1.61x
-  for the others. It also has the highest share of winning tickets, 85 % and 88 %.
-* **The trade-off is the fat right tail, and it is intended.** In the degen market,
-  holding everything to the horizon makes the most SOL (+385). A few tokens that never
-  stop running pay for all the rugs. The log policy sells some of those runners early,
-  because a Kelly bettor should. In the adversarial market, where runners are rarer and
-  rugs are staged, the log policy also wins on total PnL (+268 against +199).
+* **Log growth per ticket, the quantity that compounds, is highest for the log-utility
+  policy in all six markets.** On average it is +0.81 against +0.52 for the ladder and
+  +0.47 for holding, and it captures about two thirds of the hindsight ceiling, out of
+  sample. The weakest win is adversarial seed 23 (+0.52 against +0.50 for the ladder).
+* **Its median ticket is the best of every tradeable rule in all six markets** (1.15x to
+  2.62x). It has the highest share of winning tickets in 5 of 6 markets (60 % to 88 %; on adversarial seed 23, selling after 5 minutes wins 62 % against 60 %).
+* **The trade-off is the fat right tail, and it is intended.** Holding everything to the
+  horizon makes more SOL on average (+298 against +214). A few tokens that never stop
+  running pay for all the rugs, and the log policy sells some of them early, because a
+  Kelly bettor should. The log policy beat holding on total PnL in 2 of 6 markets, tied in
+  1 and lost in 3. It beat the ladder on total PnL in 4 of 6 and tied in 2.
+* **Choose by objective.** For compounding a bankroll (sizing with the capital engine,
+  where a drawdown shrinks every later stake), log growth is the right target and the
+  stopping policy is the best exit measured. For a small fixed lottery budget, where only
+  total SOL matters, holding the runners pays more on these simulated markets.
 * **Linear utility behaves as theory predicts**: it holds more and gets a lower median.
   It does not reliably beat simply holding, because the fat tail makes its regression
   target very noisy.
-* The policy iteration converges: decisions that change per round fall from 2 600 to about
-  500, and the realised training utility plateaus by round 3 to 4.
-* These are simulations with one seed per market. Real launch markets are harsher. Paper
-  trade the advice next to the ladder and compare with the forward ledger before relying
-  on it.
+* The policy iteration converges: decisions that change per round fall from about 2 600 to
+  about 500, and the realised training utility plateaus by round 3 to 4.
+* These are simulations. Real launch markets are harsher. Paper trade the advice next to
+  the ladder and compare with the forward ledger before relying on it.
 
 ### 5. Use
 
@@ -2910,6 +2930,8 @@ score it against the raw-feature tail model on later tokens; installs the model.
 | `--max-trades` | int | 96 | trades per tape (most recent kept) |
 | `--members` | int | 3 | ensemble members |
 | `--epochs` | int | 40 | maximum training epochs per member |
+| `--d` | int | 64 | Transformer width |
+| `--layers` | int | 2 | Transformer layers |
 | `--test-fraction` | float | 0.35 | share of the latest-launched tokens held out for the test |
 | `--archetypes` | path | null | simulator archetypes.json for diagnostics |
 | `--device` | str | null | cpu \| cuda \| cuda:0 \| mps (default: auto) |
@@ -4131,7 +4153,7 @@ SolanaBrain — the complete Solana ML module behind one small API.
   - `fit_edge(self, spec: 'BarrierSpec | None' = None, n_folds: 'int' = 4, max_positions: 'int' = 5, history: 'EventStore | None' = None, log: 'Callable[[str], None] | None' = None) -> 'dict[str, Any]'` — Walk-forward edge research on the workspace history; installs the edge model.
   - `fit_moonshot(self, spec: 'MoonshotSpec | None' = None, inputs: 'str' = 'raw', n_folds: 'int' = 4, test_fraction: 'float' = 0.35, min_expected_multiple: 'float' = 1.0, history: 'EventStore | None' = None, archetypes: 'dict[str, str] | None' = None, log: 'Callable[[str], None] | None' = None) -> 'dict[str, Any]'` — Fat-tail research on the workspace history; installs the tail model.
   - `fit_stopping(self, spec: 'MoonshotSpec | None' = None, test_fraction: 'float' = 0.35, spacing: 'float' = 30.0, history: 'EventStore | None' = None, archetypes: 'dict[str, str] | None' = None, log: 'Callable[[str], None] | None' = None) -> 'dict[str, Any]'` — Optimal-stopping exit research on the workspace history; installs the refitted model.
-  - `fit_tape(self, spec: 'MoonshotSpec | None' = None, tape: 'TapeSpec | None' = None, test_fraction: 'float' = 0.35, members: 'int' = 3, epochs: 'int' = 40, history: 'EventStore | None' = None, archetypes: 'dict[str, str] | None' = None, log: 'Callable[[str], None] | None' = None) -> 'dict[str, Any]'` — Tape Transformer research on the workspace history; installs the refitted model.
+  - `fit_tape(self, spec: 'MoonshotSpec | None' = None, tape: 'TapeSpec | None' = None, test_fraction: 'float' = 0.35, members: 'int' = 3, epochs: 'int' = 40, history: 'EventStore | None' = None, archetypes: 'dict[str, str] | None' = None, log: 'Callable[[str], None] | None' = None, d: 'int' = 64, layers: 'int' = 2) -> 'dict[str, Any]'` — Tape Transformer research on the workspace history; installs the refitted model.
   - `hold_advice(self, mint: 'str', t_signal: 'float') -> 'dict[str, float]'` — Sell-or-hold advice for a ticket signalled at ``t_signal`` (an estimate, not an order).
   - `ingest(self, event: 'Event') -> 'None'` — Feed one event, in time order, into the market (and the event history unless streaming).
   - `ingest_many(self, events: 'Iterable[Event]') -> 'None'` — Ingest events in order (see :meth:`ingest`).
@@ -4203,7 +4225,7 @@ Capital research: turn a research test period into bankroll and overfitting evid
 - `stopping_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history)')]", spacing: "Annotated[float, typer.Option('--spacing', help='minimum seconds between exit decisions')]" = 30.0, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of the latest-launched tokens held out for the test')]" = 0.35, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None) -> 'None'` — Fit the optimal-stopping exit model (Longstaff–Schwartz, log utility), score it against hold, timers and the ladder on later tokens, and install it.
 - `stream(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace directory')]", rpc: 'RpcOpt' = None, out: "Annotated[Path | None, typer.Option('--out', '-o', help='append assessments as JSONL')]" = None, polls: "Annotated[int | None, typer.Option('--polls', help='stop after N polls (default: run forever)')]" = None, poll_interval: "Annotated[float, typer.Option('--poll-interval', help='seconds between RPC polls')]" = 2.0, assess_every: "Annotated[float, typer.Option('--assess-every', help='seconds between assessment rounds')]" = 10.0, maintenance_every: "Annotated[float, typer.Option('--maintenance-every', help='seconds between maintenance runs')]" = 600.0, device: 'DeviceOpt' = None) -> 'None'` — Stream live chain activity into a Solana workspace (read-only) and emit assessments.
 - `stream_train_cmd(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (created if new, else resumed)')]", events: "Annotated[Path | None, typer.Option('--events', '-e', help='stream a saved event directory instead of RPC')]" = None, rpc: 'RpcOpt' = None, start: "Annotated[str | None, typer.Option('--start', help='unix seconds or ISO date (RPC mode)')]" = None, end: "Annotated[str | None, typer.Option('--end', help='unix seconds or ISO date (RPC mode)')]" = None, segment_minutes: "Annotated[float, typer.Option('--segment-minutes', help='history segment length, minutes (RPC mode)')]" = 60.0, workers: "Annotated[int, typer.Option('--workers', help='parallel getTransaction calls')]" = 8, warmup_hours: "Annotated[float, typer.Option('--warmup-hours', help='hours of stream used to bootstrap a new workspace')]" = 6.0, evict_idle_hours: "Annotated[float, typer.Option('--evict-idle-hours', help='forget tokens idle this many hours')]" = 2.0, solana_config: 'SolCfg' = None, config: 'BaseCfg' = None, profile: "Annotated[str | None, typer.Option('--profile', help='auto | cpu-lite | cpu | gpu | gpu-frontier')]" = 'auto', device: 'DeviceOpt' = None) -> 'None'` — Learn by streaming history through the brain — nothing is downloaded to disk.
-- `tape_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history + champion)')]", max_trades: "Annotated[int, typer.Option('--max-trades', help='trades per tape (most recent kept)')]" = 96, members: "Annotated[int, typer.Option('--members', help='ensemble members')]" = 3, epochs: "Annotated[int, typer.Option('--epochs', help='maximum training epochs per member')]" = 40, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of the latest-launched tokens held out for the test')]" = 0.35, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Train the Tape Transformer (trade tape + wallet embeddings → tail and collapse) and score it against the raw-feature tail model on later tokens; installs the model.
+- `tape_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history + champion)')]", max_trades: "Annotated[int, typer.Option('--max-trades', help='trades per tape (most recent kept)')]" = 96, members: "Annotated[int, typer.Option('--members', help='ensemble members')]" = 3, epochs: "Annotated[int, typer.Option('--epochs', help='maximum training epochs per member')]" = 40, d: "Annotated[int, typer.Option('--d', help='Transformer width')]" = 64, layers: "Annotated[int, typer.Option('--layers', help='Transformer layers')]" = 2, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of the latest-launched tokens held out for the test')]" = 0.35, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Train the Tape Transformer (trade tape + wallet embeddings → tail and collapse) and score it against the raw-feature tail model on later tokens; installs the model.
 
 ### `nardis_neural.solana.config`
 
@@ -4623,7 +4645,7 @@ Entry + exit policies evaluated on executable outcomes.
 
 Tape research: does reading the raw tape beat the aggregate-feature tail model?
 
-- `run_tape_research(store: 'EventStore', cfg: 'SolanaConfig', ncfg: 'NeuralConfig', spec: 'MoonshotSpec | None' = None, tape: 'TapeSpec | None' = None, test_fraction: 'float' = 0.35, members: 'int' = 3, epochs: 'int' = 40, min_expected_multiple: 'float' = 1.0, archetypes: 'dict[str, str] | None' = None, log: 'Logger' = <function _quiet>, seed: 'int' = 0, tune_fraction: 'float' = 0.15, monitor_seconds: 'float' = 30.0) -> 'TapeResearch'` — Build tapes causally, train and score the Tape Transformer against the tail model, then evaluate entry policies (tail / tape / blend) and a learned collapse-exit policy.
+- `run_tape_research(store: 'EventStore', cfg: 'SolanaConfig', ncfg: 'NeuralConfig', spec: 'MoonshotSpec | None' = None, tape: 'TapeSpec | None' = None, test_fraction: 'float' = 0.35, members: 'int' = 3, epochs: 'int' = 40, d: 'int' = 64, layers: 'int' = 2, min_expected_multiple: 'float' = 1.0, archetypes: 'dict[str, str] | None' = None, log: 'Logger' = <function _quiet>, seed: 'int' = 0, tune_fraction: 'float' = 0.15, monitor_seconds: 'float' = 30.0) -> 'TapeResearch'` — Build tapes causally, train and score the Tape Transformer against the tail model, then evaluate entry policies (tail / tape / blend) and a learned collapse-exit policy.
 - `tape_markdown(report: 'dict[str, Any]') -> 'str'` — Human-readable research report (tail vs tape, collapse windows, tickets).
 - **class `TapeResearch`** — Report, production model (refitted on every token) and the candidate dataset.
 

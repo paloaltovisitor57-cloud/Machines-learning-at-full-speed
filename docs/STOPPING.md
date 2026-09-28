@@ -86,27 +86,47 @@ Two 150-launch, 12-hour markets (seed 7): `degen` and `adversarial` with herding
 
 The log-utility policy holds for a median of about 6 minutes (355 s and 370 s).
 
+### Robustness: six markets
+
+The same research was repeated on seeds 19 and 23 of both markets. The table shows mean
+log multiple per ticket (52 test tokens each).
+
+| exit | adv 7 | adv 19 | adv 23 | degen 7 | degen 19 | degen 23 | mean ± sd |
+|---|---|---|---|---|---|---|---|
+| **optimal stopping, log** | **+1.00** | **+0.92** | **+0.52** | **+1.07** | **+0.86** | **+0.46** | **+0.81 ± 0.26** |
+| optimal stopping, linear | +0.49 | +0.53 | +0.14 | +0.80 | +0.61 | +0.23 | +0.47 ± 0.25 |
+| hold to horizon | +0.58 | +0.54 | +0.38 | +0.66 | +0.53 | +0.11 | +0.47 ± 0.20 |
+| take-profit ladder | +0.52 | +0.48 | +0.50 | +0.79 | +0.60 | +0.23 | +0.52 ± 0.18 |
+| hindsight-best (ceiling) | +1.33 | +1.28 | +1.16 | +1.41 | +1.24 | +0.78 | +1.20 ± 0.22 |
+
+Total PnL in SOL (0.5 SOL tickets), same order: log policy +268, +274, +46, +171, +436,
++91 (mean +214); hold +199, +271, +302, +385, +357, +275 (mean +298); ladder +37, +48,
++44, +172, +180, +61 (mean +90).
+
 How to read this:
 
-* **Log growth per ticket, the quantity that compounds, is highest for the stopping
-  policy in both markets.** It is +1.00 and +1.07 against +0.52 to +0.79 for the ladder
-  and +0.58 to +0.66 for holding. It captures about 75 % of the hindsight ceiling in both
-  markets, out of sample.
-* **Its median ticket is the best of every rule**: 1.66x and 2.62x, against 1.15x to 1.61x
-  for the others. It also has the highest share of winning tickets, 85 % and 88 %.
-* **The trade-off is the fat right tail, and it is intended.** In the degen market,
-  holding everything to the horizon makes the most SOL (+385). A few tokens that never
-  stop running pay for all the rugs. The log policy sells some of those runners early,
-  because a Kelly bettor should. In the adversarial market, where runners are rarer and
-  rugs are staged, the log policy also wins on total PnL (+268 against +199).
+* **Log growth per ticket, the quantity that compounds, is highest for the log-utility
+  policy in all six markets.** On average it is +0.81 against +0.52 for the ladder and
+  +0.47 for holding, and it captures about two thirds of the hindsight ceiling, out of
+  sample. The weakest win is adversarial seed 23 (+0.52 against +0.50 for the ladder).
+* **Its median ticket is the best of every tradeable rule in all six markets** (1.15x to
+  2.62x). It has the highest share of winning tickets in 5 of 6 markets (60 % to 88 %; on adversarial seed 23, selling after 5 minutes wins 62 % against 60 %).
+* **The trade-off is the fat right tail, and it is intended.** Holding everything to the
+  horizon makes more SOL on average (+298 against +214). A few tokens that never stop
+  running pay for all the rugs, and the log policy sells some of them early, because a
+  Kelly bettor should. The log policy beat holding on total PnL in 2 of 6 markets, tied in
+  1 and lost in 3. It beat the ladder on total PnL in 4 of 6 and tied in 2.
+* **Choose by objective.** For compounding a bankroll (sizing with the capital engine,
+  where a drawdown shrinks every later stake), log growth is the right target and the
+  stopping policy is the best exit measured. For a small fixed lottery budget, where only
+  total SOL matters, holding the runners pays more on these simulated markets.
 * **Linear utility behaves as theory predicts**: it holds more and gets a lower median.
   It does not reliably beat simply holding, because the fat tail makes its regression
   target very noisy.
-* The policy iteration converges: decisions that change per round fall from 2 600 to about
-  500, and the realised training utility plateaus by round 3 to 4.
-* These are simulations with one seed per market. Real launch markets are harsher. Paper
-  trade the advice next to the ladder and compare with the forward ledger before relying
-  on it.
+* The policy iteration converges: decisions that change per round fall from about 2 600 to
+  about 500, and the realised training utility plateaus by round 3 to 4.
+* These are simulations. Real launch markets are harsher. Paper trade the advice next to
+  the ladder and compare with the forward ledger before relying on it.
 
 ## 5. Use
 

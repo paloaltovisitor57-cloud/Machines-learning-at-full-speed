@@ -493,6 +493,8 @@ def tape_research(
     max_trades: Annotated[int, typer.Option("--max-trades", help="trades per tape (most recent kept)")] = 96,
     members: Annotated[int, typer.Option("--members", help="ensemble members")] = 3,
     epochs: Annotated[int, typer.Option("--epochs", help="maximum training epochs per member")] = 40,
+    d: Annotated[int, typer.Option("--d", help="Transformer width")] = 64,
+    layers: Annotated[int, typer.Option("--layers", help="Transformer layers")] = 2,
     test_fraction: Annotated[
         float,
         typer.Option("--test-fraction", help="share of the latest-launched tokens held out for the test"),
@@ -517,6 +519,8 @@ def tape_research(
         epochs=epochs,
         archetypes=arch,
         log=typer.echo,
+        d=d,
+        layers=layers,
     )
     typer.echo(tape_markdown(report))
     typer.echo(f"tape model installed in {workspace / 'tape'}")

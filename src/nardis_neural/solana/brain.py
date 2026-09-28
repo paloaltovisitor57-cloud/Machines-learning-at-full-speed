@@ -723,6 +723,8 @@ class SolanaBrain:
         history: EventStore | None = None,
         archetypes: dict[str, str] | None = None,
         log: Callable[[str], None] | None = None,
+        d: int = 64,
+        layers: int = 2,
     ) -> dict[str, Any]:
         """Tape Transformer research on the workspace history; installs the refitted model."""
         research = run_tape_research(
@@ -734,13 +736,15 @@ class SolanaBrain:
             test_fraction=test_fraction,
             members=members,
             epochs=epochs,
+            d=d,
+            layers=layers,
             archetypes=archetypes,
             log=log or (lambda _: None),
         )
-        d = self.root / "tape"
-        research.model.save(d)
-        (d / "research.json").write_text(json.dumps(research.report, indent=2, default=float))
-        (d / "REPORT.md").write_text(tape_markdown(research.report))
+        out = self.root / "tape"
+        research.model.save(out)
+        (out / "research.json").write_text(json.dumps(research.report, indent=2, default=float))
+        (out / "REPORT.md").write_text(tape_markdown(research.report))
         self.tape_model = research.model
         self.forward.alarm = self._ledger_alarm()
         return research.report

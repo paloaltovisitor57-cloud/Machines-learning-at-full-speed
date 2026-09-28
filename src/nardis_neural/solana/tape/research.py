@@ -90,6 +90,8 @@ def run_tape_research(
     test_fraction: float = 0.35,
     members: int = 3,
     epochs: int = 40,
+    d: int = 64,
+    layers: int = 2,
     min_expected_multiple: float = 1.0,
     archetypes: dict[str, str] | None = None,
     log: Logger = _quiet,
@@ -130,7 +132,14 @@ def run_tape_research(
     log(f"train: {len(train)} rows of {n_train} tokens · tune: {n_tune} tokens · test: {n_test} tokens")
 
     model = TapeModel(
-        cur.shape[1], spec, tape, members=members, seed=seed, feature_names=list(CURRENT_FEATURES)
+        cur.shape[1],
+        spec,
+        tape,
+        members=members,
+        d=d,
+        layers=layers,
+        seed=seed,
+        feature_names=list(CURRENT_FEATURES),
     )
     fit = model.fit(
         tx[train], tw[train], tm[train], cur[train],
@@ -198,7 +207,14 @@ def run_tape_research(
     log("refitting the production tape model on every token")
     rows_all = np.flatnonzero(lab.valid)
     final = TapeModel(
-        cur.shape[1], spec, tape, members=members, seed=seed, feature_names=list(CURRENT_FEATURES)
+        cur.shape[1],
+        spec,
+        tape,
+        members=members,
+        d=d,
+        layers=layers,
+        seed=seed,
+        feature_names=list(CURRENT_FEATURES),
     )
     final.fit(
         tx[rows_all], tw[rows_all], tm[rows_all], cur[rows_all],
