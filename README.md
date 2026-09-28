@@ -99,7 +99,7 @@ flowchart TB
 | Continual learning | 3-pool replay (recent FIFO, historical reservoir, protected rare events), 5 sampling strategies, candidate cloning, distillation, EWC, full retraining with configurable weights |
 | Lifecycle | immutable checkpoints, champion/candidate/challenger/retired/failed registry with audit log, shadow mode, 10-gate promotion, manual and optional automatic rollback |
 | Representation | self-supervised pretraining (masked timestep, masked feature, contrastive), embedding export to Parquet/NumPy, KMeans / GMM / HDBSCAN regime discovery |
-| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 209 test functions |
+| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 211 test functions |
 
 ## Quick start
 
@@ -374,7 +374,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │                            edge/ (barriers · model · trees · backtest · research)
 │                            moonshot/ (labels · tail · guard · online · research)
 │                            tape/ (features · dataset · model · research · policy)
-└── tests/                   209 test functions incl. synthetic end-to-end pipeline
+└── tests/                   211 test functions incl. synthetic end-to-end pipeline
 ```
 
 ## Testing & quality gates
@@ -4462,11 +4462,15 @@ Minimal **read-only** Solana JSON-RPC client (standard library only).
 
 - **class `RpcError`** — Error object returned by the JSON-RPC endpoint.
 - **class `SolanaRpc`** — Read-only Solana JSON-RPC client over HTTP or an injected ``transport``, with retries.
+  - `block_signatures(self, slot: 'int') -> 'list[str] | None'` — Transaction signatures of a slot's block, or None when the slot was skipped.
+  - `block_time(self, slot: 'int') -> 'float | None'` — Unix time of a slot's block, or None when the slot was skipped or is unavailable.
   - `call(self, method: 'str', params: 'list[Any]') -> 'Any'` — Call a read-only RPC method and return its ``result``.
   - `get_signatures(self, address: 'str', before: 'str | None' = None, until: 'str | None' = None, limit: 'int' = 1000) -> 'list[dict[str, Any]]'` — Up to ``limit`` confirmed signatures of ``address``, newest first.
   - `get_slot(self) -> 'int'` — The current confirmed slot.
-  - `get_transaction(self, signature: 'str') -> 'dict[str, Any] | None'` — A confirmed transaction in ``jsonParsed`` encoding (v0 included), or None if unavailable.
+  - `get_transaction(self, signature: 'str') -> 'dict[str, Any] | None'` — A confirmed transaction in ``jsonParsed`` encoding (legacy, v0 and v1), or None if unavailable.
   - `mint_authorities(self, mint: 'str') -> 'tuple[bool, bool] | None'` — (mint_authority_revoked, freeze_authority_revoked) from the parsed mint account.
+  - `signature_near(self, t: 'float') -> 'str | None'` — Any transaction signature from a block at (or just after) Unix time ``t``, usable as a ``before`` cursor to start listing signatures at ``t`` instead of at the chain tip.
+  - `slot_at(self, t: 'float', tolerance: 'float' = 5.0, max_steps: 'int' = 40) -> 'int'` — A slot whose block time is within ``tolerance`` seconds of Unix time ``t`` (secant search from the current slot; skipped slots are stepped over).
 
 ### `nardis_neural.solana.ingest.stream`
 
@@ -4857,7 +4861,7 @@ Transparent PyTorch training engine.
 
 ## Test inventory
 
-209 test functions (some are parametrised over devices, experts or formats).
+211 test functions (some are parametrised over devices, experts or formats).
 
 ### `tests/test_cli.py`
 
@@ -5119,6 +5123,8 @@ Real-chain ingestion: base58, pump.fun event codec, transaction decoding, read-o
 - `test_run_live_loop_mechanics`
 - `test_chain_to_brain_integration` — History → bootstrap; later chain activity → decoded → streamed live → assessments.
 - `test_decode_cli`
+- `test_get_transaction_accepts_version_one_transactions`
+- `test_slot_search_and_seek_cursor_skip_missing_slots`
 
 ### `tests/test_solana_moonshot.py`
 

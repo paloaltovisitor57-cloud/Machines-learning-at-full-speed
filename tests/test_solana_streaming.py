@@ -67,7 +67,9 @@ def test_history_walker_replays_a_window_forward(history: Any) -> None:
     t0, t1 = float(txs[0]["blockTime"]), float(txs[-1]["blockTime"]) + 1
     start, end = t0 + 1800, t1 - 1800
     archive = FakeArchive(txs)
-    walker = HistoryWalker(SolanaRpc(transport=archive), start, end, segment_seconds=900, page_size=97)
+    walker = HistoryWalker(
+        SolanaRpc(transport=archive), start, end, segment_seconds=900, page_size=97, seek=False
+    )
     got = list(walker.events())
     in_window = [tx for tx in txs if start <= float(tx["blockTime"]) < end]
     assert walker.stats["transactions"] == len(in_window) and walker.stats["segments"] >= 4

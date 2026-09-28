@@ -471,3 +471,26 @@ def test_get_transaction_accepts_version_one_transactions() -> None:
 
     SolanaRpc(transport=transport).get_transaction("sig")
     assert seen[0][1]["maxSupportedTransactionVersion"] == 1
+
+
+def test_slot_search_and_seek_cursor_skip_missing_slots() -> None:
+    from nardis_neural.solana.ingest.rpc import RpcError
+
+    def transport(method: str, params: list[Any]) -> Any:
+        if method == "getSlot":
+            return 100_000
+        slot = int(params[0])
+        if slot % 7 == 0:  # skipped slots
+            raise RpcError("slot skipped")
+        if method == "getBlockTime":
+            return 1_000_000 + int(0.45 * slot)
+        if method == "getBlock":
+            return {"signatures": [f"sig{slot}"]}
+        raise AssertionError(method)
+
+    rpc = SolanaRpc(transport=transport)
+    target = 1_000_000 + 0.45 * 40_000
+    slot = rpc.slot_at(target)
+    assert abs(1_000_000 + int(0.45 * slot) - target) <= 5
+    sig = rpc.signature_near(target)
+    assert sig is not None and abs(int(sig[3:]) - slot) < 50

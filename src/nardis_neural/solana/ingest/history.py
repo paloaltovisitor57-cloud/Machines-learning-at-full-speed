@@ -19,6 +19,7 @@ state would leak the future into old snapshots.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -53,6 +54,9 @@ class HistoryWalker:
     segment_seconds: float = 3600.0
     workers: int = 8
     page_size: int = 1000
+    seek: bool = True
+    """Start listing at ``end_time`` (a signature from a block found by slot search) instead of
+    paging back from the chain tip; makes old windows (archival RPC, Old Faithful) reachable."""
     decoder: TransactionDecoder = field(default_factory=TransactionDecoder)
     stats: dict[str, int] = field(
         default_factory=lambda: {"segments": 0, "signatures": 0, "transactions": 0, "events": 0}
@@ -61,6 +65,10 @@ class HistoryWalker:
     def __post_init__(self) -> None:
         if self.end_time <= self.start_time:
             raise ValueError("end_time must be after start_time")
+
+    @staticmethod
+    def _now() -> float:
+        return time.time()
 
     def _edges(self) -> list[float]:
         edges, t = [], self.start_time
@@ -75,6 +83,8 @@ class HistoryWalker:
         k = len(marks) - 1  # next edge to cross, walking backwards in time
         prev: str | None = None
         before: str | None = None
+        if self.seek and self.end_time < self._now() - 600:
+            before = self.rpc.signature_near(self.end_time + 30.0)
         while k >= 0:
             page = self.rpc.get_signatures(program, before=before, limit=self.page_size)
             for s in page:

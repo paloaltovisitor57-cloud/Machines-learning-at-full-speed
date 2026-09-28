@@ -23,6 +23,7 @@ READ_ONLY_METHODS = frozenset(
         "getTransaction",
         "getSlot",
         "getBlockTime",
+        "getBlock",
         "getAccountInfo",
         "getMultipleAccounts",
         "getTokenLargestAccounts",
@@ -128,6 +129,71 @@ class SolanaRpc:
     def get_slot(self) -> int:
         """The current confirmed slot."""
         return int(self.call("getSlot", [{"commitment": "confirmed"}]))
+
+    def block_time(self, slot: int) -> float | None:
+        """Unix time of a slot's block, or None when the slot was skipped or is unavailable."""
+        try:
+            t = self.call("getBlockTime", [slot])
+        except RpcError:
+            return None
+        return float(t) if t is not None else None
+
+    def block_signatures(self, slot: int) -> list[str] | None:
+        """Transaction signatures of a slot's block, or None when the slot was skipped."""
+        try:
+            block = self.call(
+                "getBlock",
+                [
+                    slot,
+                    {
+                        "transactionDetails": "signatures",
+                        "rewards": False,
+                        "maxSupportedTransactionVersion": 1,
+                        "commitment": "confirmed",
+                    },
+                ],
+            )
+        except RpcError:
+            return None
+        return list(block.get("signatures") or []) if block else None
+
+    def slot_at(self, t: float, tolerance: float = 5.0, max_steps: int = 40) -> int:
+        """A slot whose block time is within ``tolerance`` seconds of Unix time ``t`` (secant
+        search from the current slot; skipped slots are stepped over)."""
+        hi = self.get_slot()
+        hi_t = self.block_time(hi)
+        step = 0
+        while hi_t is None and step < 50:
+            step += 1
+            hi_t = self.block_time(hi - step)
+        if hi_t is None:
+            raise RpcError("no recent block time available")
+        slot, slot_t = hi - step, hi_t
+        rate = 0.4  # seconds per slot, refined as we go
+        for _ in range(max_steps):
+            if abs(slot_t - t) <= tolerance:
+                return slot
+            guess = max(int(slot + (t - slot_t) / rate), 1)
+            gt, probe = None, guess
+            while gt is None and probe < guess + 50:
+                gt = self.block_time(probe)
+                probe += 1 if gt is None else 0
+            if gt is None:
+                raise RpcError(f"no block time around slot {guess}")
+            if probe != slot and gt != slot_t:
+                rate = min(max(abs((gt - slot_t) / (probe - slot)), 0.2), 1.0)
+            slot, slot_t = probe, gt
+        return slot
+
+    def signature_near(self, t: float) -> str | None:
+        """Any transaction signature from a block at (or just after) Unix time ``t``, usable as a
+        ``before`` cursor to start listing signatures at ``t`` instead of at the chain tip."""
+        slot = self.slot_at(t)
+        for s in range(slot, slot + 50):
+            sigs = self.block_signatures(s)
+            if sigs:
+                return sigs[0]
+        return None
 
     def mint_authorities(self, mint: str) -> tuple[bool, bool] | None:
         """(mint_authority_revoked, freeze_authority_revoked) from the parsed mint account."""
