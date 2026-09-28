@@ -186,11 +186,18 @@ An agent-based simulator used for tests and demos. It is not a market model.
 |---|---|
 | simulate 40 launches (~50 k events) | ~4 s |
 | replay 52 k events into a market | ~0.8 s |
-| build one observation (features + 3 bar streams + graph) | ~1 ms |
+| build one observation (68 features + 3 bar streams + graph) | ~2.9 ms |
+| extract one 96-trade tape | ~0.9 ms |
 | dataset from 40 launches (~7.8 k leakage-free snapshots) | ~25 s |
 | `assess_many` 1 / 8 / 32 tokens (tiny 2-member test model) | ~23 / 38 / 74 ms |
+| full assessment with every model installed (`cpu-lite` neural ensemble, risk, moonshot + guard, 3-member Tape Transformer): 1 / 8 / 32 / 128 tokens | ~54 / 156 / 345 / 973 ms (7.6 ms per token at 128) |
 | neural ensemble on held-out snapshots (tiny model) | downside AUC 0.84, return rank-corr 0.13 |
 | risk model, **token-disjoint** validation | AUC ≈ 0.99 (rug, dev dump), ≈ 1.0 (graduation) |
+
+For a single token, the neural ensemble takes about two-thirds of the time (its
+sequence experts), feature building about a fifth and the Tape Transformer the rest.
+Batching amortises most of it. Tighter budgets can use a smaller profile, a single
+ensemble member, or `set_disabled_experts` at runtime.
 
 **Read the risk numbers with care.** Validation holds out entire later-launched tokens,
 and training only uses rows observed before the validation period, so the high AUC is
