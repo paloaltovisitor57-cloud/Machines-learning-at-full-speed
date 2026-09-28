@@ -42,6 +42,9 @@ class Ticket:
     trust: float
     exit_at: float | None = None
     ladder_multiple: float | None = None
+    """Realised multiple of the recorded policy (ladder plus the exit alarm when armed)."""
+    ladder_only_multiple: float | None = None
+    """Realised multiple of the same ticket with the ladder alone (the alarm ignored)."""
     peak_multiple: float | None = None
     settled_at: float | None = None
 
@@ -82,17 +85,14 @@ class ForwardLedger:
                 continue
             if a.mint in self.seen or not m.get("in_entry_window"):
                 continue
-            if (
-                m.get("vetoed")
-                or m["expected_multiple"] < self.min_expected_multiple
-                or m["lottery_kelly"] <= 0
-            ):
+            ev = m.get("expected_multiple_blend", m["expected_multiple"])
+            if m.get("vetoed") or ev < self.min_expected_multiple or m["lottery_kelly"] <= 0:
                 continue
             self.seen.add(a.mint)
             self.open[a.mint] = Ticket(
                 a.mint,
                 now,
-                float(m["expected_multiple"]),
+                float(ev),
                 float(m.get("chase_score", 0.0)),
                 float(m.get("p_ge_10x", 0.0)),
                 float(m.get("trust", 1.0)),
@@ -113,10 +113,12 @@ class ForwardLedger:
             if not (over or force):
                 continue
             out = moonshot_outcome(log, tk.t_entry, self.spec, now, exit_at=tk.exit_at)
+            plain = moonshot_outcome(log, tk.t_entry, self.spec, now) if tk.exit_at is not None else out
             del self.open[mint]
-            if out is None:
+            if out is None or plain is None:
                 continue
             tk.ladder_multiple, tk.peak_multiple, tk.settled_at = out.ladder_multiple, out.peak_multiple, now
+            tk.ladder_only_multiple = plain.ladder_multiple
             self.closed.append(tk)
             done += 1
         return done
@@ -130,9 +132,18 @@ class ForwardLedger:
         peak = np.asarray([t.peak_multiple for t in self.closed], dtype=np.float64)
         p10 = np.asarray([t.p_ge_10x for t in self.closed])
         out: dict[str, Any] = ticket_stats(lad, peak, self.spec.size_sol)
+        plain = np.asarray(
+            [
+                t.ladder_only_multiple if t.ladder_only_multiple is not None else t.ladder_multiple
+                for t in self.closed
+            ],
+            dtype=np.float64,
+        )
         out |= {
             "open": len(self.open),
             "alarm_exits": int(sum(t.exit_at is not None for t in self.closed)),
+            "ladder_only_total_pnl_sol": float(((plain - 1.0) * self.spec.size_sol).sum()),
+            "alarm_minus_ladder_pnl_sol": float(((lad - plain) * self.spec.size_sol).sum()),
             "mean_predicted_p_ge_10x": float(p10.mean()),
             "observed_peak_ge_10x": float((peak >= 10).mean()),
         }

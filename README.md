@@ -527,8 +527,14 @@ that runs 100x to 1000x. See [docs/MOONSHOT.md](docs/MOONSHOT.md).
   hazard** (P value halves within 1 min / 5 min / 15 min / 1 h), which is the exit signal;
 - causal tape replay, research scored head-to-head against the tail model on identical rows,
   `nardis-neural solana tape-research`, and `SolanaAssessment.tape` on every assessment.
-  On the simulator the collapse head reaches AUC 0.93–0.97; the tail model still ranks
-  the far tail better.
+  Across two simulated markets the collapse head reaches AUC 0.90–0.97. Neither entry
+  model ranked the tail best every time, so `chase_score` uses their blend. A learned exit
+  alarm is evaluated too; it is not yet a reliable edge (+3 % and −12 % test PnL).
+- a **forward-test ledger** in `SolanaBrain` settles every paper ticket the signals would
+  have taken, with and without the exit alarm (`solana forward-report`). It is a
+  walk-forward backtest during `stream-train` and a paper scorecard live;
+- `solana research-suite` repeats the research on several independent markets and
+  reports mean ± sd; the `adversarial` market adds staged "trap" launches.
 
 ## Optional / not included
 
@@ -1999,7 +2005,41 @@ How to read this:
   both models, so the one-ticket-per-token comparison could not separate them.
 * One market, one seed. This is a synthetic benchmark, not evidence of live performance.
 
-### 5. Using it
+### 5. Entry and exit policies across two markets
+
+`tape-research` also splits tokens three ways by launch time: 76 train, 22 tune and 52
+test tokens per market. Entries come from the blend of both models. The exit alarm (window
+and threshold) is chosen on the tune tokens, with their outcomes truncated before the test
+period, then scored once on test. The runs used seeds 7 and 19 (market A and market B of
+[MOONSHOT.md](docs/MOONSHOT.md)). Seed 19 also had the `top_cluster_share` feature, which did not
+exist yet when seed 7 ran.
+
+| | seed 7 | seed 19 |
+|---|---|---|
+| AUC P(≥10x): tape / tail / blend | 0.909 / **0.957** / 0.940 | **0.920** / 0.184 / 0.831 |
+| AUC P(≥100x): tape / tail / blend | 0.931 / **0.967** / 0.964 | **0.964** / 0.164 / 0.941 |
+| collapse AUC 1 min / 5 min / 15 min / 1 h | 0.92 / 0.97 / 0.96 / 0.95 | 0.90 / 0.97 / 0.97 / 0.97 |
+| alarm chosen on tune | P(collapse ≤ 5 min) ≥ 0.7 | P(collapse ≤ 1 min) ≥ 0.3 |
+| test PnL, ladder only | +172.1 SOL | +179.7 SOL |
+| test PnL, ladder + learned exit | **+177.2 SOL** | +157.5 SOL |
+| median ticket, ladder only → with alarm | 1.61x → 1.93x | 1.09x → 1.77x |
+
+What this shows:
+
+* **The collapse head generalises.** AUC is 0.90–0.97 at every window in both markets.
+* **Neither entry model always wins.** On seed 7 the aggregate tail model ranked the tail
+  best. On seed 19, trained on fewer tokens, its ranking broke (AUC below 0.5, i.e.
+  inverted), while the tape stayed above 0.86 at every level. **The blend was never the
+  worst**, so when both models are installed `chase_score` ranks by the blend
+  (`expected_multiple_blend`).
+* **The learned exit is not yet a reliable edge.** It lifted the median ticket in both
+  markets, but it also sold some runners early: +3 % total PnL on seed 7, −12 % on
+  seed 19. Treat the alarm as an input to your exit logic, not a rule. The forward-test
+  ledger settles every paper ticket both with and without the alarm
+  (`alarm_minus_ladder_pnl_sol`), so live data decides.
+* Two synthetic markets are still a small sample (`research-suite --tape` runs more).
+
+### 6. Using it
 
 ```python
 brain = SolanaBrain("workspaces/sol")  # the tape model loads if tape-research was run
@@ -2934,7 +2974,7 @@ Forecast horizons: `15s` (15 s, up ≥ 0.05, down ≥ 0.05), `60s` (60 s, up ≥
 | `flags` | list[str] |   |
 | `features` | dict[str, float] |   |
 | `edge` | dict[str, float] | Meta-labeling edge estimate for an executable round trip (latency, impact, fees): p_win, expected_net, uncertainty, edge_score (lower confidence bound), kelly_fraction, threshold and above_threshold (1.0 / 0.0). Empty until ``fit_edge`` has been run. |
-| `moonshot` | dict[str, float] | Fat-tail view of a ticket bought now: calibrated P(peak ≥ k) for every level (``p_ge_10x`` …), median and expected ladder multiple, lottery-Kelly fraction, tail index, epistemic spread, ``in_entry_window``, and the manipulation guard's ``trust``, ``vetoed`` (1.0 / 0.0), ``chase_score`` (trust-adjusted expected multiple, 0 when vetoed) and ``chase_rank`` within the assessed batch (1 = best). Empty until ``fit_moonshot``. |
+| `moonshot` | dict[str, float] | Fat-tail view of a ticket bought now: calibrated P(peak ≥ k) for every level (``p_ge_10x`` …), median and expected ladder multiple, lottery-Kelly fraction, tail index, epistemic spread, ``in_entry_window``, and the manipulation guard's ``trust``, ``vetoed`` (1.0 / 0.0), ``chase_score`` (trust × expected multiple — the blend of the tail and tape models when both are installed, see ``expected_multiple_blend`` — 0 when vetoed) and ``chase_rank`` within the assessed batch (1 = best). Empty until ``fit_moonshot``. |
 | `tape` | dict[str, float] | Tape Transformer view (reads the raw trade tape with learned wallet embeddings): calibrated ``p_ge_*x``, ``expected_multiple``, ``median_multiple``, ``lottery_kelly``, ``tail_index``, ``epistemic``, and the exit signal ``p_collapse_1m`` / ``_5m`` / ``_15m`` / ``_1h`` (probability the value halves within that window). Empty until ``fit_tape``. |
 
 ### `SolanaAssessment.edge` keys
@@ -2967,7 +3007,8 @@ Forecast horizons: `15s` (15 s, up ≥ 0.05, down ≥ 0.05), `60s` (60 s, up ≥
 | `in_entry_window` | 1.0 inside the moonshot entry window |
 | `trust` | manipulation-guard trust in [0, 1] |
 | `vetoed` | 1.0 when a hard veto fired |
-| `chase_score` | trust × expected_multiple (0 when vetoed) |
+| `expected_multiple_blend` | mean of the tail and tape models' expected payoffs (tape installed only) |
+| `chase_score` | trust × expected payoff: the blend when the tape model is installed (0 when vetoed) |
 | `chase_rank` | rank of chase_score within the assessed batch (1 = best) |
 | `guard.rug` | guard factor `rug` (1 = no concern; the product is trust) |
 | `guard.mint_authority` | guard factor `mint_authority` (1 = no concern; the product is trust) |

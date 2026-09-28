@@ -276,7 +276,8 @@ def _outputs() -> Iterator[str]:
         "in_entry_window": "1.0 inside the moonshot entry window",
         "trust": "manipulation-guard trust in [0, 1]",
         "vetoed": "1.0 when a hard veto fired",
-        "chase_score": "trust × expected_multiple (0 when vetoed)",
+        "expected_multiple_blend": "mean of the tail and tape models' expected payoffs (tape installed only)",
+        "chase_score": "trust × expected payoff: the blend when the tape model is installed (0 when vetoed)",
         "chase_rank": "rank of chase_score within the assessed batch (1 = best)",
     }
     clean = dict.fromkeys(FEATURE_DOCS, 0.0) | {

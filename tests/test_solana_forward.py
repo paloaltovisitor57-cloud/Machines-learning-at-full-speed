@@ -44,8 +44,10 @@ def test_ledger_opens_alarms_settles_and_roundtrips(tmp_path: Path) -> None:
     assert tk.ladder_multiple is not None and tk.ladder_multiple > 1, (
         "the alarm sold near the top of the pump"
     )
+    assert tk.ladder_only_multiple is not None and tk.ladder_only_multiple < tk.ladder_multiple
     s = led.summary()
     assert s["tickets"] == 1 and s["alarm_exits"] == 1
+    assert s["alarm_minus_ladder_pnl_sol"] > 0, "both variants are settled, so the alarm can be judged"
     led.save()
     back = ForwardLedger.load(tmp_path / "fwd", SPEC)
     assert back.alarm == ("p_collapse_1m", 0.5) and len(back.closed) == 1 and "TOK" in back.seen

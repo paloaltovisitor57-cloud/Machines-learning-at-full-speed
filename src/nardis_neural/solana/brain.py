@@ -81,7 +81,8 @@ class SolanaAssessment(BaseModel):
     """Fat-tail view of a ticket bought now: calibrated P(peak ≥ k) for every level
     (``p_ge_10x`` …), median and expected ladder multiple, lottery-Kelly fraction, tail
     index, epistemic spread, ``in_entry_window``, and the manipulation guard's ``trust``,
-    ``vetoed`` (1.0 / 0.0), ``chase_score`` (trust-adjusted expected multiple, 0 when vetoed)
+    ``vetoed`` (1.0 / 0.0), ``chase_score`` (trust × expected multiple — the blend of the tail
+    and tape models when both are installed, see ``expected_multiple_blend`` — 0 when vetoed)
     and ``chase_rank`` within the assessed batch (1 = best).  Empty until ``fit_moonshot``."""
     tape: dict[str, float] = Field(default_factory=dict)
     """Tape Transformer view (reads the raw trade tape with learned wallet embeddings):
@@ -135,6 +136,24 @@ class _Pending:
     risk_x: F32
     t: float
     mint: str
+
+
+def _blend_views(moon: list[dict[str, float]], tape: list[dict[str, float]]) -> None:
+    """With both models installed, rank by the blend of their expected payoffs.
+
+    Across independent simulated markets neither the tail model nor the Tape Transformer
+    ranked the tail best every time, while their average was never the worst, so
+    ``chase_score`` (and ``chase_rank``) use ``expected_multiple_blend`` when available.
+    """
+    if not moon or not moon[0] or not tape or not tape[0]:
+        return
+    for m, t in zip(moon, tape, strict=True):
+        m["expected_multiple_blend"] = 0.5 * (m["expected_multiple"] + t["expected_multiple"])
+        if not m["vetoed"]:
+            m["chase_score"] = m["trust"] * m["expected_multiple_blend"]
+    order = sorted(range(len(moon)), key=lambda j: -moon[j]["chase_score"])
+    for rank, j in enumerate(order, start=1):
+        moon[j]["chase_rank"] = float(rank)
 
 
 class SolanaBrain:
@@ -309,6 +328,7 @@ class SolanaBrain:
             threshold = float(self.edge_meta.get("threshold", 0.0))
         moon = self._moonshot_view(mints, out, probs, current, now)
         tape_views = self._tape_view(mints, current, now)
+        _blend_views(moon, tape_views)
         reports = []
         for i, (mint, obs, pred) in enumerate(zip(mints, observations, preds, strict=True)):
             self.learner.record_prediction(pred)

@@ -525,8 +525,14 @@ that runs 100x to 1000x. See [docs/MOONSHOT.md](MOONSHOT.md).
   hazard** (P value halves within 1 min / 5 min / 15 min / 1 h), which is the exit signal;
 - causal tape replay, research scored head-to-head against the tail model on identical rows,
   `nardis-neural solana tape-research`, and `SolanaAssessment.tape` on every assessment.
-  On the simulator the collapse head reaches AUC 0.93–0.97; the tail model still ranks
-  the far tail better.
+  Across two simulated markets the collapse head reaches AUC 0.90–0.97. Neither entry
+  model ranked the tail best every time, so `chase_score` uses their blend. A learned exit
+  alarm is evaluated too; it is not yet a reliable edge (+3 % and −12 % test PnL).
+- a **forward-test ledger** in `SolanaBrain` settles every paper ticket the signals would
+  have taken, with and without the exit alarm (`solana forward-report`). It is a
+  walk-forward backtest during `stream-train` and a paper scorecard live;
+- `solana research-suite` repeats the research on several independent markets and
+  reports mean ± sd; the `adversarial` market adds staged "trap" launches.
 
 ## Optional / not included
 

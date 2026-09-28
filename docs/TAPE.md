@@ -119,7 +119,41 @@ How to read this:
   both models, so the one-ticket-per-token comparison could not separate them.
 * One market, one seed. This is a synthetic benchmark, not evidence of live performance.
 
-## 5. Using it
+## 5. Entry and exit policies across two markets
+
+`tape-research` also splits tokens three ways by launch time: 76 train, 22 tune and 52
+test tokens per market. Entries come from the blend of both models. The exit alarm (window
+and threshold) is chosen on the tune tokens, with their outcomes truncated before the test
+period, then scored once on test. The runs used seeds 7 and 19 (market A and market B of
+[MOONSHOT.md](MOONSHOT.md)). Seed 19 also had the `top_cluster_share` feature, which did not
+exist yet when seed 7 ran.
+
+| | seed 7 | seed 19 |
+|---|---|---|
+| AUC P(≥10x): tape / tail / blend | 0.909 / **0.957** / 0.940 | **0.920** / 0.184 / 0.831 |
+| AUC P(≥100x): tape / tail / blend | 0.931 / **0.967** / 0.964 | **0.964** / 0.164 / 0.941 |
+| collapse AUC 1 min / 5 min / 15 min / 1 h | 0.92 / 0.97 / 0.96 / 0.95 | 0.90 / 0.97 / 0.97 / 0.97 |
+| alarm chosen on tune | P(collapse ≤ 5 min) ≥ 0.7 | P(collapse ≤ 1 min) ≥ 0.3 |
+| test PnL, ladder only | +172.1 SOL | +179.7 SOL |
+| test PnL, ladder + learned exit | **+177.2 SOL** | +157.5 SOL |
+| median ticket, ladder only → with alarm | 1.61x → 1.93x | 1.09x → 1.77x |
+
+What this shows:
+
+* **The collapse head generalises.** AUC is 0.90–0.97 at every window in both markets.
+* **Neither entry model always wins.** On seed 7 the aggregate tail model ranked the tail
+  best. On seed 19, trained on fewer tokens, its ranking broke (AUC below 0.5, i.e.
+  inverted), while the tape stayed above 0.86 at every level. **The blend was never the
+  worst**, so when both models are installed `chase_score` ranks by the blend
+  (`expected_multiple_blend`).
+* **The learned exit is not yet a reliable edge.** It lifted the median ticket in both
+  markets, but it also sold some runners early: +3 % total PnL on seed 7, −12 % on
+  seed 19. Treat the alarm as an input to your exit logic, not a rule. The forward-test
+  ledger settles every paper ticket both with and without the alarm
+  (`alarm_minus_ladder_pnl_sol`), so live data decides.
+* Two synthetic markets are still a small sample (`research-suite --tape` runs more).
+
+## 6. Using it
 
 ```python
 brain = SolanaBrain("workspaces/sol")  # the tape model loads if tape-research was run
