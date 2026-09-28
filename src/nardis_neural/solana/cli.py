@@ -59,6 +59,9 @@ def simulate(
     runners: Annotated[
         float | None, typer.Option("--runners", help="override the share of 100–1000x runner launches")
     ] = None,
+    herding: Annotated[
+        bool, typer.Option("--herding/--no-herding", help="self-exciting (Hawkes) retail demand")
+    ] = False,
 ) -> None:
     """Simulate memecoin launches (snipers, bundles, rugs, graduations, runners, smart money, bots)."""
     from collections import Counter
@@ -78,6 +81,7 @@ def simulate(
             start_time=start_time,
             duration_seconds=hours * 3600,
             archetype_weights=weights,
+            herding=herding,
         )
     )
     store.save(out)

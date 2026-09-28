@@ -42,9 +42,11 @@ champion → challenger lifecycle.
 - [Edge engine](#edge-engine)
 - [Moonshot engine](#moonshot-engine)
 - [Tape Transformer](#tape-transformer)
+- [Criticality engine](#criticality-engine)
 - [Optional / not included](#optional--not-included)
 - **[Part II — In depth](#part-ii--in-depth)**: architecture, continual learning, integration,
-  Solana layer, edge engine, moonshot engine, Tape Transformer (the full contents of `docs/`)
+  Solana layer, edge engine, moonshot engine, Tape Transformer, criticality engine (the full
+  contents of `docs/`)
 - **[Part III — Generated reference](#part-iii--generated-reference)**: every CLI command and
   option, every configuration field and default, every feature, every output field, the
   public Python API and the test inventory
@@ -340,7 +342,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 ├── configs/                 default.yaml · small.yaml
 ├── README.md                generated: python -m nardis_neural.docgen (a test keeps it in sync)
 ├── docs/                    OVERVIEW.md · ARCHITECTURE.md · CONTINUAL_LEARNING.md · INTEGRATION.md ·
-│                            SOLANA.md · EDGE.md · MOONSHOT.md · TAPE.md (the README's hand-written sources)
+│                            SOLANA.md · EDGE.md · MOONSHOT.md · TAPE.md · CRITICALITY.md (README sources)
 ├── examples/                nardis_integration.py (runnable, tested)
 ├── src/nardis_neural/
 │   ├── config.py            Pydantic config tree
@@ -360,11 +362,12 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │   ├── lifecycle/           checkpoints · champion · candidate · shadow · promotion · rollback
 │   ├── monitoring/          drift
 │   └── solana/              amm · events · market · wallets · features · labels · dataset ·
-│                            risk · simulator · brain · config · cli · streaming ·
+│                            risk · simulator · brain · config · cli · streaming · hawkes ·
+│                            forward · suite
 │                            ingest/ (decoder · rpc · stream · history · encode · pumpfun · base58)
 │                            edge/ (barriers · model · trees · backtest · research)
 │                            moonshot/ (labels · tail · guard · online · research)
-│                            tape/ (features · dataset · model · research)
+│                            tape/ (features · dataset · model · research · policy)
 └── tests/                   {{TESTS}} test functions incl. synthetic end-to-end pipeline
 ```
 
@@ -431,7 +434,7 @@ The trading system never touches model internals.
   (sybil / bundle discovery) and Beta-posterior reputations learned online *only* from
   outcomes that have already resolved, plus rug attribution to creator clusters. A second,
   **runner-specific skill** credits wallets that buy early into tokens that later run 10x;
-- **68 named on-chain features**: holder concentration, dev / sniper / bundle /
+- **73 named on-chain features**: holder concentration, dev / sniper / bundle /
   creator-cluster exposure, fresh wallets, smart-money flow, runner-skilled buyers,
   sybil-resistant counts per funding cluster, the supply held by a hidden multi-wallet cluster, the **creator family's track record** (prior
   launches, best peak, rug and graduation rates), market-wide heat, bots, priority fees and
@@ -519,7 +522,7 @@ that runs 100x to 1000x. See [docs/MOONSHOT.md](MOONSHOT.md).
 - the last 96 trades, each with 18 features (side, size, timing, price move, fees, and the
   trader's skill, runner skill, cluster, creator link and freshness as known now), plus a
   **learned wallet embedding** keyed by a stable hash of the address;
-- a small pre-LayerNorm **Transformer** with a summary token, fused with the 68 current
+- a small pre-LayerNorm **Transformer** with a summary token, fused with the 73 current
   features. Frequency gating and wallet dropout stop the wallet table from memorising noise;
 - two heads: the censored power-law **tail** (P ≥ 2x … 1000x) and a discrete-time **collapse
   hazard** (P value halves within 1 min / 5 min / 15 min / 1 h), which is the exit signal;
@@ -533,6 +536,21 @@ that runs 100x to 1000x. See [docs/MOONSHOT.md](MOONSHOT.md).
   walk-forward backtest during `stream-train` and a paper scorecard live;
 - `solana research-suite` repeats the research on several independent markets and
   reports mean ± sd; the `adversarial` market adds staged "trap" launches.
+
+## Criticality engine
+
+`nardis_neural.solana.hawkes` measures how close each token's buying is to a **phase
+transition**: its viral R₀. See [docs/CRITICALITY.md](CRITICALITY.md).
+
+- an online **self-exciting (Hawkes) process** fit: exact maximum likelihood by vectorised
+  EM, with exact O(N) kernel sums, history conditioning and a **detrended background**, so
+  a fading launch rush is not mistaken for a cascade. An optional second, fast kernel
+  separates same-slot reflexes from human herding;
+- five features: buy and sell **branching ratios** (follow-on buys each buy triggers),
+  their trend (is the token *approaching* criticality?), the herding timescale and the
+  **endogenous share** (herding vs scripted flow);
+- self-exciting **herding** in the simulator (`--herding`), and an ablation measured with
+  and without the features on identical splits.
 
 ## Optional / not included
 

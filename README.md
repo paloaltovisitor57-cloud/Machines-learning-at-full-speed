@@ -44,9 +44,11 @@ champion → challenger lifecycle.
 - [Edge engine](#edge-engine)
 - [Moonshot engine](#moonshot-engine)
 - [Tape Transformer](#tape-transformer)
+- [Criticality engine](#criticality-engine)
 - [Optional / not included](#optional--not-included)
 - **[Part II — In depth](#part-ii--in-depth)**: architecture, continual learning, integration,
-  Solana layer, edge engine, moonshot engine, Tape Transformer (the full contents of `docs/`)
+  Solana layer, edge engine, moonshot engine, Tape Transformer, criticality engine (the full
+  contents of `docs/`)
 - **[Part III — Generated reference](#part-iii--generated-reference)**: every CLI command and
   option, every configuration field and default, every feature, every output field, the
   public Python API and the test inventory
@@ -95,7 +97,7 @@ flowchart TB
 | Continual learning | 3-pool replay (recent FIFO, historical reservoir, protected rare events), 5 sampling strategies, candidate cloning, distillation, EWC, full retraining with configurable weights |
 | Lifecycle | immutable checkpoints, champion/candidate/challenger/retired/failed registry with audit log, shadow mode, 10-gate promotion, manual and optional automatic rollback |
 | Representation | self-supervised pretraining (masked timestep, masked feature, contrastive), embedding export to Parquet/NumPy, KMeans / GMM / HDBSCAN regime discovery |
-| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 194 test functions |
+| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 200 test functions |
 
 ## Quick start
 
@@ -342,7 +344,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 ├── configs/                 default.yaml · small.yaml
 ├── README.md                generated: python -m nardis_neural.docgen (a test keeps it in sync)
 ├── docs/                    OVERVIEW.md · ARCHITECTURE.md · CONTINUAL_LEARNING.md · INTEGRATION.md ·
-│                            SOLANA.md · EDGE.md · MOONSHOT.md · TAPE.md (the README's hand-written sources)
+│                            SOLANA.md · EDGE.md · MOONSHOT.md · TAPE.md · CRITICALITY.md (README sources)
 ├── examples/                nardis_integration.py (runnable, tested)
 ├── src/nardis_neural/
 │   ├── config.py            Pydantic config tree
@@ -362,12 +364,13 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │   ├── lifecycle/           checkpoints · champion · candidate · shadow · promotion · rollback
 │   ├── monitoring/          drift
 │   └── solana/              amm · events · market · wallets · features · labels · dataset ·
-│                            risk · simulator · brain · config · cli · streaming ·
+│                            risk · simulator · brain · config · cli · streaming · hawkes ·
+│                            forward · suite
 │                            ingest/ (decoder · rpc · stream · history · encode · pumpfun · base58)
 │                            edge/ (barriers · model · trees · backtest · research)
 │                            moonshot/ (labels · tail · guard · online · research)
-│                            tape/ (features · dataset · model · research)
-└── tests/                   194 test functions incl. synthetic end-to-end pipeline
+│                            tape/ (features · dataset · model · research · policy)
+└── tests/                   200 test functions incl. synthetic end-to-end pipeline
 ```
 
 ## Testing & quality gates
@@ -433,7 +436,7 @@ The trading system never touches model internals.
   (sybil / bundle discovery) and Beta-posterior reputations learned online *only* from
   outcomes that have already resolved, plus rug attribution to creator clusters. A second,
   **runner-specific skill** credits wallets that buy early into tokens that later run 10x;
-- **68 named on-chain features**: holder concentration, dev / sniper / bundle /
+- **73 named on-chain features**: holder concentration, dev / sniper / bundle /
   creator-cluster exposure, fresh wallets, smart-money flow, runner-skilled buyers,
   sybil-resistant counts per funding cluster, the supply held by a hidden multi-wallet cluster, the **creator family's track record** (prior
   launches, best peak, rug and graduation rates), market-wide heat, bots, priority fees and
@@ -521,7 +524,7 @@ that runs 100x to 1000x. See [docs/MOONSHOT.md](docs/MOONSHOT.md).
 - the last 96 trades, each with 18 features (side, size, timing, price move, fees, and the
   trader's skill, runner skill, cluster, creator link and freshness as known now), plus a
   **learned wallet embedding** keyed by a stable hash of the address;
-- a small pre-LayerNorm **Transformer** with a summary token, fused with the 68 current
+- a small pre-LayerNorm **Transformer** with a summary token, fused with the 73 current
   features. Frequency gating and wallet dropout stop the wallet table from memorising noise;
 - two heads: the censored power-law **tail** (P ≥ 2x … 1000x) and a discrete-time **collapse
   hazard** (P value halves within 1 min / 5 min / 15 min / 1 h), which is the exit signal;
@@ -535,6 +538,21 @@ that runs 100x to 1000x. See [docs/MOONSHOT.md](docs/MOONSHOT.md).
   walk-forward backtest during `stream-train` and a paper scorecard live;
 - `solana research-suite` repeats the research on several independent markets and
   reports mean ± sd; the `adversarial` market adds staged "trap" launches.
+
+## Criticality engine
+
+`nardis_neural.solana.hawkes` measures how close each token's buying is to a **phase
+transition**: its viral R₀. See [docs/CRITICALITY.md](docs/CRITICALITY.md).
+
+- an online **self-exciting (Hawkes) process** fit: exact maximum likelihood by vectorised
+  EM, with exact O(N) kernel sums, history conditioning and a **detrended background**, so
+  a fading launch rush is not mistaken for a cascade. An optional second, fast kernel
+  separates same-slot reflexes from human herding;
+- five features: buy and sell **branching ratios** (follow-on buys each buy triggers),
+  their trend (is the token *approaching* criticality?), the herding timescale and the
+  **endogenous share** (herding vs scripted flow);
+- self-exciting **herding** in the simulator (`--herding`), and an ablation measured with
+  and without the features on identical splits.
 
 ## Optional / not included
 
@@ -1243,7 +1261,7 @@ flowchart LR
     T --> WI[WalletIntel<br/>funding clusters · hubs]
     MK -->|buys queued, resolved after horizon| REP[Wallet reputations<br/>Beta posterior · rug marks]
     WI --> REP
-    MK & REP --> FB[SolanaFeatureBuilder<br/>68 named features · 1s/5s/30s bars · wallet graph]
+    MK & REP --> FB[SolanaFeatureBuilder<br/>73 named features · 1s/5s/30s bars · wallet graph]
     FB --> NE[Neural ensemble<br/>Transformer · GRU · TCN · MLP · Graph + MoE]
     NE --> EMB[MarketStateEmbedding]
     EMB & FB --> RK[Risk ensemble<br/>P rug · P graduation · P dev dump]
@@ -1281,7 +1299,7 @@ canonical order (launch → transfer → migration → LP → swap at equal time
 
 ### 3. Features (`features.py`)
 
-68 named current-state features (`CURRENT_FEATURES`):
+73 named current-state features (`CURRENT_FEATURES`):
 
 | Group | Features |
 |---|---|
@@ -1296,6 +1314,7 @@ canonical order (launch → transfer → migration → LP → swap at equal time
 | Runner skill | share of the last minute's buy SOL from wallets with proven **runner skill**, #runner-skilled buyers in 5 min, mean runner skill of the first 20 buyers |
 | Sybil-resistant counts | #holder funding clusters, clusters ÷ holders, #buyer clusters per minute, **supply held by the largest hidden multi-wallet cluster** (not the creator's; relay hops included) |
 | Creator family | prior launches, best prior peak multiple, prior rug rate, prior graduation rate, time since the family's last launch |
+| Criticality | Hawkes branching ratio of buys and of sells, its two-minute trend, herding timescale, endogenous share of buys ([CRITICALITY.md](docs/CRITICALITY.md)) |
 | Market heat | launches in 10 min, graduations in 1 h, total swap volume in 5 min (all tokens) |
 
 **Runner skill** is a second, separate wallet reputation. A buy in a token's first
@@ -1408,7 +1427,7 @@ An agent-based simulator used for tests and demos. It is not a market model.
 |---|---|
 | simulate 40 launches (~50 k events) | ~4 s |
 | replay 52 k events into a market | ~0.8 s |
-| build one observation (68 features + 3 bar streams + graph) | ~2.9 ms |
+| build one observation (73 features + 3 bar streams + graph) | ~2.9 ms |
 | extract one 96-trade tape | ~0.9 ms |
 | dataset from 40 launches (~7.8 k leakage-free snapshots) | ~25 s |
 | `assess_many` 1 / 8 / 32 tokens (tiny 2-member test model) | ~23 / 38 / 74 ms |
@@ -1565,7 +1584,7 @@ is real.
 
 ```mermaid
 flowchart LR
-    H[(event history)] --> DS[causal snapshots<br/>68 features · bars · graph]
+    H[(event history)] --> DS[causal snapshots<br/>73 features · bars · graph]
     H --> TB[executable triple-barrier outcomes<br/>latency · impact · fees · TP / SL / time]
     DS --> WF[walk-forward retraining<br/>neural ensemble + risk model]
     WF --> OOF[out-of-fold forecasts<br/>= what a live system would have seen]
@@ -1606,7 +1625,7 @@ The inputs are:
 * the neural forecasts per horizon: mean, standard deviation, z-score, event
   probabilities, max upside and drawdown, volatility;
 * uncertainty: epistemic, aleatoric, OOD, disagreement;
-* expert gate weights, P(rug / graduation / dev dump), and all raw on-chain features (53 when the results below were measured, 68 now).
+* expert gate weights, P(rug / graduation / dev dump), and all raw on-chain features (53 when the results below were measured, 73 now).
 
 It is a bootstrap ensemble of MLPs with two heads:
 
@@ -1755,7 +1774,7 @@ without supervision.
 * **Deep ensemble**: members are fitted on token-bootstrap resamples, with early stopping
   on the most recently launched tokens. The predictive survival is the members' average,
   and their spread is the epistemic uncertainty.
-* **Inputs**: `raw` uses the 68 on-chain features and is fast on any CPU. `neural` adds
+* **Inputs**: `raw` uses the 73 on-chain features and is fast on any CPU. `neural` adds
   the walk-forward out-of-fold neural forecasts, uncertainty, expert gates and risk
   probabilities, the same stack the edge model uses.
 
@@ -1894,7 +1913,7 @@ and how much of a bankroll such a lottery ticket can justify.
 ## Tape Transformer (`nardis_neural.solana.tape`)
 
 Every other model in this repository sees a token through aggregates: per-minute bars and
-68 summary features. That throws away the two things that decide a memecoin launch: **who**
+73 summary features. That throws away the two things that decide a memecoin launch: **who**
 is trading, and **in what order**. The Tape Transformer reads the raw trade tape directly.
 
 ```mermaid
@@ -1905,7 +1924,7 @@ flowchart LR
         R1[recency embedding]
     end
     TAPE --> ENC[pre-LayerNorm Transformer<br/>+ learned summary token<br/>padding masked]
-    CUR[68 current features] --> MLP[MLP]
+    CUR[73 current features] --> MLP[MLP]
     ENC --> FUSE[fuse: summary ‖ mean ‖ current]
     MLP --> FUSE
     FUSE --> TAIL[tail head<br/>mixture of log-logistics<br/>P ≥ 2x … 1000x]
@@ -2059,6 +2078,149 @@ The collapse probabilities are meant for positions you already hold. A sharp ris
 `p_collapse_1m` or `p_collapse_5m` is the model's view that the run is about to break. As
 everywhere in this module, it is a probability for the trading system to act on, not an
 order.
+
+## Criticality engine (`nardis_neural.solana.hawkes`)
+
+A runner is a **chain reaction**: buys trigger more buys, which trigger more buys. An
+epidemic grows when each case infects more than one other person (R₀ > 1). A nuclear pile
+goes critical when each fission triggers at least one more. Financial order flow shows the
+same structure (Filimonov & Sornette measured the "endogeneity" of whole markets this way).
+
+This module measures, for every token and in real time, **how close its buying is to that
+phase transition**.
+
+```mermaid
+flowchart LR
+    B[buy times<br/>last 10 min] --> H[Hawkes MLE<br/>μ · n · β]
+    S[sell times] --> HS[Hawkes MLE]
+    B --> HP[same fit<br/>2 min earlier]
+    H --> F1[branching ratio n<br/>follow-on buys per buy]
+    H --> F2[endogenous share<br/>herding vs scripted]
+    H --> F3[herding timescale 1/β]
+    HP --> F4[trend: is n rising?]
+    HS --> F5[sell branching<br/>panic cascades]
+```
+
+### 1. The model
+
+An exponential Hawkes process has intensity
+
+```
+λ(t) = μ + Σ_{t_j < t} n · β · exp(−β (t − t_j))
+```
+
+* `μ` is the **exogenous** rate: activity that would happen anyway (insiders on a script,
+  bots on a clock, outside news);
+* `n` is the **branching ratio**: the expected number of follow-on events each event
+  directly triggers;
+* `β` is the decay rate of that influence; `1/β` is the herding timescale.
+
+The branching ratio is the dimensionless number that matters:
+
+| n | regime | meaning for a launch |
+|---|---|---|
+| ≪ 1 | subcritical | activity is driven from outside and stops when the drivers stop |
+| → 1 | critical | cascades of any size become possible: the runner regime |
+| share of events explained by excitation | endogenous share | organic herding (high) vs scripted flow such as wash bots and staged insiders (low) |
+
+The last row is the manipulation angle. **Scripted flow does not self-excite.** Wash bots
+and staged insiders trade on their own schedule rather than in reaction to other buyers,
+so a token can look busy while its endogenous share stays low. That is a
+signature that aggregate volume and holder counts cannot show.
+
+### 2. The estimator
+
+* **Exact maximum likelihood** by expectation–maximisation. The EM runs for every decay
+  rate on a log-spaced grid at once (vectorised), and the best likelihood wins.
+* **Exact O(N) kernel sums.** `Σ_{t_j<t_i} exp(−β(t_i − t_j))` is computed from prefix sums
+  of `exp(βt)` in overflow-safe blocks with a carried remainder. Tied timestamps do not
+  excite each other (whole-second chain timestamps have many ties). A test checks it
+  against the O(N²) brute force to 1e-10.
+* **History conditioning.** The likelihood covers the most recent events, and the events
+  just before the window are kept as history. Otherwise the excitation they cause is
+  misread as background, which is a classic edge effect.
+* **Detrending.** A constant background rate cannot tell a *fading* launch rush (many
+  buys early, fewer later) from a cascade: both look like "events followed by more
+  events". The detrended fit lets the background rise or fade exponentially,
+  `μ(t) = μ·exp(γ(t − T))`, and searches a grid of trends alongside the decay rates. On
+  pure decaying Poisson streams (true n = 0) the plain fit reads 0.28–0.93 and the
+  detrended fit 0.10–0.13. On stationary cascades the two agree (0.50 vs 0.52 at
+  n = 0.5). The live buy features are detrended.
+* **Two timescales (optional).** `fast_beta` adds a fixed sub-second kernel next to the fitted
+  one. Order flow has a reflex layer (bots and bundles reacting in the same slot) and a
+  slower human herding layer, and one exponential can only describe one of them.
+  `HawkesFit.reflex` reports the fast part.
+* **Speed.** About 1.5 ms per plain fit on 300 events and about 2.2 ms per detrended fit on
+  the live grid (5 decay rates × 5 trends). The three fits behind the five features cost
+  about 8 ms per token on the busiest tokens of a herding market.
+
+Measured recovery on exactly simulated Hawkes processes (10 runs each, 600 s windows):
+
+| true n (β = 0.5) | 0.1 | 0.5 | 0.8 |
+|---|---|---|---|
+| estimated | 0.17 ± 0.14 | 0.49 ± 0.09 | 0.72 ± 0.10 |
+
+Near criticality with slow decay (n = 0.9, β = 0.1) the estimate reads about 0.55. That is
+the known downward bias of short-window Hawkes estimation. The ordering of tokens by `n`,
+which is what a ranking model uses, is preserved.
+
+### 3. Features
+
+Five features of the current-state vector (full definitions in the generated reference):
+
+* `buy_branching_ratio`: n of the last 10 minutes of buys;
+* `sell_branching_ratio`: n of sells, which catches panic cascades;
+* `buy_branching_trend_120s`: n now minus n two minutes ago, i.e. *approaching
+  criticality*;
+* `herding_timescale_log`: `log1p(1/β)`;
+* `endogenous_buy_share`: share of recent buys explained by excitation.
+
+### 4. Herding in the simulator
+
+The simulator's buyers used to arrive independently (an inhomogeneous Poisson process),
+which has no cascades to find. `LaunchSimSpec(herding=True)` (or `solana simulate
+--herding`) makes retail demand self-exciting. The average demand is the same, but it
+arrives in cascades, with a branching ratio per launch type:
+
+| runner | graduate | organic | rug | dud | trap | wash |
+|---|---|---|---|---|---|---|
+| 0.85 | 0.7 | 0.5 | 0.3 | 0.2 | 0.1 | 0.05 |
+
+Herding is off by default, so every earlier simulation reproduces exactly.
+
+### 5. Does it help? (ablation)
+
+One `adversarial` market (150 launches, 8 h, seed 7) was run with herding on, plus a
+`degen` market without herding as a control. The same moonshot tail model was trained
+with and without the five criticality features, on identical token splits (98 train, 52
+test tokens), three training seeds each.
+
+| market | test NLL with / without | AUC P(≥5x) with / without | AUC P(≥10x) | AUC P(≥100x) |
+|---|---|---|---|---|
+| herding + adversarial | **0.188 / 0.283** (better in all 3 seeds) | **0.924 / 0.914** (all 3) | 0.948 / 0.944 | 0.903 / 0.902 |
+| control, no herding | 0.242 / 0.261 (seed ranges overlap) | 0.936 / 0.944 | 0.987 / 0.992 | 0.972 / 0.975 |
+
+What the measurements say:
+
+* **Where cascades exist, criticality is a strong signal.** Test NLL falls by a third in
+  every seed, and ≥5x ranking improves in every seed. Where there are no cascades (the
+  control), the features add nothing and cost a little ranking noise, which is what a real
+  signal (rather than a leak) should do.
+* **Scripted flow is exposed.** Wash-trading tokens read a buy branching ratio of about
+  **0.004**, against 0.3–0.7 for every other launch type at three minutes. Wash bots trade
+  on a clock, not on each other.
+* **The branching ratio is not pure herding.** Launches designed with n = 0.85 (runners)
+  read only about 0.37 at three minutes, and duds read about 0.6. Two effects blur it. Early
+  demand is non-stationary with *steps*, such as graduation to an AMM, which even a
+  detrended background cannot absorb. And in the simulator, sub-second clumps of buys mix
+  with slower herding. The estimator measures "self-excitation plus regime shifts", and
+  the model learns what that is worth. It is not an oracle for R₀.
+* The design choices were iterated on these measurements: history conditioning, then
+  detrending (a fading rush went from n = 0.93 to about 0.1), then a smaller live grid
+  that was re-validated before these numbers were taken.
+
+On real chain data the reflex layer is physical (same-slot bots). Validating these
+features on streamed history is the next step.
 
 # Part III — Generated reference
 
@@ -2300,6 +2462,7 @@ Simulate memecoin launches (snipers, bundles, rugs, graduations, runners, smart 
 | `--hours` | float | 3.0 | simulated duration, hours |
 | `--market` | str | "default" | archetype mix: default, or degen (mostly duds + runners) |
 | `--runners` | float | null | override the share of 100–1000x runner launches |
+| `--herding`, `--no-herding` | flag | false | self-exciting (Hawkes) retail demand |
 
 ### `nardis-neural solana build-dataset`
 
@@ -2783,7 +2946,7 @@ Every field, its type, its default and its description. Nested keys use dots, as
 
 ## Solana features
 
-### Current-state vector (68 features, in model input order)
+### Current-state vector (73 features, in model input order)
 
 | # | feature | meaning |
 |---|---|---|
@@ -2852,9 +3015,14 @@ Every field, its type, its default and its description. Nested keys use dots, as
 | 62 | `creator_prior_rug_rate` | share of the family's other launches that rugged |
 | 63 | `creator_prior_graduation_rate` | share of the family's other launches that graduated |
 | 64 | `since_creator_last_launch_log` | log1p of seconds since the family's previous launch (1e7 if none) |
-| 65 | `market_launches_600s_log` | log1p of launches across the market in the last 10 min |
-| 66 | `market_graduations_3600s_log` | log1p of graduations across the market in the last hour |
-| 67 | `market_volume_300s_log` | log1p of SOL swapped across all tokens in the last 5 min |
+| 65 | `buy_branching_ratio` | Hawkes branching ratio of buys: follow-on buys each buy triggers (→1 = critical) |
+| 66 | `sell_branching_ratio` | Hawkes branching ratio of sells (panic cascades) |
+| 67 | `buy_branching_trend_120s` | buy branching ratio now minus two minutes ago (approaching criticality) |
+| 68 | `herding_timescale_log` | log1p of the fitted excitation timescale 1/β of buys (seconds) |
+| 69 | `endogenous_buy_share` | share of recent buys attributed to excitation by other buys (herding) |
+| 70 | `market_launches_600s_log` | log1p of launches across the market in the last 10 min |
+| 71 | `market_graduations_3600s_log` | log1p of graduations across the market in the last hour |
+| 72 | `market_volume_300s_log` | log1p of SOL swapped across all tokens in the last 5 min |
 
 ### Trade bars (`fast` 1 s × 60, `medium` 5 s × 48, `slow` 30 s × 40)
 
@@ -3658,7 +3826,7 @@ SolanaBrain — the complete Solana ML module behind one small API.
 - `moonshot_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history + champion)')]", inputs: "Annotated[str, typer.Option('--inputs', help='raw (on-chain features) or neural (walk-forward OOF stack)')]" = 'raw', size: "Annotated[float, typer.Option('--size', help='ticket size, SOL')]" = 0.5, latency: "Annotated[float, typer.Option('--latency', help='entry/exit latency, seconds')]" = 1.0, horizon_hours: "Annotated[float, typer.Option('--horizon-hours', help='outcome horizon after entry, hours')]" = 6.0, max_entry_age: "Annotated[float, typer.Option('--max-entry-age', help='latest entry after launch, seconds')]" = 600.0, min_ev: "Annotated[float, typer.Option('--min-ev', help='ticket when E[ladder payoff] per SOL is at least this')]" = 1.0, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of later tokens held out for the test')]" = 0.35, folds: "Annotated[int, typer.Option('--folds', help='walk-forward folds (neural inputs)')]" = 4, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Fat-tail research: P(≥2x … ≥1000x) per token, ladder payoff, lottery-Kelly sizing hints.
 - `replay(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace directory')]", events: "Annotated[Path, typer.Option('--events', '-e', help='new events to stream in')]", every: "Annotated[float, typer.Option('--assess-every', help='seconds between assessment rounds')]" = 10.0, out: "Annotated[Path | None, typer.Option('--out', '-o', help='JSONL of assessments')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Stream events through the brain as if live: assess, resolve outcomes, then maintain.
 - `research_suite(seeds: "Annotated[str, typer.Option('--seeds', help='comma-separated simulator seeds')]" = '7,19,23', market: "Annotated[str, typer.Option('--market', help='archetype mix: default or degen')]" = 'degen', tokens: "Annotated[int, typer.Option('--tokens', help='launches per simulated market')]" = 150, hours: "Annotated[float, typer.Option('--hours', help='simulated hours per market')]" = 8.0, tape: "Annotated[bool, typer.Option('--tape/--no-tape', help='also run the (slower) tape research')]" = False, out: "Annotated[Path | None, typer.Option('--out', '-o', help='write the JSON result here')]" = None) -> 'None'` — Run the moonshot (and optionally tape) research on several independent simulated markets and report every metric as mean ± sd across seeds.
-- `simulate(out: "Annotated[Path, typer.Option('--out', '-o', help='event directory (Parquet tables)')]", tokens: "Annotated[int, typer.Option('--tokens', help='number of token launches to simulate')]" = 40, seed: "Annotated[int, typer.Option('--seed', help='random seed')]" = 0, prefix: "Annotated[str, typer.Option('--prefix', help='mint/wallet name prefix (distinguishes eras)')]" = 'Mint', start_time: "Annotated[float, typer.Option('--start-time', help='simulation start, unix seconds')]" = 1750000000.0, hours: "Annotated[float, typer.Option('--hours', help='simulated duration, hours')]" = 3.0, market: "Annotated[str, typer.Option('--market', help='archetype mix: default, or degen (mostly duds + runners)')]" = 'default', runners: "Annotated[float | None, typer.Option('--runners', help='override the share of 100–1000x runner launches')]" = None) -> 'None'` — Simulate memecoin launches (snipers, bundles, rugs, graduations, runners, smart money, bots).
+- `simulate(out: "Annotated[Path, typer.Option('--out', '-o', help='event directory (Parquet tables)')]", tokens: "Annotated[int, typer.Option('--tokens', help='number of token launches to simulate')]" = 40, seed: "Annotated[int, typer.Option('--seed', help='random seed')]" = 0, prefix: "Annotated[str, typer.Option('--prefix', help='mint/wallet name prefix (distinguishes eras)')]" = 'Mint', start_time: "Annotated[float, typer.Option('--start-time', help='simulation start, unix seconds')]" = 1750000000.0, hours: "Annotated[float, typer.Option('--hours', help='simulated duration, hours')]" = 3.0, market: "Annotated[str, typer.Option('--market', help='archetype mix: default, or degen (mostly duds + runners)')]" = 'default', runners: "Annotated[float | None, typer.Option('--runners', help='override the share of 100–1000x runner launches')]" = None, herding: "Annotated[bool, typer.Option('--herding/--no-herding', help='self-exciting (Hawkes) retail demand')]" = False) -> 'None'` — Simulate memecoin launches (snipers, bundles, rugs, graduations, runners, smart money, bots).
 - `stream(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace directory')]", rpc: 'RpcOpt' = None, out: "Annotated[Path | None, typer.Option('--out', '-o', help='append assessments as JSONL')]" = None, polls: "Annotated[int | None, typer.Option('--polls', help='stop after N polls (default: run forever)')]" = None, poll_interval: "Annotated[float, typer.Option('--poll-interval', help='seconds between RPC polls')]" = 2.0, assess_every: "Annotated[float, typer.Option('--assess-every', help='seconds between assessment rounds')]" = 10.0, maintenance_every: "Annotated[float, typer.Option('--maintenance-every', help='seconds between maintenance runs')]" = 600.0, device: 'DeviceOpt' = None) -> 'None'` — Stream live chain activity into a Solana workspace (read-only) and emit assessments.
 - `stream_train_cmd(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (created if new, else resumed)')]", events: "Annotated[Path | None, typer.Option('--events', '-e', help='stream a saved event directory instead of RPC')]" = None, rpc: 'RpcOpt' = None, start: "Annotated[str | None, typer.Option('--start', help='unix seconds or ISO date (RPC mode)')]" = None, end: "Annotated[str | None, typer.Option('--end', help='unix seconds or ISO date (RPC mode)')]" = None, segment_minutes: "Annotated[float, typer.Option('--segment-minutes', help='history segment length, minutes (RPC mode)')]" = 60.0, workers: "Annotated[int, typer.Option('--workers', help='parallel getTransaction calls')]" = 8, warmup_hours: "Annotated[float, typer.Option('--warmup-hours', help='hours of stream used to bootstrap a new workspace')]" = 6.0, evict_idle_hours: "Annotated[float, typer.Option('--evict-idle-hours', help='forget tokens idle this many hours')]" = 2.0, solana_config: 'SolCfg' = None, config: 'BaseCfg' = None, profile: "Annotated[str | None, typer.Option('--profile', help='auto | cpu-lite | cpu | gpu | gpu-frontier')]" = 'auto', device: 'DeviceOpt' = None) -> 'None'` — Learn by streaming history through the brain — nothing is downloaded to disk.
 - `tape_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history + champion)')]", max_trades: "Annotated[int, typer.Option('--max-trades', help='trades per tape (most recent kept)')]" = 96, members: "Annotated[int, typer.Option('--members', help='ensemble members')]" = 3, epochs: "Annotated[int, typer.Option('--epochs', help='maximum training epochs per member')]" = 40, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of the latest-launched tokens held out for the test')]" = 0.35, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Train the Tape Transformer (trade tape + wallet embeddings → tail and collapse) and score it against the raw-feature tail model on later tokens; installs the model.
@@ -3787,6 +3955,16 @@ Forward-test ledger: what the ML signals would have earned, recorded as they fir
   - `settle(self, market: 'SolanaMarket', now: 'float', force: 'bool' = False) -> 'int'` — Settle tickets whose run is over (or all of them with ``force``).
   - `summary(self) -> 'dict[str, Any]'` — Realised ticket statistics and how well the entry signals ranked the outcomes.
 - **class `Ticket`** — One paper ticket and the signals it was opened on.
+
+### `nardis_neural.solana.hawkes`
+
+Criticality of trade flow: an online self-exciting (Hawkes) point-process estimator.
+
+- `excitation_sums(times: 'F64', betas: 'F64') -> 'F64'` — ``A[k, i] = Σ_{j: t_j < t_i} exp(−β_k (t_i − t_j))`` for sorted ``times``, exactly, in O(N) per β.
+- `fit_hawkes(times: 'F64', t_start: 'float', t_end: 'float', betas: 'F64' = array([0.02      , 0.0440142 , 0.09686251, 0.21316631, 0.46911728,
+       1.03239118, 2.27199382, 5.        ]), trends: 'F64 | tuple[float, ...]' = (0.0,), fast_beta: 'float | None' = None, iterations: 'int' = 60, max_events: 'int' = 300, min_events: 'int' = 8, max_branching: 'float' = 1.5) -> 'HawkesFit'` — Fit an exponential Hawkes process to event ``times`` observed on ``[t_start, t_end]``.
+- **class `HawkesFit`** — Maximum-likelihood exponential Hawkes parameters for one event stream.
+- `simulate_hawkes(mu: 'float', branching: 'float', beta: 'float', horizon: 'float', rng: 'np.random.Generator') -> 'F64'` — Exact simulation of an exponential Hawkes process on ``[0, horizon]`` (Ogata thinning).
 
 ### `nardis_neural.solana.ingest`
 
@@ -4225,7 +4403,7 @@ Transparent PyTorch training engine.
 
 ## Test inventory
 
-194 test functions (some are parametrised over devices, experts or formats).
+200 test functions (some are parametrised over devices, experts or formats).
 
 ### `tests/test_cli.py`
 
@@ -4450,6 +4628,17 @@ Edge engine: executable triple-barrier labels, backtester, meta-labeling model, 
 Forward-test ledger: tickets open on live signals, alarms arm, settlement is executable.
 
 - `test_ledger_opens_alarms_settles_and_roundtrips`
+
+### `tests/test_solana_hawkes.py`
+
+Criticality engine: exact kernel sums, Hawkes recovery, features and simulator herding.
+
+- `test_excitation_sums_are_exact_with_ties_and_long_spans`
+- `test_hawkes_recovers_branching_and_orders_criticality`
+- `test_herding_makes_buy_flow_self_exciting`
+- `test_criticality_features_are_finite_and_causal`
+- `test_detrending_separates_a_fading_rush_from_a_cascade`
+- `test_two_kernel_fit_splits_reflexes_from_herding`
 
 ### `tests/test_solana_ingest.py`
 

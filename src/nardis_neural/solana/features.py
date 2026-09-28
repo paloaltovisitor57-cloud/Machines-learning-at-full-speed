@@ -28,10 +28,15 @@ from nardis_neural.solana.config import (
     SolanaConfig,
 )
 from nardis_neural.solana.events import TokenEventLog
+from nardis_neural.solana.hawkes import fit_hawkes
 from nardis_neural.solana.market import SolanaMarket
 from nardis_neural.solana.wallets import WalletIntel
 
 F64 = npt.NDArray[np.float64]
+FEATURE_BETAS = np.geomspace(0.03, 3.0, 5)
+"""Decay rates tried by the live Hawkes features (a coarser grid than research fits)."""
+FEATURE_TRENDS = np.array([-0.02, -0.006, -0.002, 0.0, 0.004])
+"""Background trends tried by the live detrended buy fits (a coarser grid than research fits)."""
 I64 = npt.NDArray[np.int64]
 DUST_TOKENS = 1.0
 
@@ -218,6 +223,7 @@ class SolanaFeatureBuilder:
         f["lp_burned_fraction"] = float(log.launch.lp_burned_fraction)
         f.update(self._tail_and_clusters(log, wallets, now, holders))
         f.update(self._context(log, market, now))
+        f.update(self._criticality(log, now))
         vec = np.asarray([f[name] for name in CURRENT_FEATURES], dtype=np.float64)
         return np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -296,6 +302,38 @@ class SolanaFeatureBuilder:
         out["top_cluster_share"] = max(multi) / log.launch.supply if multi else 0.0
         out["holder_cluster_ratio"] = clusters / len(holders) if holders else 1.0
         return out
+
+    @staticmethod
+    def _criticality(log: TokenEventLog, now: float, window: float = 600.0) -> dict[str, float]:
+        """Self-exciting (Hawkes) fits of the last ``window`` seconds of buys and sells.
+
+        Buy fits are *detrended* (the background rate may rise or fade exponentially) so a
+        fading launch rush is not mistaken for a cascade.
+        """
+        s = log.swaps
+        t, buy = s["t"], s["is_buy"]
+        recent = (t > now - window - 120.0) & (t <= now)
+        bt, st = t[recent & buy], t[recent & ~buy]
+        fb = fit_hawkes(
+            bt, now - window, now, betas=FEATURE_BETAS, trends=FEATURE_TRENDS, max_events=150, iterations=40
+        )
+        fs = fit_hawkes(st, now - window, now, betas=FEATURE_BETAS, max_events=120, iterations=40)
+        fp = fit_hawkes(
+            bt,
+            now - window - 120.0,
+            now - 120.0,
+            betas=FEATURE_BETAS,
+            trends=FEATURE_TRENDS,
+            max_events=150,
+            iterations=40,
+        )
+        return {
+            "buy_branching_ratio": fb.branching,
+            "sell_branching_ratio": fs.branching,
+            "buy_branching_trend_120s": fb.branching - fp.branching if fb.n_events and fp.n_events else 0.0,
+            "herding_timescale_log": float(np.log1p(1.0 / fb.beta)) if fb.n_events else 0.0,
+            "endogenous_buy_share": fb.endogenous_share,
+        }
 
     @staticmethod
     def _context(log: TokenEventLog, market: SolanaMarket | None, now: float) -> dict[str, float]:

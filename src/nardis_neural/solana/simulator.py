@@ -64,6 +64,21 @@ MARKET_PRESETS: dict[str, dict[str, float]] = {
 }
 
 
+HERD_BRANCHING: dict[str, float] = {
+    "runner": 0.85,
+    "graduate": 0.7,
+    "organic": 0.5,
+    "rug": 0.3,
+    "dud": 0.2,
+    "trap": 0.1,
+    "wash": 0.05,
+}
+"""Branching ratio of buy cascades per archetype when herding is on: viral launches are
+near-critical, scripted ones (staged insiders, wash bots) barely self-excite."""
+HERD_DECAY = 0.2
+"""Decay rate of herding excitation (per second): a buy's influence fades over ~5 s."""
+
+
 @dataclass
 class LaunchSimSpec:
     """Simulated market settings: token count, duration, seed, wallet population and archetype mix."""
@@ -84,6 +99,10 @@ class LaunchSimSpec:
     decoy_fraction: float = 0.25
     """Honest launches where the dev's co-funded friends buy in the launch slots (bundle-like
     footprint without a rug)."""
+    herding: bool = False
+    """Self-exciting retail demand: every buy raises the near-term buy rate (a Hawkes process
+    with archetype-specific branching ratios, see :data:`HERD_BRANCHING`).  Off by default so
+    earlier simulations reproduce exactly."""
     archetype_weights: dict[str, float] = field(default_factory=lambda: dict(MARKET_PRESETS["default"]))
     """``runner`` launches (rare viral tokens that compound for hours, 100–1000x+) are off by
     default; the ``degen`` preset turns them on."""
@@ -387,6 +406,9 @@ class LaunchSimulator:
         # runner virality is heavy-tailed: most stall at tens of x, a few go four figures
         # (drawn only for runners so default simulations keep their random stream)
         viral = float(np.exp(rng.uniform(np.log(0.15), np.log(1.2)))) if arch == "runner" else 0.0
+        herd = HERD_BRANCHING.get(arch, 0.0) if self.spec.herding else 0.0
+        keep = float(np.exp(-HERD_DECAY))
+        excite = 0.0
         dumped = False
         pulled = False
         end = t0 + tok.lifetime
@@ -413,7 +435,12 @@ class LaunchSimulator:
                     lam_s = 0.3 + 0.1 * np.log1p(age / 600)
             else:
                 lam_b, lam_s = 0.25 * np.exp(-age / 600) + 0.02, 0.1
-            for _ in range(int(rng.poisson(lam_b))):
+            if herd > 0:  # the same average demand, but arriving in self-excited cascades
+                lam_b = min(lam_b * (1.0 - herd) + excite, 60.0)
+            n_buys = int(rng.poisson(lam_b))
+            if herd > 0:
+                excite = excite * keep + herd * (1.0 - keep) * n_buys
+            for _ in range(n_buys):
                 ts = t + float(rng.uniform(0, 1))
                 if smart_in and rng.random() < (0.35 if age < 300 else 0.05):
                     wlt, kind = str(rng.choice(self.smart)), "smart"

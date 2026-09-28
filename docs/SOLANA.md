@@ -21,7 +21,7 @@ flowchart LR
     T --> WI[WalletIntel<br/>funding clusters · hubs]
     MK -->|buys queued, resolved after horizon| REP[Wallet reputations<br/>Beta posterior · rug marks]
     WI --> REP
-    MK & REP --> FB[SolanaFeatureBuilder<br/>68 named features · 1s/5s/30s bars · wallet graph]
+    MK & REP --> FB[SolanaFeatureBuilder<br/>73 named features · 1s/5s/30s bars · wallet graph]
     FB --> NE[Neural ensemble<br/>Transformer · GRU · TCN · MLP · Graph + MoE]
     NE --> EMB[MarketStateEmbedding]
     EMB & FB --> RK[Risk ensemble<br/>P rug · P graduation · P dev dump]
@@ -59,7 +59,7 @@ canonical order (launch → transfer → migration → LP → swap at equal time
 
 ## 3. Features (`features.py`)
 
-68 named current-state features (`CURRENT_FEATURES`):
+73 named current-state features (`CURRENT_FEATURES`):
 
 | Group | Features |
 |---|---|
@@ -74,6 +74,7 @@ canonical order (launch → transfer → migration → LP → swap at equal time
 | Runner skill | share of the last minute's buy SOL from wallets with proven **runner skill**, #runner-skilled buyers in 5 min, mean runner skill of the first 20 buyers |
 | Sybil-resistant counts | #holder funding clusters, clusters ÷ holders, #buyer clusters per minute, **supply held by the largest hidden multi-wallet cluster** (not the creator's; relay hops included) |
 | Creator family | prior launches, best prior peak multiple, prior rug rate, prior graduation rate, time since the family's last launch |
+| Criticality | Hawkes branching ratio of buys and of sells, its two-minute trend, herding timescale, endogenous share of buys ([CRITICALITY.md](CRITICALITY.md)) |
 | Market heat | launches in 10 min, graduations in 1 h, total swap volume in 5 min (all tokens) |
 
 **Runner skill** is a second, separate wallet reputation. A buy in a token's first
@@ -186,7 +187,7 @@ An agent-based simulator used for tests and demos. It is not a market model.
 |---|---|
 | simulate 40 launches (~50 k events) | ~4 s |
 | replay 52 k events into a market | ~0.8 s |
-| build one observation (68 features + 3 bar streams + graph) | ~2.9 ms |
+| build one observation (73 features + 3 bar streams + graph) | ~2.9 ms |
 | extract one 96-trade tape | ~0.9 ms |
 | dataset from 40 launches (~7.8 k leakage-free snapshots) | ~25 s |
 | `assess_many` 1 / 8 / 32 tokens (tiny 2-member test model) | ~23 / 38 / 74 ms |

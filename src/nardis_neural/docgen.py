@@ -36,6 +36,7 @@ PARTS = (
     ("EDGE", "Edge engine"),
     ("MOONSHOT", "Moonshot engine"),
     ("TAPE", "Tape Transformer"),
+    ("CRITICALITY", "Criticality engine"),
 )
 _ADDR = re.compile(r" at 0x[0-9a-fA-F]+")
 
