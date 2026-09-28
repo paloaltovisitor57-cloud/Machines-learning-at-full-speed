@@ -555,3 +555,28 @@ def research_suite(
     if out is not None:
         out.write_text(json.dumps(result, indent=2, default=float))
     typer.echo(suite_markdown(result))
+
+
+@app.command()
+def allocate(
+    workspace: Annotated[Path, typer.Option("--workspace", "-w", help="Solana workspace")],
+    equity: Annotated[float, typer.Option("--equity", help="current bankroll in SOL")],
+    peak: Annotated[
+        float | None, typer.Option("--peak", help="peak bankroll in SOL (drawdown governor)")
+    ] = None,
+    device: DeviceOpt = None,
+) -> None:
+    """Recommended stakes for the current moonshot opportunities (advice only, never orders)."""
+    from nardis_neural.solana.brain import SolanaBrain
+
+    brain = SolanaBrain(workspace, device=device)
+    allocations = brain.allocate(equity, peak_equity_sol=peak)
+    _echo(
+        {
+            "track_record": brain.forward.track_record(),
+            "allocations": [
+                {"mint": a.mint, "stake_sol": a.stake_sol, "fraction": a.fraction, "reason": a.reason}
+                for a in allocations
+            ],
+        }
+    )

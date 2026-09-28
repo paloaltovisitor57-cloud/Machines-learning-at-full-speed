@@ -29,6 +29,13 @@ from nardis_neural.config import NeuralConfig
 from nardis_neural.data.datasets import MarketDataset
 from nardis_neural.data.sequences import observations_to_arrays
 from nardis_neural.schemas import NeuralObservation, NeuralPrediction
+from nardis_neural.solana.capital.allocator import (
+    Allocation,
+    AllocatorConfig,
+    BookState,
+    CapitalAllocator,
+    Signal,
+)
 from nardis_neural.solana.config import CURRENT_FEATURES, RISK_LABELS, SolanaConfig
 from nardis_neural.solana.dataset import SolanaDataset, build_solana_dataset
 from nardis_neural.solana.edge.barriers import BarrierSpec
@@ -469,6 +476,43 @@ class SolanaBrain:
         found = self.assess_many(mints)
         keep = [a for a in found if include_vetoed or not a.moonshot["vetoed"]]
         return sorted(keep, key=lambda a: -a.moonshot["chase_score"])
+
+    def allocate(
+        self,
+        equity_sol: float,
+        open_stakes: dict[str, float] | None = None,
+        peak_equity_sol: float | None = None,
+        cfg: AllocatorConfig | None = None,
+        max_idle_seconds: float = 120.0,
+    ) -> list[Allocation]:
+        """Recommended stakes for the current moonshot opportunities (advice, never orders).
+
+        Uses the manipulation-guarded ranking, the tail and tape views, the pool's real
+        liquidity, the creator family, and the forward ledger's live track record.
+        """
+        signals = []
+        for a in self.moonshot_ranking(max_idle_seconds):
+            m = a.moonshot
+            fam = self.market.family_of.get(a.mint)
+            signals.append(
+                Signal(
+                    a.mint,
+                    a.timestamp,
+                    float(m.get("expected_multiple_blend", m["expected_multiple"])),
+                    float(m["lottery_kelly"]),
+                    1.0,  # the guard's trust is already inside lottery_kelly
+                    float(m["epistemic"]),
+                    float(np.expm1(a.features.get("liquidity_sol_log", 0.0))),
+                    str(fam) if fam is not None else a.mint,
+                    bool(m["vetoed"]),
+                )
+            )
+        state = BookState(
+            equity=equity_sol,
+            peak_equity=peak_equity_sol if peak_equity_sol is not None else equity_sol,
+            open_stakes=dict(open_stakes or {}),
+        )
+        return CapitalAllocator(cfg, track_record=self.forward.track_record()).allocate(signals, state)
 
     def resolve(self) -> int:
         """Label every assessment whose longest horizon has elapsed and learn from it."""

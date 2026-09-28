@@ -37,6 +37,7 @@ PARTS = (
     ("MOONSHOT", "Moonshot engine"),
     ("TAPE", "Tape Transformer"),
     ("CRITICALITY", "Criticality engine"),
+    ("CAPITAL", "Capital engine"),
 )
 _ADDR = re.compile(r" at 0x[0-9a-fA-F]+")
 
@@ -144,6 +145,7 @@ def _model_rows(model: type[BaseModel], prefix: str = "") -> Iterator[str]:
 
 def _config() -> Iterator[str]:
     from nardis_neural.config import HorizonConfig, NeuralConfig
+    from nardis_neural.solana.capital.allocator import AllocatorConfig
     from nardis_neural.solana.config import BarSpec, SolanaConfig
     from nardis_neural.solana.edge.barriers import BarrierSpec
     from nardis_neural.solana.moonshot.guard import GuardConfig
@@ -165,6 +167,7 @@ def _config() -> Iterator[str]:
         ("Moonshot labels and ladder — `MoonshotSpec`", MoonshotSpec),
         ("Manipulation guard — `GuardConfig`", GuardConfig),
         ("Trade tape — `TapeSpec`", TapeSpec),
+        ("Capital allocator — `AllocatorConfig`", AllocatorConfig),
     ]
     for title, model in sections:
         yield ""

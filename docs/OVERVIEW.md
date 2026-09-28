@@ -43,10 +43,11 @@ champion → challenger lifecycle.
 - [Moonshot engine](#moonshot-engine)
 - [Tape Transformer](#tape-transformer)
 - [Criticality engine](#criticality-engine)
+- [Capital engine](#capital-engine)
 - [Optional / not included](#optional--not-included)
 - **[Part II — In depth](#part-ii--in-depth)**: architecture, continual learning, integration,
-  Solana layer, edge engine, moonshot engine, Tape Transformer, criticality engine (the full
-  contents of `docs/`)
+  Solana layer, edge engine, moonshot engine, Tape Transformer, criticality engine, capital
+  engine (the full contents of `docs/`)
 - **[Part III — Generated reference](#part-iii--generated-reference)**: every CLI command and
   option, every configuration field and default, every feature, every output field, the
   public Python API and the test inventory
@@ -342,7 +343,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 ├── configs/                 default.yaml · small.yaml
 ├── README.md                generated: python -m nardis_neural.docgen (a test keeps it in sync)
 ├── docs/                    OVERVIEW.md · ARCHITECTURE.md · CONTINUAL_LEARNING.md · INTEGRATION.md ·
-│                            SOLANA.md · EDGE.md · MOONSHOT.md · TAPE.md · CRITICALITY.md (README sources)
+│                            SOLANA.md · EDGE.md · MOONSHOT.md · TAPE.md · CRITICALITY.md · CAPITAL.md (README sources)
 ├── examples/                nardis_integration.py (runnable, tested)
 ├── src/nardis_neural/
 │   ├── config.py            Pydantic config tree
@@ -364,6 +365,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │   └── solana/              amm · events · market · wallets · features · labels · dataset ·
 │                            risk · simulator · brain · config · cli · streaming · hawkes ·
 │                            forward · suite
+│                            capital/ (allocator · bankroll · overfit · research)
 │                            ingest/ (decoder · rpc · stream · history · encode · pumpfun · base58)
 │                            edge/ (barriers · model · trees · backtest · research)
 │                            moonshot/ (labels · tail · guard · online · research)
@@ -551,6 +553,22 @@ transition**: its viral R₀. See [docs/CRITICALITY.md](CRITICALITY.md).
   **endogenous share** (herding vs scripted flow);
 - self-exciting **herding** in the simulator (`--herding`), and an ablation measured with
   and without the features on identical splits.
+
+## Capital engine
+
+`nardis_neural.solana.capital` turns signals into a sized book and checks whether the edge
+is real. See [docs/CAPITAL.md](CAPITAL.md).
+
+- a **capital allocator**. The stake is the lottery-Kelly fraction, scaled by trust,
+  uncertainty and the forward ledger's live **track record**, then capped per position,
+  per **pool liquidity**, per **creator family**, by total exposure and by position count.
+  A **drawdown governor** and a **daily loss stop** sit on top (`brain.allocate`,
+  `solana allocate`); it gives advice and never places orders;
+- an event-driven **bankroll simulator** (capital locked while open) with a bootstrap risk
+  profile (P(loss), P(−50 %), drawdown quantiles) and **stress tests** that scale every
+  payoff down;
+- **Deflated Sharpe Ratio** and **Probability of Backtest Overfitting** (combinatorially
+  symmetric cross-validation) in every moonshot research report.
 
 ## Optional / not included
 

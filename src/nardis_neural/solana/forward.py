@@ -154,6 +154,19 @@ class ForwardLedger:
             out["bottom_quintiles_mean_multiple"] = float(lad[~top].mean()) if (~top).any() else float("nan")
         return out
 
+    def track_record(self, min_tickets: int = 10) -> float:
+        """Realised / predicted payoff of settled tickets (1.0 until ``min_tickets`` have settled).
+
+        Feeds the capital allocator: when live results fall short of what the model promised,
+        every stake shrinks in proportion.
+        """
+        done = [t for t in self.closed if t.ladder_multiple is not None]
+        if len(done) < min_tickets:
+            return 1.0
+        realised = float(np.mean([t.ladder_multiple for t in done]))
+        predicted = float(np.mean([t.expected_multiple for t in done]))
+        return realised / max(predicted, 1e-9)
+
     def save(self) -> None:
         """Write the ledger (open and closed tickets) and its summary as JSON."""
         self.path.mkdir(parents=True, exist_ok=True)

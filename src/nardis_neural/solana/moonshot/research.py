@@ -28,6 +28,7 @@ import numpy.typing as npt
 import torch
 
 from nardis_neural.config import NeuralConfig
+from nardis_neural.solana.capital.research import capital_report, ticket_records
 from nardis_neural.solana.config import CURRENT_FEATURES, SolanaConfig
 from nardis_neural.solana.dataset import SolanaDataset, build_solana_dataset, hindsight_market
 from nardis_neural.solana.edge.research import OOFPredictions, edge_features, walk_forward_oof
@@ -37,6 +38,8 @@ from nardis_neural.solana.moonshot.tail import TailModel
 from nardis_neural.training.metrics import brier_score, roc_auc
 
 F64 = npt.NDArray[np.float64]
+THRESHOLD_GRID = (1.0, 1.5, 2.0, 3.0, 5.0, 10.0)
+"""Entry thresholds (minimum expected ladder multiple) compared on the test period."""
 I64 = npt.NDArray[np.int64]
 Logger = Callable[[str], None]
 
@@ -58,6 +61,8 @@ class MoonshotLabels:
     """Seconds from entry to the first collapse; NaN when none was observed."""
     observed: F64 = field(default_factory=lambda: np.zeros(0))
     """Seconds of path observed after entry (collapse labels are censored there)."""
+    exit_time: F64 = field(default_factory=lambda: np.zeros(0))
+    """When the ladder position was fully closed (or the end of the observed window)."""
 
 
 @dataclass
@@ -94,7 +99,7 @@ class MoonshotDataset:
             valid = np.zeros(n, dtype=bool)
             peak, ladder, final = np.zeros(n), np.zeros(n), np.zeros(n)
             cens = np.zeros(n, dtype=bool)
-            collapse, observed = np.full(n, np.nan), np.zeros(n)
+            collapse, observed, exit_t = np.full(n, np.nan), np.zeros(n), np.zeros(n)
             for i, (mint, t) in enumerate(zip(self.mints, self.timestamps, strict=True)):
                 if t >= end:
                     continue
@@ -106,7 +111,8 @@ class MoonshotDataset:
                 cens[i] = out.censored
                 collapse[i] = np.nan if out.collapse_time is None else out.collapse_time
                 observed[i] = out.observed_seconds
-            self._cache[end] = MoonshotLabels(valid, peak, cens, ladder, final, collapse, observed)
+                exit_t[i] = out.exit_time
+            self._cache[end] = MoonshotLabels(valid, peak, cens, ladder, final, collapse, observed, exit_t)
         return self._cache[end]
 
 
@@ -298,10 +304,34 @@ def run_moonshot_research(
     mom_rows = first_signal(ts[test], mints[test], mds.age[test] >= 60)
     mom = mom_rows[np.argsort(-ret60[mom_rows], kind="stable")[:budget]]
     sensitivity = []
-    for thr in (1.0, 1.5, 2.0, 3.0, 5.0, 10.0):
+    token_order = sorted({str(m) for m in mints[test]}, key=lambda m: mds.market.token(m).launch.t)
+    token_pos = {m: i for i, m in enumerate(token_order)}
+    config_returns: dict[str, F64] = {}
+    for thr in THRESHOLD_GRID:
         sel = first_signal(ts[test], mints[test], (pred.expected_multiple >= thr) & (pred.lottery_kelly > 0))
         st = ticket_stats(ladder[sel], peak[sel], spec.size_sol)
         sensitivity.append({"min_expected_multiple": thr} | st)
+        per_token = np.zeros(len(token_order))
+        for i in sel:
+            per_token[token_pos[str(mints[test][i])]] = ladder[i] - 1.0
+        config_returns[f"ev>={thr:g}"] = per_token
+    liq = np.expm1(mds.base.current[mds.rows[test], list(CURRENT_FEATURES).index("liquidity_sol_log")])
+    records = ticket_records(
+        ts[test][picked],
+        mints[test][picked],
+        lab.exit_time[test][picked],
+        ladder[picked],
+        pred.expected_multiple[picked],
+        pred.lottery_kelly[picked],
+        pred.survival_std.max(axis=1)[picked],
+        liq[picked],
+        [str(mds.market.family_of.get(str(m), m)) for m in mints[test][picked]],
+    )
+    capital = (
+        capital_report(records, config_returns, f"ev>={min_expected_multiple:g}", spec.size_sol)
+        if records
+        else {}
+    )
     report: dict[str, Any] = {
         "spec": spec.model_dump(),
         "inputs": inputs,
@@ -319,6 +349,7 @@ def run_moonshot_research(
         },
         "portfolio": stats,
         "threshold_sensitivity": sensitivity,
+        "capital": capital,
         "baselines": {
             "every_launch": ticket_stats(ladder[everything], peak[everything], spec.size_sol),
             "momentum": ticket_stats(ladder[mom], peak[mom], spec.size_sol),
@@ -423,6 +454,50 @@ def moonshot_markdown(report: dict[str, Any]) -> str:
     if "runners" in report:
         r = report["runners"]
         lines += ["", f"Runners in the test tokens: {r['in_test']}, ticketed: {r['ticketed']}."]
+    cap = report.get("capital") or {}
+    if cap:
+        f, al = cap["flat"], cap["allocator"]
+        fb, ab = cap["flat_bootstrap"], cap["allocator_bootstrap"]
+        dsr, pbo = cap["deflated_sharpe"], cap["pbo"]
+
+        def book(name: str, r: dict[str, Any], b: dict[str, float]) -> str:
+            return (
+                f"| {name} | {r['tickets_taken']} | {r['return']:+.1%} | {r['max_drawdown']:.1%} | "
+                f"{b['median_return']:+.1%} | {b['p05_return']:+.1%} | {b['prob_loss']:.0%} | "
+                f"{b['prob_ruin']:.0%} |"
+            )
+
+        lines += [
+            "",
+            f"## Bankroll ({cap['initial_equity']:g} SOL start, test tickets, capital locked while open)",
+            "",
+            "| sizing | tickets | return | max DD | bootstrap median | p05 | P(loss) | P(−50 %) |",
+            "|---|---|---|---|---|---|---|---|",
+            book(f"flat {cap['flat_stake']:g} SOL", f, fb),
+            book("capital allocator", al, ab),
+            "",
+            f"Deflated Sharpe Ratio of the deployed threshold after {cap['trials']} trials: "
+            f"{dsr.get('dsr', float('nan')):.2f} (per-ticket Sharpe {dsr.get('sharpe', float('nan')):.2f} vs "
+            f"best-of-trials benchmark {dsr.get('benchmark_sharpe', float('nan')):.2f}) · "
+            f"Probability of Backtest Overfitting across thresholds: {pbo.get('pbo', float('nan')):.0%}",
+        ]
+        if cap.get("stress"):
+            lines += [
+                "",
+                "Stress test (every payoff scaled down; bootstrap median return / P(loss) / P(−50 %)):",
+                "",
+                f"| payoff haircut | mean multiple | flat {cap['flat_stake']:g} SOL | "
+                f"flat {cap['aggressive_flat_stake']:g} SOL | capital allocator |",
+                "|---|---|---|---|---|",
+            ]
+            for st in cap["stress"]:
+                cells = [
+                    f"{b['median_return']:+.0%} / {b['prob_loss']:.0%} / {b['prob_ruin']:.0%}"
+                    for b in (st["flat"], st["flat_aggressive"], st["allocator"])
+                ]
+                lines.append(
+                    f"| ×{st['haircut']:g} | {st['mean_multiple']:.2f}x | " + " | ".join(cells) + " |"
+                )
     lines += [
         "",
         f"**Verdict:** beats feature-free NLL: {v['beats_marginal_nll']} · profitable: {v['profitable']} · "

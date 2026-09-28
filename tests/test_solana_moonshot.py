@@ -207,6 +207,9 @@ def test_runners_and_moonshot_brain_integration(tmp_path: Path) -> None:
     assert 0 <= a.moonshot["p_ge_1000x"] <= a.moonshot["p_ge_2x"] <= 1
     assert 0 <= a.moonshot["trust"] <= 1 and a.moonshot["chase_rank"] == 1
     assert a.moonshot["chase_score"] == 0 or not a.moonshot["vetoed"]
+    allocations = reloaded.allocate(100.0, max_idle_seconds=1e9)
+    assert all(al.stake_sol >= 0 for al in allocations)
+    assert sum(al.stake_sol for al in allocations) <= 0.3 * 100.0 + 1e-9, "total exposure cap"
     ranking = reloaded.moonshot_ranking(max_idle_seconds=1e9, include_vetoed=True)
     scores = [r.moonshot["chase_score"] for r in ranking]
     assert scores == sorted(scores, reverse=True)

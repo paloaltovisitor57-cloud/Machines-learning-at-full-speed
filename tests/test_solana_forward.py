@@ -48,6 +48,8 @@ def test_ledger_opens_alarms_settles_and_roundtrips(tmp_path: Path) -> None:
     s = led.summary()
     assert s["tickets"] == 1 and s["alarm_exits"] == 1
     assert s["alarm_minus_ladder_pnl_sol"] > 0, "both variants are settled, so the alarm can be judged"
+    assert led.track_record() == 1.0, "too few settled tickets to judge the model"
+    assert led.track_record(min_tickets=1) == tk.ladder_multiple / 3.0
     led.save()
     back = ForwardLedger.load(tmp_path / "fwd", SPEC)
     assert back.alarm == ("p_collapse_1m", 0.5) and len(back.closed) == 1 and "TOK" in back.seen

@@ -45,10 +45,11 @@ champion → challenger lifecycle.
 - [Moonshot engine](#moonshot-engine)
 - [Tape Transformer](#tape-transformer)
 - [Criticality engine](#criticality-engine)
+- [Capital engine](#capital-engine)
 - [Optional / not included](#optional--not-included)
 - **[Part II — In depth](#part-ii--in-depth)**: architecture, continual learning, integration,
-  Solana layer, edge engine, moonshot engine, Tape Transformer, criticality engine (the full
-  contents of `docs/`)
+  Solana layer, edge engine, moonshot engine, Tape Transformer, criticality engine, capital
+  engine (the full contents of `docs/`)
 - **[Part III — Generated reference](#part-iii--generated-reference)**: every CLI command and
   option, every configuration field and default, every feature, every output field, the
   public Python API and the test inventory
@@ -97,7 +98,7 @@ flowchart TB
 | Continual learning | 3-pool replay (recent FIFO, historical reservoir, protected rare events), 5 sampling strategies, candidate cloning, distillation, EWC, full retraining with configurable weights |
 | Lifecycle | immutable checkpoints, champion/candidate/challenger/retired/failed registry with audit log, shadow mode, 10-gate promotion, manual and optional automatic rollback |
 | Representation | self-supervised pretraining (masked timestep, masked feature, contrastive), embedding export to Parquet/NumPy, KMeans / GMM / HDBSCAN regime discovery |
-| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 200 test functions |
+| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 205 test functions |
 
 ## Quick start
 
@@ -344,7 +345,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 ├── configs/                 default.yaml · small.yaml
 ├── README.md                generated: python -m nardis_neural.docgen (a test keeps it in sync)
 ├── docs/                    OVERVIEW.md · ARCHITECTURE.md · CONTINUAL_LEARNING.md · INTEGRATION.md ·
-│                            SOLANA.md · EDGE.md · MOONSHOT.md · TAPE.md · CRITICALITY.md (README sources)
+│                            SOLANA.md · EDGE.md · MOONSHOT.md · TAPE.md · CRITICALITY.md · CAPITAL.md (README sources)
 ├── examples/                nardis_integration.py (runnable, tested)
 ├── src/nardis_neural/
 │   ├── config.py            Pydantic config tree
@@ -366,11 +367,12 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │   └── solana/              amm · events · market · wallets · features · labels · dataset ·
 │                            risk · simulator · brain · config · cli · streaming · hawkes ·
 │                            forward · suite
+│                            capital/ (allocator · bankroll · overfit · research)
 │                            ingest/ (decoder · rpc · stream · history · encode · pumpfun · base58)
 │                            edge/ (barriers · model · trees · backtest · research)
 │                            moonshot/ (labels · tail · guard · online · research)
 │                            tape/ (features · dataset · model · research · policy)
-└── tests/                   200 test functions incl. synthetic end-to-end pipeline
+└── tests/                   205 test functions incl. synthetic end-to-end pipeline
 ```
 
 ## Testing & quality gates
@@ -553,6 +555,22 @@ transition**: its viral R₀. See [docs/CRITICALITY.md](docs/CRITICALITY.md).
   **endogenous share** (herding vs scripted flow);
 - self-exciting **herding** in the simulator (`--herding`), and an ablation measured with
   and without the features on identical splits.
+
+## Capital engine
+
+`nardis_neural.solana.capital` turns signals into a sized book and checks whether the edge
+is real. See [docs/CAPITAL.md](docs/CAPITAL.md).
+
+- a **capital allocator**. The stake is the lottery-Kelly fraction, scaled by trust,
+  uncertainty and the forward ledger's live **track record**, then capped per position,
+  per **pool liquidity**, per **creator family**, by total exposure and by position count.
+  A **drawdown governor** and a **daily loss stop** sit on top (`brain.allocate`,
+  `solana allocate`); it gives advice and never places orders;
+- an event-driven **bankroll simulator** (capital locked while open) with a bootstrap risk
+  profile (P(loss), P(−50 %), drawdown quantiles) and **stress tests** that scale every
+  payoff down;
+- **Deflated Sharpe Ratio** and **Probability of Backtest Overfitting** (combinatorially
+  symmetric cross-validation) in every moonshot research report.
 
 ## Optional / not included
 
@@ -2222,6 +2240,130 @@ What the measurements say:
 On real chain data the reflex layer is physical (same-slot bots). Validating these
 features on streamed history is the next step.
 
+## Capital engine (`nardis_neural.solana.capital`)
+
+Good probabilities are not a trading system. Capital compounds only if the *size* of each
+bet matches its edge and its risk, if correlated bets are not stacked, and if the account
+survives the losing streaks that fat-tailed strategies always produce. And none of it
+matters if the backtested edge is an artefact of trying many variants. This module
+handles all of those questions.
+
+```mermaid
+flowchart LR
+    SIG[moonshot view per token<br/>E payoff · lottery Kelly · trust ·<br/>epistemic · liquidity · family] --> AL[capital allocator]
+    FL[forward ledger<br/>live track record] --> AL
+    BK[book state<br/>equity · peak · open stakes] --> AL
+    AL --> ST[recommended stakes<br/>+ binding reason]
+    ST --> SIM[bankroll simulator<br/>capital locked while open]
+    SIM --> BOOT[bootstrap: P loss · P ruin ·<br/>drawdown quantiles · stress]
+    GRID[every configuration compared] --> OF[Deflated Sharpe · PBO]
+```
+
+### 1. Allocator (`allocator.py`)
+
+For each candidate, best expected edge first:
+
+```
+fraction = lottery Kelly × kelly_scale × trust × exp(−epistemic / uncertainty_scale)
+           × track record × drawdown governor
+```
+
+* **Lottery Kelly** comes from the tail model and is already fractional and capped: the
+  bet size that maximises expected log-wealth under the predicted payoff distribution.
+* **Trust** comes from the manipulation guard, and **epistemic** from the ensemble's
+  disagreement. The less the model knows, the less it bets.
+* **Track record** is realised ÷ predicted payoff of the forward ledger's settled paper
+  tickets, clipped to [0.25, 1.25]. When live results fall short of what the model
+  promised, every stake shrinks in proportion.
+* The **drawdown governor** scales stakes linearly from 1 at the equity peak to 0 at
+  `max_drawdown` (35 %). The **daily loss stop** allows no new positions after losing 15 %
+  of the day's opening equity.
+
+Then the limits, each reported as the binding `reason`:
+
+* per position: 4 % of equity;
+* **liquidity**: 2 % of the pool's real SOL, so our own impact stays small;
+* per **creator family**: 8 % of equity, because a serial deployer is one correlated bet;
+* total exposure: 30 % of equity; at most 12 concurrent positions; stakes under 0.02 SOL
+  are dropped.
+
+```python
+for a in brain.allocate(equity_sol=100.0, open_stakes={"Mint…": 1.2}, peak_equity_sol=120.0):
+    a.mint, a.stake_sol, a.fraction, a.reason  # advice for the trading system, not an order
+```
+
+The command-line equivalent is `nardis-neural solana allocate --workspace ws --equity 100`.
+
+### 2. Bankroll simulator (`bankroll.py`)
+
+Tickets enter in time order. Capital is locked from entry to exit, open positions are
+carried at cost (no mark-to-market optimism), and a ticket returns `stake × multiple` when
+it closes. The outputs are:
+
+* return, log growth, maximum drawdown and time underwater;
+* a **bootstrap risk profile**: outcomes are resampled onto the same schedule of signals,
+  giving the median and 5 % quantile of the return, P(loss), P(−50 %) and drawdown
+  quantiles;
+* **stress tests**: every payoff is scaled down (×0.6, ×0.35), because live edges are
+  usually far smaller than backtested ones. Each sizing (flat, aggressive flat,
+  allocator) is compared under the same stress.
+
+### 3. Is the edge real? (`overfit.py`)
+
+* **Deflated Sharpe Ratio** (Bailey & López de Prado, 2014). This is the probability that
+  the chosen policy's true Sharpe ratio exceeds the Sharpe ratio expected from the *best
+  of N* unskilled trials. It accounts for sample length, skew and fat tails.
+* **Probability of Backtest Overfitting** (Bailey, Borwein, López de Prado & Zhu). Time is
+  cut into 8 blocks. For all 70 ways of choosing 4 of them as in-sample, the in-sample
+  winner is ranked out-of-sample. PBO is the share of splits in which it lands below the
+  median.
+
+Every moonshot research report now includes both. They are computed across the entry
+thresholds compared on the test period, next to the bankroll comparison and the stress
+test. Tests check that the luckiest of 50 noise strategies gets a low DSR, that pure noise
+gets a high PBO, and that a genuinely better configuration gets a PBO near zero.
+
+### 4. Results on the simulator
+
+Moonshot research on two 150-launch markets (seed 7): `degen` without herding and
+`adversarial` with herding. The book starts at 100 SOL and trades the test-period tickets
+of the deployed policy. Payoffs were computed for 0.5 SOL tickets. Bootstrap figures come
+from 300 resampled histories.
+
+| | degen | adversarial + herding |
+|---|---|---|
+| per-ticket Sharpe · Deflated Sharpe Ratio (6 thresholds tried) | 0.36 · **1.00** | 0.58 · **1.00** |
+| PBO across entry thresholds | 59 % | 86 % |
+| flat 0.5 SOL: return / max drawdown | +172 % / 0.4 % | +37 % / 0.3 % |
+| allocator: return / max drawdown | +129 % / 0.5 % | +23 % / 0.1 % |
+
+Stress test, adversarial market (bootstrap median return, P(loss), P(−50 %)):
+
+| payoff haircut | mean multiple | flat 0.5 SOL | flat 5 SOL | allocator |
+|---|---|---|---|---|
+| ×0.6 | 1.60x | +13 %, 0 %, 0 % | **+129 %**, 0 %, 0 % | +6 %, 1 %, 0 % |
+| ×0.35 (no edge left) | 0.93x | −2 %, 73 %, 0 % | −17 %, 73 %, **16 %** | −1 %, 67 %, 0 % |
+
+How to read this:
+
+* **The edge is not a multiple-testing artefact.** The deployed policy's Sharpe ratio is far
+  above the best-of-trials benchmark in both markets (DSR 1.00).
+* **The entry threshold does not matter, so do not tune it.** PBO of 59 % and 86 % says the
+  threshold that looks best in-sample is no better than the others out-of-sample. They
+  all trade nearly the same tokens.
+* **Sizing is a trade-off, and it is now measured.** While the edge holds, bigger stakes
+  compound faster. If the live edge turns out much smaller than the backtest (the usual
+  case), aggressive flat sizing ruins about one history in six. The conservative
+  allocator never did, but it earned less in these generous markets. Its liquidity cap
+  (2 % of a young pool's real SOL) is what binds most often.
+* **The intended way to scale up** is to start with the defaults and let the forward
+  ledger accumulate settled tickets. `track_record` then scales stakes by realised ÷
+  predicted payoff, and `kelly_scale` should be raised only after the live record confirms
+  the edge. It is the same logic the Deflated Sharpe Ratio applies to backtests: size to
+  evidence, not to hope.
+* Both markets are simulations. Real launch markets are harsher. The stress rows are the
+  more realistic guide to what sizing does.
+
 # Part III — Generated reference
 
 Generated from the code; it cannot drift.
@@ -2647,6 +2789,17 @@ and report every metric as mean ± sd across seeds.
 | `--tape`, `--no-tape` | flag | false | also run the (slower) tape research |
 | `--out`, `-o` | path | null | write the JSON result here |
 
+### `nardis-neural solana allocate`
+
+Recommended stakes for the current moonshot opportunities (advice only, never orders).
+
+| option | type | default | description |
+|---|---|---|---|
+| `--workspace`, `-w` | path | required | Solana workspace |
+| `--equity` | float | required | current bankroll in SOL |
+| `--peak` | float | null | peak bankroll in SOL (drawdown governor) |
+| `--device` | str | null | cpu \| cuda \| cuda:0 \| mps (default: auto) |
+
 
 ## Configuration
 
@@ -2943,6 +3096,21 @@ Every field, its type, its default and its description. Nested keys use dots, as
 |---|---|---|---|
 | `max_trades` | int | 96 | Most recent trades kept per snapshot (left-padded when fewer). |
 | `wallet_buckets` | int | 131072 | Hash buckets of the wallet embedding (bucket 0 is padding). |
+
+### Capital allocator — `AllocatorConfig`
+
+| key | type | default | description |
+|---|---|---|---|
+| `kelly_scale` | float | 1.0 | Multiplier on the signal's (already fractional, capped) lottery-Kelly fraction. |
+| `max_position_fraction` | float | 0.04 | Largest stake in one token as a share of equity. |
+| `liquidity_fraction` | float | 0.02 | Largest stake as a share of the pool's real SOL liquidity (bounds our own impact). |
+| `max_family_fraction` | float | 0.08 | Largest combined stake in one creator family as a share of equity. |
+| `max_total_exposure` | float | 0.3 | Largest share of equity in open positions at once. |
+| `max_positions` | int | 12 | Largest number of concurrent positions. |
+| `min_stake_sol` | float | 0.02 | Stakes below this are dropped (fees and rent dominate). |
+| `uncertainty_scale` | float | 0.15 | Epistemic spread at which the stake is discounted by a factor e. |
+| `max_drawdown` | float | 0.35 | Drawdown from peak equity at which new stakes reach zero (linear governor). |
+| `daily_loss_stop` | float | 0.15 | No new positions for the rest of the day after losing this share of the day's opening equity. |
 
 ## Solana features
 
@@ -3794,6 +3962,7 @@ SolanaBrain — the complete Solana ML module behind one small API.
 - `red_flags(f: 'dict[str, float]', pred: 'NeuralPrediction', risk: 'dict[str, float]') -> 'list[str]'` — Human-readable explanations of on-chain red flags present in the features.
 - **class `SolanaAssessment`** — Everything the ML module knows about one token right now (no trade decision).
 - **class `SolanaBrain`** — Live Solana intelligence over one workspace: causal market, neural ensemble, risk, edge and moonshot models.
+  - `allocate(self, equity_sol: 'float', open_stakes: 'dict[str, float] | None' = None, peak_equity_sol: 'float | None' = None, cfg: 'AllocatorConfig | None' = None, max_idle_seconds: 'float' = 120.0) -> 'list[Allocation]'` — Recommended stakes for the current moonshot opportunities (advice, never orders).
   - `assess(self, mint: 'str') -> 'SolanaAssessment'` — Assess one token at the current market time (see :meth:`assess_many`).
   - `assess_active(self, max_idle_seconds: 'float' = 120.0, min_age_seconds: 'float | None' = None) -> 'list[SolanaAssessment]'` — Assess every token that traded within ``max_idle_seconds`` and is at least ``min_age_seconds`` old (default ``cfg.min_token_age_seconds``).
   - `assess_many(self, mints: 'list[str]') -> 'list[SolanaAssessment]'` — Assess several tokens at the current market time with one batched forward pass.
@@ -3811,10 +3980,53 @@ SolanaBrain — the complete Solana ML module behind one small API.
   - `resolve(self) -> 'int'` — Label every assessment whose longest horizon has elapsed and learn from it.
   - `save(self) -> 'None'` — Checkpoint the workspace: learner, event history (or the pickled market when streaming), moonshot buffer, risk samples and ``solana_state.json``.
 
+### `nardis_neural.solana.capital`
+
+Capital engine: sizing under Kelly, uncertainty, liquidity, correlation and drawdown limits, event-driven bankroll simulation with a bootstrap risk profile, and multiple-testing-aware edge statistics (Deflated Sharpe Ratio, Probability of Backtest Overfitting). Advice only.
+
+
+### `nardis_neural.solana.capital.allocator`
+
+Capital allocator: from per-token signals to a sized, constrained book (advice only).
+
+- **class `Allocation`** — Recommended stake for one signal and the binding reason when it was cut.
+- **class `AllocatorConfig`** — Sizing and risk limits of the capital allocator.
+- **class `BookState`** — Equity, open stakes and the governors' reference points.
+- **class `CapitalAllocator`** — Sizes candidate tickets under Kelly, uncertainty, liquidity, correlation and drawdown limits.
+  - `allocate(self, signals: 'list[Signal]', state: 'BookState') -> 'list[Allocation]'` — Stakes for ``signals`` (best expected edge first) given the current book.
+  - `base_fraction(self, s: 'Signal') -> 'float'` — Uncapped fraction of equity for one signal before portfolio limits.
+  - `governor(self, state: 'BookState') -> 'float'` — Stake multiplier from the drawdown governor (1 at the peak, 0 at ``max_drawdown``).
+- **class `Signal`** — What the allocator needs to know about one candidate ticket.
+
+### `nardis_neural.solana.capital.bankroll`
+
+Event-driven bankroll simulation of a stream of tickets, and its bootstrap risk profile.
+
+- `bootstrap_book(tickets: 'list[TicketRecord]', make_allocator: 'Any', initial_equity: 'float' = 100.0, flat_stake: 'float | None' = None, draws: 'int' = 300, ruin_level: 'float' = 0.5, seed: 'int' = 0) -> 'dict[str, float]'` — Risk profile over alternative histories: outcomes are resampled (with replacement) onto the same schedule of signals, so luck in the ordering and in which tickets hit is randomised while the signal flow stays realistic.
+- `simulate_book(tickets: 'list[TicketRecord]', allocator: 'CapitalAllocator | None', initial_equity: 'float' = 100.0, flat_stake: 'float | None' = None) -> 'dict[str, Any]'` — Run the book through time. ``allocator=None`` with ``flat_stake`` stakes a fixed amount.
+- **class `TicketRecord`** — One historical ticket: the signal at entry and the executable result.
+
+### `nardis_neural.solana.capital.overfit`
+
+Is the backtest edge real? Multiple-testing-aware statistics.
+
+- `deflated_sharpe(returns: 'F64', n_trials: 'int', trial_sharpes: 'F64 | None' = None) -> 'dict[str, float]'` — Deflated Sharpe Ratio of ``returns`` after ``n_trials`` strategies were tried.
+- `expected_max_sharpe(n_trials: 'int', sharpe_variance: 'float') -> 'float'` — Expected maximum Sharpe ratio of ``n_trials`` independent unskilled strategies.
+- `probability_of_backtest_overfitting(performance: 'F64', blocks: 'int' = 8) -> 'dict[str, Any]'` — PBO by combinatorially symmetric cross-validation.
+- `sharpe(returns: 'F64') -> 'float'` — Per-observation Sharpe ratio (mean / sample standard deviation); 0 when undefined.
+
+### `nardis_neural.solana.capital.research`
+
+Capital research: turn a research test period into bankroll and overfitting evidence.
+
+- `capital_report(tickets: 'list[TicketRecord]', config_returns: 'dict[str, F64]', chosen: 'str', flat_stake: 'float', initial_equity: 'float' = 100.0, allocator: 'AllocatorConfig | None' = None, draws: 'int' = 300, pbo_blocks: 'int' = 8, haircuts: 'tuple[float, ...]' = (0.6, 0.35), aggressive_fraction: 'float' = 0.05) -> 'dict[str, Any]'` — Flat vs allocator bankroll, bootstrap risk, DSR of ``chosen`` and PBO across configs.
+- `ticket_records(t_entry: 'F64', mints: 'npt.NDArray[np.str_]', t_exit: 'F64', multiple: 'F64', expected: 'F64', kelly: 'F64', epistemic: 'F64', liquidity: 'F64', family: 'list[str]', trust: 'F64 | None' = None) -> 'list[TicketRecord]'` — Pack per-ticket arrays into :class:`TicketRecord` objects.
+
 ### `nardis_neural.solana.cli`
 
 ``nardis-neural solana …`` commands.
 
+- `allocate(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace')]", equity: "Annotated[float, typer.Option('--equity', help='current bankroll in SOL')]", peak: "Annotated[float | None, typer.Option('--peak', help='peak bankroll in SOL (drawdown governor)')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Recommended stakes for the current moonshot opportunities (advice only, never orders).
 - `assess(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace directory')]", mint: "Annotated[str | None, typer.Option('--mint', help='token mint to assess (default: all recently active tokens)')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Assess token(s) at the workspace's current market time.
 - `backfill(out: "Annotated[Path, typer.Option('--out', '-o', help='event directory (Parquet tables)')]", rpc: 'RpcOpt' = None, limit: "Annotated[int, typer.Option('--limit', help='max signatures per program')]" = 1000, raw: "Annotated[Path | None, typer.Option('--raw', help='also save raw transactions as JSONL')]" = None) -> 'None'` — Fetch recent pump.fun / PumpSwap history over RPC (read-only) and decode it.
 - `bootstrap(events: "Annotated[Path, typer.Option('--events', '-e', help='historical event directory (Parquet tables)')]", workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace directory to create')]", solana_config: 'SolCfg' = None, config: 'BaseCfg' = None, epochs: "Annotated[int | None, typer.Option('--epochs', help='training epochs (default: from config)')]" = None, profile: "Annotated[str | None, typer.Option('--profile', help='auto | cpu-lite | cpu | gpu | gpu-frontier')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Train the neural ensemble + risk model from history and create a Solana workspace.
@@ -3954,6 +4166,7 @@ Forward-test ledger: what the ML signals would have earned, recorded as they fir
   - `save(self) -> 'None'` — Write the ledger (open and closed tickets) and its summary as JSON.
   - `settle(self, market: 'SolanaMarket', now: 'float', force: 'bool' = False) -> 'int'` — Settle tickets whose run is over (or all of them with ``force``).
   - `summary(self) -> 'dict[str, Any]'` — Realised ticket statistics and how well the entry signals ranked the outcomes.
+  - `track_record(self, min_tickets: 'int' = 10) -> 'float'` — Realised / predicted payoff of settled tickets (1.0 until ``min_tickets`` have settled).
 - **class `Ticket`** — One paper ticket and the signals it was opened on.
 
 ### `nardis_neural.solana.hawkes`
@@ -4403,7 +4616,7 @@ Transparent PyTorch training engine.
 
 ## Test inventory
 
-200 test functions (some are parametrised over devices, experts or formats).
+205 test functions (some are parametrised over devices, experts or formats).
 
 ### `tests/test_cli.py`
 
@@ -4609,6 +4822,16 @@ End-to-end Solana brain: bootstrap from history → stream live events → asses
 - `test_live_loop_assess_resolve_learn`
 - `test_flags_surface_red_flags`
 - `test_solana_cli_cycle`
+
+### `tests/test_solana_capital.py`
+
+Capital engine: overfitting statistics, allocator limits and bankroll arithmetic.
+
+- `test_deflated_sharpe_punishes_the_best_of_many_noise_trials`
+- `test_pbo_is_high_for_noise_and_low_for_a_real_edge`
+- `test_allocator_enforces_every_limit`
+- `test_uncertainty_trust_track_record_and_governors_shrink_stakes`
+- `test_bankroll_locks_capital_and_compounds_exactly`
 
 ### `tests/test_solana_edge.py`
 
