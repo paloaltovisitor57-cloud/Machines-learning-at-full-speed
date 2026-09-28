@@ -41,6 +41,8 @@ class GuardConfig(BaseModel):
     """Veto when the out-of-distribution score of the market state is at least this."""
     veto_out_of_range_share: float = Field(default=0.25, gt=0, le=1)
     """Veto when this share of the inputs lies outside anything seen in training."""
+    veto_top_cluster_share: float = Field(default=0.25, gt=0, le=1)
+    """Veto when one hidden multi-wallet funding cluster (not the creator's) holds this much supply."""
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,7 @@ def assess_manipulation(
         "bundle": _ramp(f["bundle_share"], 0.03, 0.2, 0.2),
         "creator_cluster": _ramp(f["creator_cluster_share"], 0.05, 0.3, 0.2),
         "rug_wallets": _ramp(f["rug_associated_share"], 0.05, 0.4, 0.2),
+        "hidden_cluster": _ramp(f.get("top_cluster_share", 0.0), 0.05, cfg.veto_top_cluster_share, 0.2),
         "concentration": _ramp(f["top10_share"], 0.35, 0.8, 0.3),
         "dev_selling": _ramp(f["dev_sold_fraction"], 0.2, 0.9, 0.3),
         "ood": math.exp(-max(0.0, ood_score - 1.0) / 2.0),
@@ -105,6 +108,8 @@ def assess_manipulation(
         vetoes.append(f"creator cluster holds {f['creator_cluster_share']:.0%}")
     if f["bot_share_60s"] >= cfg.veto_bot_share:
         vetoes.append(f"wash trading: bots are {f['bot_share_60s']:.0%} of volume")
+    if f.get("top_cluster_share", 0.0) >= cfg.veto_top_cluster_share:
+        vetoes.append(f"one hidden wallet cluster holds {f['top_cluster_share']:.0%} of supply")
     if ood_score >= cfg.veto_ood_score:
         vetoes.append(f"market state far out of distribution (ood={ood_score:.1f})")
     if out_of_range_share >= cfg.veto_out_of_range_share:

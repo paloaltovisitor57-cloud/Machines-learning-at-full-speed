@@ -280,8 +280,20 @@ class SolanaFeatureBuilder:
         )
         first = np.asarray(list(log.first_buy_slot)[:20], dtype=np.int64)
         out["early_buyer_tail_skill"] = float(wallets.tail_skills(first).mean()) if len(first) else 0.0
-        clusters = len({wallets.root(w) for w in holders})
+        roots = {w: wallets.root(w) for w in holders}
+        clusters = len(set(roots.values()))
         out["holder_clusters_log"] = float(np.log1p(clusters))
+        # staged insiders: several wallets of one hidden funding cluster (relay hops included,
+        # clusters join transitively) jointly holding a large slice of supply
+        creator_root = wallets.root(log.creator_id)
+        size: dict[int, int] = {}
+        held: dict[int, float] = {}
+        for w, r in roots.items():
+            if r != creator_root:
+                size[r] = size.get(r, 0) + 1
+                held[r] = held.get(r, 0.0) + holders[w]
+        multi = [held[r] for r in held if size[r] >= 2]
+        out["top_cluster_share"] = max(multi) / log.launch.supply if multi else 0.0
         out["holder_cluster_ratio"] = clusters / len(holders) if holders else 1.0
         return out
 

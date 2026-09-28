@@ -1,7 +1,7 @@
 # Tape Transformer (`nardis_neural.solana.tape`)
 
 Every other model in this repository sees a token through aggregates: per-minute bars and
-67 summary features. That throws away the two things that decide a memecoin launch: **who**
+68 summary features. That throws away the two things that decide a memecoin launch: **who**
 is trading, and **in what order**. The Tape Transformer reads the raw trade tape directly.
 
 ```mermaid
@@ -12,7 +12,7 @@ flowchart LR
         R1[recency embedding]
     end
     TAPE --> ENC[pre-LayerNorm Transformer<br/>+ learned summary token<br/>padding masked]
-    CUR[67 current features] --> MLP[MLP]
+    CUR[68 current features] --> MLP[MLP]
     ENC --> FUSE[fuse: summary ‖ mean ‖ current]
     MLP --> FUSE
     FUSE --> TAIL[tail head<br/>mixture of log-logistics<br/>P ≥ 2x … 1000x]
@@ -49,7 +49,7 @@ that has only seen the past.
 * A learned **summary token** is appended, and a 2-layer pre-LayerNorm Transformer (d = 64,
   4 heads) attends over the tape with padding masked. The summary token keeps an empty
   tape well defined.
-* The summary token, the masked mean of the trades and an MLP of the 67 current features
+* The summary token, the masked mean of the trades and an MLP of the current features
   are fused into one vector.
 * **Tail head**: a mixture of logistics on `log` peak multiple. It uses the same censored
   likelihood, per-level calibration, expected ladder payoff and lottery Kelly as the
@@ -113,7 +113,7 @@ How to read this:
   in the repository produces an exit signal.
 * **The whole distribution fits better** (lower NLL), but the tape model **ranks the far
   tail worse** than the aggregate model. Runners are rare, and a tape of the last 96 trades
-  sees less of a token's history than the 67 aggregate features. For picking moonshot
+  sees less of a token's history than the aggregate features. For picking moonshot
   entries, keep using the tail model's `chase_score`; use the tape for exits.
 * In this generous simulator every token cleared the "expected payoff ≥ ticket" rule for
   both models, so the one-ticket-per-token comparison could not separate them.

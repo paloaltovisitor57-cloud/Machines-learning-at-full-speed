@@ -110,3 +110,25 @@ def test_market_heat_windows() -> None:
     assert f["market_volume_300s_log"] == pytest.approx(np.log1p(10.0))
     tape.launch("LATE", T0 + 5000, "d9")
     assert _features(tape, "LATE")["market_launches_600s_log"] == pytest.approx(np.log1p(1))
+
+
+def test_staged_insiders_behind_a_relay_are_seen_and_distrusted() -> None:
+    from nardis_neural.solana.moonshot.guard import assess_manipulation
+
+    tape = Tape()
+    tape.fund(T0 - 7200, "trapfunder", "relay")
+    for i in range(5):  # two hops from the funder, nothing links them to the creator
+        tape.fund(T0 - 3600 + i, "relay", f"staged{i}")
+    tape.launch("TRAP", T0, "clean_dev")
+    for i in range(5):
+        tape.buy("TRAP", T0 + 5 + i, f"staged{i}", 3.0)
+    for i in range(30):
+        tape.buy("TRAP", T0 + 20 + i, f"retail{i}", 0.3)
+    f = _features(tape, "TRAP")
+    assert f["creator_cluster_share"] == pytest.approx(0.0), "the creator looks clean"
+    assert f["top_cluster_share"] > 0.1, "but one hidden cluster holds a big slice"
+    clean = assess_manipulation(f | {"top_cluster_share": 0.0}, None, 0.0, 0.0, 0.0)
+    staged = assess_manipulation(f, None, 0.0, 0.0, 0.0)
+    assert staged.trust < 0.5 * clean.trust
+    heavy = assess_manipulation(f | {"top_cluster_share": 0.3}, None, 0.0, 0.0, 0.0)
+    assert any("hidden wallet cluster" in v for v in heavy.vetoes)

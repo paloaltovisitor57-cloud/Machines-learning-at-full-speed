@@ -21,7 +21,7 @@ flowchart LR
     T --> WI[WalletIntel<br/>funding clusters · hubs]
     MK -->|buys queued, resolved after horizon| REP[Wallet reputations<br/>Beta posterior · rug marks]
     WI --> REP
-    MK & REP --> FB[SolanaFeatureBuilder<br/>67 named features · 1s/5s/30s bars · wallet graph]
+    MK & REP --> FB[SolanaFeatureBuilder<br/>68 named features · 1s/5s/30s bars · wallet graph]
     FB --> NE[Neural ensemble<br/>Transformer · GRU · TCN · MLP · Graph + MoE]
     NE --> EMB[MarketStateEmbedding]
     EMB & FB --> RK[Risk ensemble<br/>P rug · P graduation · P dev dump]
@@ -59,7 +59,7 @@ canonical order (launch → transfer → migration → LP → swap at equal time
 
 ## 3. Features (`features.py`)
 
-67 named current-state features (`CURRENT_FEATURES`):
+68 named current-state features (`CURRENT_FEATURES`):
 
 | Group | Features |
 |---|---|
@@ -72,7 +72,7 @@ canonical order (launch → transfer → migration → LP → swap at equal time
 | Token safety | mint and freeze authority revoked, LP burned fraction |
 | Edge dynamics | bonding-curve velocity, holder growth, smart-buyer share, top-holder sell share, buy acceleration |
 | Runner skill | share of the last minute's buy SOL from wallets with proven **runner skill**, #runner-skilled buyers in 5 min, mean runner skill of the first 20 buyers |
-| Sybil-resistant counts | #holder funding clusters, clusters ÷ holders, #buyer clusters per minute |
+| Sybil-resistant counts | #holder funding clusters, clusters ÷ holders, #buyer clusters per minute, **supply held by the largest hidden multi-wallet cluster** (not the creator's; relay hops included) |
 | Creator family | prior launches, best prior peak multiple, prior rug rate, prior graduation rate, time since the family's last launch |
 | Market heat | launches in 10 min, graduations in 1 h, total swap volume in 5 min (all tokens) |
 
@@ -166,6 +166,13 @@ An agent-based simulator used for tests and demos. It is not a market model.
   launch price). Runners are off in the `default` mix; the `degen` preset
   (`solana simulate --market degen`, or `--runners 0.1`) is mostly duds and rugs with a few
   percent runners, for the [moonshot engine](MOONSHOT.md).
+  The `adversarial` preset adds **traps**: launches staged to look like early runners. A
+  clean, aged creator; insiders funded through a relay wallet (two hops from the funder,
+  hours before launch) who trickle in over the first minute; bot wash volume; runner-like
+  demand; then an insider dump 5 to 30 minutes in. At three minutes, traps look like
+  runners on every aggregate feature, including clusters ÷ holders (0.93 vs 0.94). What
+  gives them away is `top_cluster_share`: 10 % of supply in one hidden cluster, against
+  0.4 to 2.7 % for every other kind of launch (70-launch sample, seed 5).
 * **Ambiguity on purpose**: 40 % of rugs are *stealth* (aged exchange-funded wallets,
   small crews trickling in over the first minute, authorities revoked); 25 % of honest
   launches are *decoys* (the dev's co-funded friends buy in the launch slots); honest

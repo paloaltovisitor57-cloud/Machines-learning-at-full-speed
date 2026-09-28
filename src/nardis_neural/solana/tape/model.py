@@ -8,7 +8,7 @@ them in the wallet table; runs on a laptop CPU, an M1 or a small cloud VM):
   padding changes nothing);
 * a learned **summary token** is appended and a pre-LayerNorm Transformer encoder attends
   over the tape (padding masked; the summary token keeps empty tapes well defined);
-* the summary token, the masked mean of the trades and an MLP of the 67 current features
+* the summary token, the masked mean of the trades and an MLP of the current features
   are fused into one vector;
 * two heads:
 

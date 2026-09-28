@@ -45,11 +45,22 @@ from nardis_neural.solana.events import (
 )
 from nardis_neural.solana.market import EventStore
 
-ARCHETYPES: tuple[str, ...] = ("organic", "graduate", "rug", "dud", "wash", "runner")
+ARCHETYPES: tuple[str, ...] = ("organic", "graduate", "rug", "dud", "wash", "runner", "trap")
 MARKET_PRESETS: dict[str, dict[str, float]] = {
     "default": {"organic": 0.3, "graduate": 0.15, "rug": 0.3, "dud": 0.15, "wash": 0.1, "runner": 0.0},
     # most launches go nowhere, a few percent become multi-hour runners
     "degen": {"organic": 0.12, "graduate": 0.06, "rug": 0.3, "dud": 0.42, "wash": 0.04, "runner": 0.06},
+    # degen plus traps: launches staged to look like early runners (insiders funded through a
+    # relay wallet, wash volume, runner-like demand) that dump after the entry window
+    "adversarial": {
+        "organic": 0.12,
+        "graduate": 0.06,
+        "rug": 0.2,
+        "dud": 0.4,
+        "wash": 0.04,
+        "runner": 0.06,
+        "trap": 0.12,
+    },
 }
 
 
@@ -219,6 +230,35 @@ class LaunchSimulator:
                 self.events.append(
                     Transfer(t=ft, source=src, dest=wlt, sol_amount=float(self.rng.uniform(2, 6)))
                 )
+        elif arch == "trap":
+            stealth = True  # insiders trickle in over the first minute instead of bundling
+            crew = [f"staged_{s.mint_prefix}_{k}_{j}" for j in range(int(self.rng.integers(4, 8)))]
+            relay = f"relay_{s.mint_prefix}_{k}"
+            self.events.append(
+                Transfer(
+                    t=t0 - float(self.rng.uniform(6, 24)) * 3600,
+                    source=f"trapfunder_{k % 3}",
+                    dest=relay,
+                    sol_amount=float(self.rng.uniform(15, 40)),
+                )
+            )
+            for i, wlt in enumerate(crew):  # two hops away from the funder, hours before launch
+                self.events.append(
+                    Transfer(
+                        t=t0 - float(self.rng.uniform(1, 6)) * 3600 - i,
+                        source=relay,
+                        dest=wlt,
+                        sol_amount=float(self.rng.uniform(2, 5)),
+                    )
+                )
+            self.events.append(  # a clean-looking creator: aged, exchange-funded
+                Transfer(
+                    t=t0 - float(self.rng.uniform(5, 90)) * 86400,
+                    source="cex_hot_wallet",
+                    dest=creator,
+                    sol_amount=float(self.rng.uniform(2, 20)),
+                )
+            )
         else:
             if self.rng.random() < s.decoy_fraction:
                 friends = [f"friend_{s.mint_prefix}_{k}_{j}" for j in range(int(self.rng.integers(2, 5)))]
@@ -254,6 +294,7 @@ class LaunchSimulator:
             "dud": (300, 900),
             "wash": (900, 2400),
             "runner": (3 * 3600, 5 * 3600),
+            "trap": (1800, 3600),
         }[arch]
         tok = _Token(
             mint=mint,
@@ -269,6 +310,8 @@ class LaunchSimulator:
             dump_at=t0 + float(self.rng.uniform(60, 420)),
             clock=t0,
         )
+        if arch == "trap":  # the dump comes after the moonshot entry window has opened
+            tok.dump_at = t0 + float(self.rng.uniform(300, 1800))
         mint_live = (arch == "rug" and not stealth and self.rng.random() < 0.5) or self.rng.random() < 0.03
         self.events.append(
             TokenLaunch(
@@ -331,7 +374,15 @@ class LaunchSimulator:
         sniper_exit = {w: t0 + float(rng.uniform(8, 90)) for w in tok.holdings if w.startswith("sniper")}
         smart_in = (
             rng.random()
-            < {"organic": 0.7, "graduate": 0.95, "rug": 0.1, "dud": 0.15, "wash": 0.05, "runner": 0.95}[arch]
+            < {
+                "organic": 0.7,
+                "graduate": 0.95,
+                "rug": 0.1,
+                "dud": 0.15,
+                "wash": 0.05,
+                "runner": 0.95,
+                "trap": 0.1,
+            }[arch]
         )
         # runner virality is heavy-tailed: most stall at tens of x, a few go four figures
         # (drawn only for runners so default simulations keep their random stream)
@@ -351,6 +402,9 @@ class LaunchSimulator:
                 lam_s = 0.2 if t < tok.dump_at else 1.2 * np.exp(-(t - tok.dump_at) / 60)
             elif arch == "dud":
                 lam_b, lam_s = 0.12 * np.exp(-age / 400), 0.08
+            elif arch == "trap":  # runner-like demand until the insiders dump
+                lam_b = 2.2 if t < tok.dump_at else 0.05
+                lam_s = 0.3 if t < tok.dump_at else 1.2 * np.exp(-(t - tok.dump_at) / 60)
             elif arch == "runner":  # viral: demand compounds for hours after graduation
                 if not tok.migrated:
                     lam_b, lam_s = 2.5, 0.35
@@ -400,12 +454,14 @@ class LaunchSimulator:
                 gain = tok.pool.price / tok.entry_price[w] - 1
                 if gain > 0.4 or gain < -0.25 or (arch == "rug" and t > tok.dump_at - 20):
                     self._swap(tok, t + 0.3, w, False, tok.holdings[w], *self._fee("smart"))
-            if arch == "wash" and rng.random() < 0.8:
+            if (arch == "wash" and rng.random() < 0.8) or (
+                arch == "trap" and t < tok.dump_at and rng.random() < 0.6
+            ):
                 bot = str(rng.choice(self.bots[:4]))
                 size = float(rng.uniform(0.5, 2.0))
                 self._swap(tok, t + 0.1, bot, True, size, *self._fee("bot"))
                 self._swap(tok, t + 0.5, bot, False, tok.holdings.get(bot, 0.0), *self._fee("bot"))
-            if arch == "rug" and not dumped and t >= tok.dump_at:
+            if arch in ("rug", "trap") and not dumped and t >= tok.dump_at:
                 dumped = True
                 for j, w in enumerate([tok.creator, *tok.crew]):
                     self._swap(tok, t + 0.1 * j, w, False, tok.holdings.get(w, 0.0), *self._fee("crew"))

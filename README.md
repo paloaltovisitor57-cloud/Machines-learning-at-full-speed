@@ -95,7 +95,7 @@ flowchart TB
 | Continual learning | 3-pool replay (recent FIFO, historical reservoir, protected rare events), 5 sampling strategies, candidate cloning, distillation, EWC, full retraining with configurable weights |
 | Lifecycle | immutable checkpoints, champion/candidate/challenger/retired/failed registry with audit log, shadow mode, 10-gate promotion, manual and optional automatic rollback |
 | Representation | self-supervised pretraining (masked timestep, masked feature, contrastive), embedding export to Parquet/NumPy, KMeans / GMM / HDBSCAN regime discovery |
-| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 191 test functions |
+| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 194 test functions |
 
 ## Quick start
 
@@ -367,7 +367,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │                            edge/ (barriers · model · trees · backtest · research)
 │                            moonshot/ (labels · tail · guard · online · research)
 │                            tape/ (features · dataset · model · research)
-└── tests/                   191 test functions incl. synthetic end-to-end pipeline
+└── tests/                   194 test functions incl. synthetic end-to-end pipeline
 ```
 
 ## Testing & quality gates
@@ -433,9 +433,9 @@ The trading system never touches model internals.
   (sybil / bundle discovery) and Beta-posterior reputations learned online *only* from
   outcomes that have already resolved, plus rug attribution to creator clusters. A second,
   **runner-specific skill** credits wallets that buy early into tokens that later run 10x;
-- **67 named on-chain features**: holder concentration, dev / sniper / bundle /
+- **68 named on-chain features**: holder concentration, dev / sniper / bundle /
   creator-cluster exposure, fresh wallets, smart-money flow, runner-skilled buyers,
-  sybil-resistant counts per funding cluster, the **creator family's track record** (prior
+  sybil-resistant counts per funding cluster, the supply held by a hidden multi-wallet cluster, the **creator family's track record** (prior
   launches, best peak, rug and graduation rates), market-wide heat, bots, priority fees and
   Jito tips, authorities, liquidity. Also 1 s / 5 s / 30 s trade bars with forward-filled
   prices, and a live wallet→token / funding / cluster **graph** for the graph expert;
@@ -521,7 +521,7 @@ that runs 100x to 1000x. See [docs/MOONSHOT.md](docs/MOONSHOT.md).
 - the last 96 trades, each with 18 features (side, size, timing, price move, fees, and the
   trader's skill, runner skill, cluster, creator link and freshness as known now), plus a
   **learned wallet embedding** keyed by a stable hash of the address;
-- a small pre-LayerNorm **Transformer** with a summary token, fused with the 67 current
+- a small pre-LayerNorm **Transformer** with a summary token, fused with the 68 current
   features. Frequency gating and wallet dropout stop the wallet table from memorising noise;
 - two heads: the censored power-law **tail** (P ≥ 2x … 1000x) and a discrete-time **collapse
   hazard** (P value halves within 1 min / 5 min / 15 min / 1 h), which is the exit signal;
@@ -1237,7 +1237,7 @@ flowchart LR
     T --> WI[WalletIntel<br/>funding clusters · hubs]
     MK -->|buys queued, resolved after horizon| REP[Wallet reputations<br/>Beta posterior · rug marks]
     WI --> REP
-    MK & REP --> FB[SolanaFeatureBuilder<br/>67 named features · 1s/5s/30s bars · wallet graph]
+    MK & REP --> FB[SolanaFeatureBuilder<br/>68 named features · 1s/5s/30s bars · wallet graph]
     FB --> NE[Neural ensemble<br/>Transformer · GRU · TCN · MLP · Graph + MoE]
     NE --> EMB[MarketStateEmbedding]
     EMB & FB --> RK[Risk ensemble<br/>P rug · P graduation · P dev dump]
@@ -1275,7 +1275,7 @@ canonical order (launch → transfer → migration → LP → swap at equal time
 
 ### 3. Features (`features.py`)
 
-67 named current-state features (`CURRENT_FEATURES`):
+68 named current-state features (`CURRENT_FEATURES`):
 
 | Group | Features |
 |---|---|
@@ -1288,7 +1288,7 @@ canonical order (launch → transfer → migration → LP → swap at equal time
 | Token safety | mint and freeze authority revoked, LP burned fraction |
 | Edge dynamics | bonding-curve velocity, holder growth, smart-buyer share, top-holder sell share, buy acceleration |
 | Runner skill | share of the last minute's buy SOL from wallets with proven **runner skill**, #runner-skilled buyers in 5 min, mean runner skill of the first 20 buyers |
-| Sybil-resistant counts | #holder funding clusters, clusters ÷ holders, #buyer clusters per minute |
+| Sybil-resistant counts | #holder funding clusters, clusters ÷ holders, #buyer clusters per minute, **supply held by the largest hidden multi-wallet cluster** (not the creator's; relay hops included) |
 | Creator family | prior launches, best prior peak multiple, prior rug rate, prior graduation rate, time since the family's last launch |
 | Market heat | launches in 10 min, graduations in 1 h, total swap volume in 5 min (all tokens) |
 
@@ -1382,6 +1382,13 @@ An agent-based simulator used for tests and demos. It is not a market model.
   launch price). Runners are off in the `default` mix; the `degen` preset
   (`solana simulate --market degen`, or `--runners 0.1`) is mostly duds and rugs with a few
   percent runners, for the [moonshot engine](docs/MOONSHOT.md).
+  The `adversarial` preset adds **traps**: launches staged to look like early runners. A
+  clean, aged creator; insiders funded through a relay wallet (two hops from the funder,
+  hours before launch) who trickle in over the first minute; bot wash volume; runner-like
+  demand; then an insider dump 5 to 30 minutes in. At three minutes, traps look like
+  runners on every aggregate feature, including clusters ÷ holders (0.93 vs 0.94). What
+  gives them away is `top_cluster_share`: 10 % of supply in one hidden cluster, against
+  0.4 to 2.7 % for every other kind of launch (70-launch sample, seed 5).
 * **Ambiguity on purpose**: 40 % of rugs are *stealth* (aged exchange-funded wallets,
   small crews trickling in over the first minute, authorities revoked); 25 % of honest
   launches are *decoys* (the dev's co-funded friends buy in the launch slots); honest
@@ -1545,7 +1552,7 @@ is real.
 
 ```mermaid
 flowchart LR
-    H[(event history)] --> DS[causal snapshots<br/>67 features · bars · graph]
+    H[(event history)] --> DS[causal snapshots<br/>68 features · bars · graph]
     H --> TB[executable triple-barrier outcomes<br/>latency · impact · fees · TP / SL / time]
     DS --> WF[walk-forward retraining<br/>neural ensemble + risk model]
     WF --> OOF[out-of-fold forecasts<br/>= what a live system would have seen]
@@ -1586,7 +1593,7 @@ The inputs are:
 * the neural forecasts per horizon: mean, standard deviation, z-score, event
   probabilities, max upside and drawdown, volatility;
 * uncertainty: epistemic, aleatoric, OOD, disagreement;
-* expert gate weights, P(rug / graduation / dev dump), and all raw on-chain features (53 when the results below were measured, 67 now).
+* expert gate weights, P(rug / graduation / dev dump), and all raw on-chain features (53 when the results below were measured, 68 now).
 
 It is a bootstrap ensemble of MLPs with two heads:
 
@@ -1735,7 +1742,7 @@ without supervision.
 * **Deep ensemble**: members are fitted on token-bootstrap resamples, with early stopping
   on the most recently launched tokens. The predictive survival is the members' average,
   and their spread is the epistemic uncertainty.
-* **Inputs**: `raw` uses the 67 on-chain features and is fast on any CPU. `neural` adds
+* **Inputs**: `raw` uses the 68 on-chain features and is fast on any CPU. `neural` adds
   the walk-forward out-of-fold neural forecasts, uncertainty, expert gates and risk
   probabilities, the same stack the edge model uses.
 
@@ -1839,11 +1846,14 @@ from being walked into a trap, and each of them can only **lower** its optimism:
    * live mint or freeze authority, and unburned LP;
    * wash trading, bundled supply, creator-cluster supply and rug-linked wallets;
    * holder concentration and dev selling;
+   * supply held by a hidden multi-wallet funding cluster that is not the creator's, which
+     catches staged insiders funded through relay wallets;
    * the neural OOD score, clamped inputs and ensemble disagreement.
 
    **Hard vetoes** zero the chase score. They fire on P(rug) ≥ 60 %, a live mint or freeze
-   authority, bundled supply ≥ 20 %, a creator cluster holding ≥ 30 %, bots making up
-   ≥ 80 % of volume, OOD ≥ 4, or ≥ 25 % of inputs outside the training range. Each veto
+   authority, one hidden wallet cluster holding ≥ 25 % of supply, bundled supply ≥ 20 %, a
+   creator cluster holding ≥ 30 %, bots making up ≥ 80 % of volume, OOD ≥ 4, or ≥ 25 % of
+   inputs outside the training range. Each veto
    appears in `flags` as a readable reason. The factors are hand-set and monotone: more red
    flags never raise trust. Thresholds are in `GuardConfig` (`brain.guard`).
 
@@ -1871,7 +1881,7 @@ and how much of a bankroll such a lottery ticket can justify.
 ## Tape Transformer (`nardis_neural.solana.tape`)
 
 Every other model in this repository sees a token through aggregates: per-minute bars and
-67 summary features. That throws away the two things that decide a memecoin launch: **who**
+68 summary features. That throws away the two things that decide a memecoin launch: **who**
 is trading, and **in what order**. The Tape Transformer reads the raw trade tape directly.
 
 ```mermaid
@@ -1882,7 +1892,7 @@ flowchart LR
         R1[recency embedding]
     end
     TAPE --> ENC[pre-LayerNorm Transformer<br/>+ learned summary token<br/>padding masked]
-    CUR[67 current features] --> MLP[MLP]
+    CUR[68 current features] --> MLP[MLP]
     ENC --> FUSE[fuse: summary ‖ mean ‖ current]
     MLP --> FUSE
     FUSE --> TAIL[tail head<br/>mixture of log-logistics<br/>P ≥ 2x … 1000x]
@@ -1919,7 +1929,7 @@ that has only seen the past.
 * A learned **summary token** is appended, and a 2-layer pre-LayerNorm Transformer (d = 64,
   4 heads) attends over the tape with padding masked. The summary token keeps an empty
   tape well defined.
-* The summary token, the masked mean of the trades and an MLP of the 67 current features
+* The summary token, the masked mean of the trades and an MLP of the current features
   are fused into one vector.
 * **Tail head**: a mixture of logistics on `log` peak multiple. It uses the same censored
   likelihood, per-level calibration, expected ladder payoff and lottery Kelly as the
@@ -1983,7 +1993,7 @@ How to read this:
   in the repository produces an exit signal.
 * **The whole distribution fits better** (lower NLL), but the tape model **ranks the far
   tail worse** than the aggregate model. Runners are rare, and a tape of the last 96 trades
-  sees less of a token's history than the 67 aggregate features. For picking moonshot
+  sees less of a token's history than the aggregate features. For picking moonshot
   entries, keep using the tail model's `chase_score`; use the tape for exits.
 * In this generous simulator every token cleared the "expected payoff ≥ ticket" rule for
   both models, so the one-ticket-per-token comparison could not separate them.
@@ -2413,6 +2423,20 @@ Paper-ticket scorecard of the ML signals (forward test recorded during stream / 
 |---|---|---|---|
 | `--workspace`, `-w` | path | required | Solana workspace |
 
+### `nardis-neural solana research-suite`
+
+Run the moonshot (and optionally tape) research on several independent simulated markets
+and report every metric as mean ± sd across seeds.
+
+| option | type | default | description |
+|---|---|---|---|
+| `--seeds` | str | "7,19,23" | comma-separated simulator seeds |
+| `--market` | str | "degen" | archetype mix: default or degen |
+| `--tokens` | int | 150 | launches per simulated market |
+| `--hours` | float | 8.0 | simulated hours per market |
+| `--tape`, `--no-tape` | flag | false | also run the (slower) tape research |
+| `--out`, `-o` | path | null | write the JSON result here |
+
 
 ## Configuration
 
@@ -2701,6 +2725,7 @@ Every field, its type, its default and its description. Nested keys use dots, as
 | `veto_bot_share` | float | 0.8 | Veto when at least this share of the last 60 s's traders are bots (wash trading). |
 | `veto_ood_score` | float | 4.0 | Veto when the out-of-distribution score of the market state is at least this. |
 | `veto_out_of_range_share` | float | 0.25 | Veto when this share of the inputs lies outside anything seen in training. |
+| `veto_top_cluster_share` | float | 0.25 | Veto when one hidden multi-wallet funding cluster (not the creator's) holds this much supply. |
 
 ### Trade tape — `TapeSpec`
 
@@ -2711,7 +2736,7 @@ Every field, its type, its default and its description. Nested keys use dots, as
 
 ## Solana features
 
-### Current-state vector (67 features, in model input order)
+### Current-state vector (68 features, in model input order)
 
 | # | feature | meaning |
 |---|---|---|
@@ -2774,14 +2799,15 @@ Every field, its type, its default and its description. Nested keys use dots, as
 | 56 | `holder_clusters_log` | log1p of distinct funding clusters among holders |
 | 57 | `holder_cluster_ratio` | holder clusters / holders (1 = independent wallets, low = sybil crowd) |
 | 58 | `buyer_clusters_60s_log` | log1p of distinct funding clusters among last-minute buyers |
-| 59 | `creator_prior_launches_log` | log1p of the creator family's other launches |
-| 60 | `creator_prior_best_peak_log` | log of the best peak multiple among the family's other launches |
-| 61 | `creator_prior_rug_rate` | share of the family's other launches that rugged |
-| 62 | `creator_prior_graduation_rate` | share of the family's other launches that graduated |
-| 63 | `since_creator_last_launch_log` | log1p of seconds since the family's previous launch (1e7 if none) |
-| 64 | `market_launches_600s_log` | log1p of launches across the market in the last 10 min |
-| 65 | `market_graduations_3600s_log` | log1p of graduations across the market in the last hour |
-| 66 | `market_volume_300s_log` | log1p of SOL swapped across all tokens in the last 5 min |
+| 59 | `top_cluster_share` | supply held by the largest multi-wallet funding cluster other than the creator's |
+| 60 | `creator_prior_launches_log` | log1p of the creator family's other launches |
+| 61 | `creator_prior_best_peak_log` | log of the best peak multiple among the family's other launches |
+| 62 | `creator_prior_rug_rate` | share of the family's other launches that rugged |
+| 63 | `creator_prior_graduation_rate` | share of the family's other launches that graduated |
+| 64 | `since_creator_last_launch_log` | log1p of seconds since the family's previous launch (1e7 if none) |
+| 65 | `market_launches_600s_log` | log1p of launches across the market in the last 10 min |
+| 66 | `market_graduations_3600s_log` | log1p of graduations across the market in the last hour |
+| 67 | `market_volume_300s_log` | log1p of SOL swapped across all tokens in the last 5 min |
 
 ### Trade bars (`fast` 1 s × 60, `medium` 5 s × 48, `slow` 30 s × 40)
 
@@ -2951,6 +2977,7 @@ Forecast horizons: `15s` (15 s, up ≥ 0.05, down ≥ 0.05), `60s` (60 s, up ≥
 | `guard.bundle` | guard factor `bundle` (1 = no concern; the product is trust) |
 | `guard.creator_cluster` | guard factor `creator_cluster` (1 = no concern; the product is trust) |
 | `guard.rug_wallets` | guard factor `rug_wallets` (1 = no concern; the product is trust) |
+| `guard.hidden_cluster` | guard factor `hidden_cluster` (1 = no concern; the product is trust) |
 | `guard.concentration` | guard factor `concentration` (1 = no concern; the product is trust) |
 | `guard.dev_selling` | guard factor `dev_selling` (1 = no concern; the product is trust) |
 | `guard.ood` | guard factor `ood` (1 = no concern; the product is trust) |
@@ -3582,6 +3609,7 @@ SolanaBrain — the complete Solana ML module behind one small API.
 - `init_config(out: "Annotated[Path, typer.Option('--out', '-o', help='YAML file to write')]" = PosixPath('configs/solana.yaml')) -> 'None'` — Write the default Solana configuration.
 - `moonshot_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history + champion)')]", inputs: "Annotated[str, typer.Option('--inputs', help='raw (on-chain features) or neural (walk-forward OOF stack)')]" = 'raw', size: "Annotated[float, typer.Option('--size', help='ticket size, SOL')]" = 0.5, latency: "Annotated[float, typer.Option('--latency', help='entry/exit latency, seconds')]" = 1.0, horizon_hours: "Annotated[float, typer.Option('--horizon-hours', help='outcome horizon after entry, hours')]" = 6.0, max_entry_age: "Annotated[float, typer.Option('--max-entry-age', help='latest entry after launch, seconds')]" = 600.0, min_ev: "Annotated[float, typer.Option('--min-ev', help='ticket when E[ladder payoff] per SOL is at least this')]" = 1.0, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of later tokens held out for the test')]" = 0.35, folds: "Annotated[int, typer.Option('--folds', help='walk-forward folds (neural inputs)')]" = 4, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Fat-tail research: P(≥2x … ≥1000x) per token, ladder payoff, lottery-Kelly sizing hints.
 - `replay(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace directory')]", events: "Annotated[Path, typer.Option('--events', '-e', help='new events to stream in')]", every: "Annotated[float, typer.Option('--assess-every', help='seconds between assessment rounds')]" = 10.0, out: "Annotated[Path | None, typer.Option('--out', '-o', help='JSONL of assessments')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Stream events through the brain as if live: assess, resolve outcomes, then maintain.
+- `research_suite(seeds: "Annotated[str, typer.Option('--seeds', help='comma-separated simulator seeds')]" = '7,19,23', market: "Annotated[str, typer.Option('--market', help='archetype mix: default or degen')]" = 'degen', tokens: "Annotated[int, typer.Option('--tokens', help='launches per simulated market')]" = 150, hours: "Annotated[float, typer.Option('--hours', help='simulated hours per market')]" = 8.0, tape: "Annotated[bool, typer.Option('--tape/--no-tape', help='also run the (slower) tape research')]" = False, out: "Annotated[Path | None, typer.Option('--out', '-o', help='write the JSON result here')]" = None) -> 'None'` — Run the moonshot (and optionally tape) research on several independent simulated markets and report every metric as mean ± sd across seeds.
 - `simulate(out: "Annotated[Path, typer.Option('--out', '-o', help='event directory (Parquet tables)')]", tokens: "Annotated[int, typer.Option('--tokens', help='number of token launches to simulate')]" = 40, seed: "Annotated[int, typer.Option('--seed', help='random seed')]" = 0, prefix: "Annotated[str, typer.Option('--prefix', help='mint/wallet name prefix (distinguishes eras)')]" = 'Mint', start_time: "Annotated[float, typer.Option('--start-time', help='simulation start, unix seconds')]" = 1750000000.0, hours: "Annotated[float, typer.Option('--hours', help='simulated duration, hours')]" = 3.0, market: "Annotated[str, typer.Option('--market', help='archetype mix: default, or degen (mostly duds + runners)')]" = 'default', runners: "Annotated[float | None, typer.Option('--runners', help='override the share of 100–1000x runner launches')]" = None) -> 'None'` — Simulate memecoin launches (snipers, bundles, rugs, graduations, runners, smart money, bots).
 - `stream(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace directory')]", rpc: 'RpcOpt' = None, out: "Annotated[Path | None, typer.Option('--out', '-o', help='append assessments as JSONL')]" = None, polls: "Annotated[int | None, typer.Option('--polls', help='stop after N polls (default: run forever)')]" = None, poll_interval: "Annotated[float, typer.Option('--poll-interval', help='seconds between RPC polls')]" = 2.0, assess_every: "Annotated[float, typer.Option('--assess-every', help='seconds between assessment rounds')]" = 10.0, maintenance_every: "Annotated[float, typer.Option('--maintenance-every', help='seconds between maintenance runs')]" = 600.0, device: 'DeviceOpt' = None) -> 'None'` — Stream live chain activity into a Solana workspace (read-only) and emit assessments.
 - `stream_train_cmd(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (created if new, else resumed)')]", events: "Annotated[Path | None, typer.Option('--events', '-e', help='stream a saved event directory instead of RPC')]" = None, rpc: 'RpcOpt' = None, start: "Annotated[str | None, typer.Option('--start', help='unix seconds or ISO date (RPC mode)')]" = None, end: "Annotated[str | None, typer.Option('--end', help='unix seconds or ISO date (RPC mode)')]" = None, segment_minutes: "Annotated[float, typer.Option('--segment-minutes', help='history segment length, minutes (RPC mode)')]" = 60.0, workers: "Annotated[int, typer.Option('--workers', help='parallel getTransaction calls')]" = 8, warmup_hours: "Annotated[float, typer.Option('--warmup-hours', help='hours of stream used to bootstrap a new workspace')]" = 6.0, evict_idle_hours: "Annotated[float, typer.Option('--evict-idle-hours', help='forget tokens idle this many hours')]" = 2.0, solana_config: 'SolCfg' = None, config: 'BaseCfg' = None, profile: "Annotated[str | None, typer.Option('--profile', help='auto | cpu-lite | cpu | gpu | gpu-frontier')]" = 'auto', device: 'DeviceOpt' = None) -> 'None'` — Learn by streaming history through the brain — nothing is downloaded to disk.
@@ -3916,6 +3944,14 @@ Train by streaming: feed months of history (or the live chain) through the brain
 
 - `stream_train(workspace: 'str | Path', events: 'Iterable[Event]', cfg: 'SolanaConfig | None' = None, neural_cfg: 'NeuralConfig | None' = None, *, warmup_seconds: 'float' = 21600.0, assess_every: 'float' = 10.0, evict_every: 'float' = 600.0, maintenance_every: 'float' = 3600.0, checkpoint_every: 'float' = 21600.0, evict_idle_seconds: 'float' = 7200.0, decoder: 'TransactionDecoder | None' = None, max_events: 'int | None' = None, device: 'torch.device | str | None' = None, log: 'Callable[[str], None]' = <function _quiet>) -> 'dict[str, Any]'` — Learn online from a time-ordered event stream into ``workspace``; returns run statistics.
 
+### `nardis_neural.solana.suite`
+
+Robustness suite: the same research on several independent simulated markets.
+
+- `aggregate(rows: 'list[dict[str, float]]') -> 'dict[str, dict[str, float]]'` — Mean, standard deviation, min, max and count of every metric across seeds (NaNs skipped).
+- `run_suite(seeds: 'list[int]', market: 'str' = 'degen', n_tokens: 'int' = 150, hours: 'float' = 8.0, tape: 'bool' = False, cfg: 'SolanaConfig | None' = None, log: 'Logger' = <function _quiet>) -> 'dict[str, Any]'` — Simulate one market per seed, run the research on each and aggregate across seeds.
+- `suite_markdown(result: 'dict[str, Any]') -> 'str'` — Mean ± sd table of every metric and how often each verdict held.
+
 ### `nardis_neural.solana.tape`
 
 Tape Transformer: attention over the raw trade tape with learned wallet embeddings, predicting fat-tailed peak multiples and the collapse hazard (exit signal).
@@ -4141,7 +4177,7 @@ Transparent PyTorch training engine.
 
 ## Test inventory
 
-191 test functions (some are parametrised over devices, experts or formats).
+194 test functions (some are parametrised over devices, experts or formats).
 
 ### `tests/test_cli.py`
 
@@ -4404,6 +4440,7 @@ Runner-specific wallet skill, creator-family track records, sybil-resistant clus
 - `test_creator_family_track_record_follows_the_funder`
 - `test_cluster_counts_see_through_sybil_wallets`
 - `test_market_heat_windows`
+- `test_staged_insiders_behind_a_relay_are_seen_and_distrusted`
 
 ### `tests/test_solana_streaming.py`
 
@@ -4413,6 +4450,13 @@ Streaming training: forward history walker over an archival RPC, bounded-memory 
 - `test_market_eviction_keeps_what_was_learned`
 - `test_stream_train_bootstraps_bounds_memory_learns_online_and_resumes`
 - `test_tracker_labels_censors_and_roundtrips`
+
+### `tests/test_solana_suite.py`
+
+Robustness suite: per-seed research and cross-seed aggregation.
+
+- `test_aggregate_skips_missing_values`
+- `test_suite_runs_two_small_markets`
 
 ### `tests/test_solana_tape.py`
 

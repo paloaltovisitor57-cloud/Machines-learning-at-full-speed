@@ -62,7 +62,7 @@ without supervision.
 * **Deep ensemble**: members are fitted on token-bootstrap resamples, with early stopping
   on the most recently launched tokens. The predictive survival is the members' average,
   and their spread is the epistemic uncertainty.
-* **Inputs**: `raw` uses the 67 on-chain features and is fast on any CPU. `neural` adds
+* **Inputs**: `raw` uses the 68 on-chain features and is fast on any CPU. `neural` adds
   the walk-forward out-of-fold neural forecasts, uncertainty, expert gates and risk
   probabilities, the same stack the edge model uses.
 
@@ -166,11 +166,14 @@ from being walked into a trap, and each of them can only **lower** its optimism:
    * live mint or freeze authority, and unburned LP;
    * wash trading, bundled supply, creator-cluster supply and rug-linked wallets;
    * holder concentration and dev selling;
+   * supply held by a hidden multi-wallet funding cluster that is not the creator's, which
+     catches staged insiders funded through relay wallets;
    * the neural OOD score, clamped inputs and ensemble disagreement.
 
    **Hard vetoes** zero the chase score. They fire on P(rug) ≥ 60 %, a live mint or freeze
-   authority, bundled supply ≥ 20 %, a creator cluster holding ≥ 30 %, bots making up
-   ≥ 80 % of volume, OOD ≥ 4, or ≥ 25 % of inputs outside the training range. Each veto
+   authority, one hidden wallet cluster holding ≥ 25 % of supply, bundled supply ≥ 20 %, a
+   creator cluster holding ≥ 30 %, bots making up ≥ 80 % of volume, OOD ≥ 4, or ≥ 25 % of
+   inputs outside the training range. Each veto
    appears in `flags` as a readable reason. The factors are hand-set and monotone: more red
    flags never raise trust. Thresholds are in `GuardConfig` (`brain.guard`).
 

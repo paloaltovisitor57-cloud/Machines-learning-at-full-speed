@@ -528,3 +528,26 @@ def forward_report(
 
     ledger = ForwardLedger.load(workspace / "forward", MoonshotSpec())
     _echo({"alarm": ledger.alarm} | ledger.summary())
+
+
+@app.command("research-suite")
+def research_suite(
+    seeds: Annotated[str, typer.Option("--seeds", help="comma-separated simulator seeds")] = "7,19,23",
+    market: Annotated[str, typer.Option("--market", help="archetype mix: default or degen")] = "degen",
+    tokens: Annotated[int, typer.Option("--tokens", help="launches per simulated market")] = 150,
+    hours: Annotated[float, typer.Option("--hours", help="simulated hours per market")] = 8.0,
+    tape: Annotated[
+        bool, typer.Option("--tape/--no-tape", help="also run the (slower) tape research")
+    ] = False,
+    out: Annotated[Path | None, typer.Option("--out", "-o", help="write the JSON result here")] = None,
+) -> None:
+    """Run the moonshot (and optionally tape) research on several independent simulated markets
+    and report every metric as mean ± sd across seeds."""
+    from nardis_neural.solana.suite import run_suite, suite_markdown
+
+    result = run_suite(
+        [int(s) for s in seeds.split(",") if s.strip()], market, tokens, hours, tape=tape, log=typer.echo
+    )
+    if out is not None:
+        out.write_text(json.dumps(result, indent=2, default=float))
+    typer.echo(suite_markdown(result))

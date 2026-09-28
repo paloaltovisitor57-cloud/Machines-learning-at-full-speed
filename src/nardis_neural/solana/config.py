@@ -79,6 +79,7 @@ CURRENT_FEATURES: tuple[str, ...] = (
     "holder_clusters_log",
     "holder_cluster_ratio",
     "buyer_clusters_60s_log",
+    "top_cluster_share",
     # creator family track record (creator's funder, or the creator itself)
     "creator_prior_launches_log",
     "creator_prior_best_peak_log",
@@ -151,6 +152,7 @@ FEATURE_DOCS: dict[str, str] = {
     "holder_clusters_log": "log1p of distinct funding clusters among holders",
     "holder_cluster_ratio": "holder clusters / holders (1 = independent wallets, low = sybil crowd)",
     "buyer_clusters_60s_log": "log1p of distinct funding clusters among last-minute buyers",
+    "top_cluster_share": "supply held by the largest multi-wallet funding cluster other than the creator's",
     "creator_prior_launches_log": "log1p of the creator family's other launches",
     "creator_prior_best_peak_log": "log of the best peak multiple among the family's other launches",
     "creator_prior_rug_rate": "share of the family's other launches that rugged",

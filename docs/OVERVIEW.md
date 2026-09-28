@@ -431,9 +431,9 @@ The trading system never touches model internals.
   (sybil / bundle discovery) and Beta-posterior reputations learned online *only* from
   outcomes that have already resolved, plus rug attribution to creator clusters. A second,
   **runner-specific skill** credits wallets that buy early into tokens that later run 10x;
-- **67 named on-chain features**: holder concentration, dev / sniper / bundle /
+- **68 named on-chain features**: holder concentration, dev / sniper / bundle /
   creator-cluster exposure, fresh wallets, smart-money flow, runner-skilled buyers,
-  sybil-resistant counts per funding cluster, the **creator family's track record** (prior
+  sybil-resistant counts per funding cluster, the supply held by a hidden multi-wallet cluster, the **creator family's track record** (prior
   launches, best peak, rug and graduation rates), market-wide heat, bots, priority fees and
   Jito tips, authorities, liquidity. Also 1 s / 5 s / 30 s trade bars with forward-filled
   prices, and a live wallet→token / funding / cluster **graph** for the graph expert;
@@ -519,7 +519,7 @@ that runs 100x to 1000x. See [docs/MOONSHOT.md](MOONSHOT.md).
 - the last 96 trades, each with 18 features (side, size, timing, price move, fees, and the
   trader's skill, runner skill, cluster, creator link and freshness as known now), plus a
   **learned wallet embedding** keyed by a stable hash of the address;
-- a small pre-LayerNorm **Transformer** with a summary token, fused with the 67 current
+- a small pre-LayerNorm **Transformer** with a summary token, fused with the 68 current
   features. Frequency gating and wallet dropout stop the wallet table from memorising noise;
 - two heads: the censored power-law **tail** (P ≥ 2x … 1000x) and a discrete-time **collapse
   hazard** (P value halves within 1 min / 5 min / 15 min / 1 h), which is the exit signal;

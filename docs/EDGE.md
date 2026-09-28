@@ -7,7 +7,7 @@ is real.
 
 ```mermaid
 flowchart LR
-    H[(event history)] --> DS[causal snapshots<br/>67 features · bars · graph]
+    H[(event history)] --> DS[causal snapshots<br/>68 features · bars · graph]
     H --> TB[executable triple-barrier outcomes<br/>latency · impact · fees · TP / SL / time]
     DS --> WF[walk-forward retraining<br/>neural ensemble + risk model]
     WF --> OOF[out-of-fold forecasts<br/>= what a live system would have seen]
@@ -48,7 +48,7 @@ The inputs are:
 * the neural forecasts per horizon: mean, standard deviation, z-score, event
   probabilities, max upside and drawdown, volatility;
 * uncertainty: epistemic, aleatoric, OOD, disagreement;
-* expert gate weights, P(rug / graduation / dev dump), and all raw on-chain features (53 when the results below were measured, 67 now).
+* expert gate weights, P(rug / graduation / dev dump), and all raw on-chain features (53 when the results below were measured, 68 now).
 
 It is a bootstrap ensemble of MLPs with two heads:
 
