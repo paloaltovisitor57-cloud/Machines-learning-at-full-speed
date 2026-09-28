@@ -153,7 +153,46 @@ What this shows:
   (`alarm_minus_ladder_pnl_sol`), so live data decides.
 * Two synthetic markets are still a small sample (`research-suite --tape` runs more).
 
-## 6. Using it
+## 6. Scaling: does a bigger Tape Transformer help?
+
+The default network is small on purpose. To test whether capacity is the bottleneck, the
+research was run on the same markets and splits with the default (d=64, 2 layers, 3
+members) and a **flagship** (d=128, 4 layers, 5 members):
+`tape-research --d 128 --layers 4 --members 5`. Each run had one CPU thread, with four runs
+side by side. Seeds 7 and 19 of the 150-launch `degen` market were used.
+
+| | seed 7: default → flagship | seed 19: default → flagship |
+|---|---|---|
+| network parameters per member (excluding the 2.1M-entry wallet table) | 98k → 625k | 98k → 625k |
+| all parameters, whole ensemble | 6.6M → 13.6M | 6.6M → 13.6M |
+| tape test NLL (lower is better) | 0.512 → **0.464** | 0.713 → **0.541** |
+| collapse AUC 1 min | 0.921 → **0.936** | 0.866 → **0.904** |
+| collapse AUC 5 min / 15 min / 1 h | 0.974 / 0.970 / 0.964 → 0.974 / 0.967 / 0.964 | 0.965 / 0.968 / 0.966 → **0.975 / 0.978 / 0.975** |
+| collapse Brier 1 h | 0.068 → 0.063 | 0.070 → **0.042** |
+| log growth per ticket, tape entries | 0.786 → 0.820 | **0.730** → 0.643 |
+| test PnL, tape entries | +172.1 → +172.1 SOL | +179.5 → +179.6 SOL |
+| training time (1 thread) | 49 min → 192 min | 47 min → 211 min |
+| latency, one token (1 thread) | 11.8 → 33.8 ms | 10.0 → 38.2 ms |
+
+What this shows:
+
+* **The flagship is a better forecaster.** Its test NLL is 9 % and 24 % lower, and its
+  1-minute collapse AUC is higher in both markets, which is the exit alarm's hardest window.
+* **It is not a better trader here.** The entry decisions barely change: PnL is identical,
+  and log growth rose on one seed and fell on the other. The tokens worth buying are
+  already separated by the small model; extra capacity refines probabilities that the
+  entry decision does not depend on.
+* **It costs 3.4x the latency and 4x the training time.**
+* **The cheapest gain is elsewhere.** The research's tail-model comparator uses the same
+  member count as the tape. With 5 members instead of 3, its test NLL fell from 0.571 to
+  0.423 (seed 7) and from 0.457 to 0.225 (seed 19). That beats both tape sizes, from a
+  47k-parameter model. The production moonshot tail model already uses 5 members.
+* **Decision:** the default stays d=64, 2 layers and 3 members, which is the right trade
+  for an M1, a CCX23 or a CPX32. Use the flagship when the collapse probabilities drive
+  your exits and there is latency budget (or a GPU) to spare. Only 2 seeds were run, so
+  re-check this on real data.
+
+## 7. Using it
 
 ```python
 brain = SolanaBrain("workspaces/sol")  # the tape model loads if tape-research was run
