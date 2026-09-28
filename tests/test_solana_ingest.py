@@ -494,3 +494,36 @@ def test_slot_search_and_seek_cursor_skip_missing_slots() -> None:
     assert abs(1_000_000 + int(0.45 * slot) - target) <= 5
     sig = rpc.signature_near(target)
     assert sig is not None and abs(int(sig[3:]) - slot) < 50
+
+
+def test_one_sided_pool_change_is_not_a_swap() -> None:
+    """A token-only vault change (no SOL moved) is not a swap and must not divide by zero."""
+    from nardis_neural.solana.ingest.pumpfun import ORCA_WHIRLPOOL_PROGRAM
+
+    dec = TransactionDecoder()
+    pool = pubkey_from_seed("pool")
+    keys = [pubkey_from_seed("vs"), pubkey_from_seed("vt")]
+    orca = {"programId": ORCA_WHIRLPOOL_PROGRAM, "accounts": [], "data": ""}
+    seed = _tx([], [orca], pre=[], post=_vault_rows(pool, 50 * 10**9, 10**15), keys=keys)
+    one_sided = _tx(
+        [],
+        [orca],
+        pre=_vault_rows(pool, 50 * 10**9, 10**15),
+        post=_vault_rows(pool, 50 * 10**9, 2 * 10**15),
+        keys=keys,
+    )
+    evs = [e for tx in (seed, one_sided) for e in dec.decode(tx)]
+    assert not any(isinstance(e, Swap) for e in evs)
+
+
+def test_history_walker_skips_undecodable_transactions() -> None:
+    from collections.abc import Mapping
+
+    from nardis_neural.solana.ingest.history import HistoryWalker
+
+    class Broken(TransactionDecoder):
+        def decode(self, tx: Mapping[str, Any]) -> list[Any]:
+            raise ZeroDivisionError
+
+    walker = HistoryWalker(SolanaRpc(transport=lambda m, p: None), 0.0, 1.0, decoder=Broken(), seek=False)
+    assert walker._decode({"slot": 1}) == [] and walker.stats["decode_errors"] == 1

@@ -59,7 +59,13 @@ class HistoryWalker:
     paging back from the chain tip; makes old windows (archival RPC, Old Faithful) reachable."""
     decoder: TransactionDecoder = field(default_factory=TransactionDecoder)
     stats: dict[str, int] = field(
-        default_factory=lambda: {"segments": 0, "signatures": 0, "transactions": 0, "events": 0}
+        default_factory=lambda: {
+            "segments": 0,
+            "signatures": 0,
+            "transactions": 0,
+            "events": 0,
+            "decode_errors": 0,
+        }
     )
 
     def __post_init__(self) -> None:
@@ -110,6 +116,15 @@ class HistoryWalker:
                 return out
             before = page[-1]["signature"]
 
+    def _decode(self, tx: dict[str, Any]) -> list[Event]:
+        """Decode one transaction; a transaction the decoder cannot handle is counted and skipped
+        rather than aborting the whole segment."""
+        try:
+            return list(self.decoder.decode(tx))
+        except (ArithmeticError, ValueError, KeyError, IndexError, TypeError):
+            self.stats["decode_errors"] += 1
+            return []
+
     def events(self) -> Iterator[Event]:
         """Yield decoded events in time order, segment by segment, updating :attr:`stats`.
 
@@ -128,7 +143,7 @@ class HistoryWalker:
                             sigs.append(s)
                 sigs.sort(key=lambda s: (int(s.get("slot", 0)), float(s.get("blockTime") or 0.0)))
                 txs = [tx for tx in pool.map(lambda s: self.rpc.get_transaction(s["signature"]), sigs) if tx]
-                events = sorted((e for tx in txs for e in self.decoder.decode(tx)), key=event_sort_key)
+                events = sorted((e for tx in txs for e in self._decode(tx)), key=event_sort_key)
                 self.stats["segments"] += 1
                 self.stats["signatures"] += len(sigs)
                 self.stats["transactions"] += len(txs)

@@ -363,7 +363,7 @@ class TransactionDecoder:
                 )
             )
         sol_res, tok_res = max(s1, 1e-12), max(k1, 1e-12)
-        if (ds > 0) != (dk > 0):  # opposite signs → swap
+        if ds != 0 and dk != 0 and (ds > 0) != (dk > 0):  # opposite, non-zero changes → swap
             is_buy = ds > 0
             sol_amt, tok_amt = abs(ds), abs(dk)
             if pool.venue in CLMM_VENUES and tok_amt > 0:
