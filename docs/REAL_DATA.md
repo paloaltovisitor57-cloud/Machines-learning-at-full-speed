@@ -210,3 +210,37 @@ record, how busy the whole launch market is, who is trading (bots, snipers, the 
 criticality (herding) measures**. Permutation importance says which signals matter, not in
 which direction. One window of 7 10x runners is a first look; the ranking will firm up as
 more history is added.
+
+## 10. A larger benchmark, and what today's detection changes are worth
+
+A third, larger window: 3 h 40 min of pump.fun (18:14–21:54 UTC, 28 Sep; 541 781 events,
+**5 006 SOL-priced launches**, 4 707 with names backfilled from their creation transactions).
+It uses snapshots every 20 s and a 30-minute horizon. The earliest 65 % of tokens are
+used for training and the latest 35 % for testing. Only test tokens whose full 30 minutes
+lie inside the window are scored (760 tokens), so no outcome is cut off by the end of the
+data.
+
+The production tail model on this benchmark:
+
+| target | hits / 760 | AUC | average precision | top 10 % hit rate (base rate) |
+|---|---|---|---|---|
+| 2x | 74 | **0.896** | 0.391 | 39 % (9.7 %) |
+| 5x | 23 | **0.917** | 0.168 | 18 % (3.0 %) |
+| 10x | 10 | **0.923** | 0.106 | 9.2 % (1.3 %): 7 of the 10 10x tokens |
+
+**Before / after on identical tokens.** The same model was trained on features from the code
+before today's detection changes (73 features, runner skill credited only after 90 minutes)
+and after them (76 features: hits credited the moment they happen, plus narratives). The
+paired token bootstrap of the AUC difference gives:
+
+| change | 2x | 5x | 10x |
+|---|---|---|---|
+| all of today's changes vs old | +0.000 [−0.010, +0.009] | **+0.026 [+0.006, +0.047]** (P = 99.3 %) | +0.029 [−0.007, +0.068] (P = 94 %) |
+| early runner-skill credit alone | −0.004 (n.s.) | −0.002 (n.s.) | −0.015 (n.s.) |
+| **narratives** on top | +0.004 (n.s.) | **+0.028 [+0.007, +0.050]** (P = 99.6 %) | **+0.044 [+0.008, +0.081]** (P = 98.5 %) |
+
+* **Narratives are a significant improvement for identifying big runners** (5x and 10x).
+  Their intervals exclude zero, and 2x is unaffected.
+* **Early runner-skill credit is neutral on this benchmark.** It is kept because it is the
+  correct causal behaviour (live, a wallet's hit is known the moment it happens), but it is
+  not claimed as a gain: 3.7 hours give wallet track records little time to build either way.
