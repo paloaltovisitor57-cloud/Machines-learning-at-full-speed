@@ -212,9 +212,10 @@ class TransactionDecoder:
         priority_fee = max(int(meta.get("fee", 0)) - BASE_FEE_LAMPORTS * n_sigs, 0) / LAMPORTS_PER_SOL
         instructions = _instructions(tx)
         programs = {str(ix.get("programId", "")) for ix in instructions}
+        n_outer = len(tx["transaction"]["message"].get("instructions", []))
         jito_tip = 0.0
         transfers: list[tuple[str, str, float]] = []
-        for ix in instructions:
+        for i, ix in enumerate(instructions):
             parsed = ix.get("parsed")
             if str(ix.get("programId")) != SYSTEM_PROGRAM or not isinstance(parsed, dict):
                 continue
@@ -225,7 +226,10 @@ class TransactionDecoder:
             dest = str(info.get("destination", ""))
             if dest in self.jito_accounts:
                 jito_tip += sol
-            else:
+            elif i < n_outer:
+                # Inner transfers are payments a program makes on the signer's behalf (a buy paying
+                # the bonding curve, fees, creator vaults); they are not funding and would glue
+                # every buyer of a token into one cluster.
                 transfers.append((str(info.get("source", "")), dest, sol))
 
         events: list[Event] = []

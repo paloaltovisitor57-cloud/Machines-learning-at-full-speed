@@ -57,6 +57,8 @@ class WalletIntel:
         self.funder: dict[int, int] = {}
         self.funded_at: dict[int, float] = {}
         self.funded_count: dict[int, int] = {}
+        self.paid_by: dict[int, set[int]] = {}
+        """Distinct payers per destination, capped just above ``hub_threshold``."""
 
     # ------------------------------------------------------------------ identity
     def id(self, name: str, t: float = 0.0) -> int:
@@ -102,7 +104,9 @@ class WalletIntel:
         """Record a transfer of at least ``funding_min_sol`` SOL in the funding graph.
 
         A wallet's first funder is remembered; source and destination join one cluster unless the
-        source has funded more than ``hub_threshold`` wallets (an exchange-like hub).
+        source has funded more than ``hub_threshold`` wallets (an exchange-like hub) or the
+        destination has been paid by more than ``hub_threshold`` wallets (a sink such as a pool,
+        fee account or deposit address).
         """
         if tr.sol_amount < self.funding_min_sol:
             return
@@ -111,7 +115,10 @@ class WalletIntel:
             self.funder[dst] = src
             self.funded_at[dst] = tr.t
             self.funded_count[src] = self.funded_count.get(src, 0) + 1
-        if self.funded_count.get(src, 0) <= self.hub_threshold:
+        payers = self.paid_by.setdefault(dst, set())
+        if len(payers) <= self.hub_threshold:
+            payers.add(src)
+        if self.funded_count.get(src, 0) <= self.hub_threshold and len(payers) <= self.hub_threshold:
             self._union(src, dst)
 
     def cluster_size(self, wid: int) -> int:
@@ -210,6 +217,7 @@ class WalletIntel:
             "funder": [[k, v] for k, v in self.funder.items()],
             "funded_at": [[k, v] for k, v in self.funded_at.items()],
             "funded_count": [[k, v] for k, v in self.funded_count.items()],
+            "paid_by": [[k, sorted(v)] for k, v in self.paid_by.items()],
         }
 
     @classmethod
@@ -233,7 +241,12 @@ class WalletIntel:
         w.funder = {int(k): int(v) for k, v in d["funder"]}
         w.funded_at = {int(k): float(v) for k, v in d["funded_at"]}
         w.funded_count = {int(k): int(v) for k, v in d["funded_count"]}
+        w.paid_by = {int(k): {int(x) for x in v} for k, v in d.get("paid_by", [])}
         return w
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        state.setdefault("paid_by", {})  # pickles from before sink detection
+        self.__dict__.update(state)
 
     def save(self, path: str | Path) -> None:
         """Write the state to ``path`` as JSON."""

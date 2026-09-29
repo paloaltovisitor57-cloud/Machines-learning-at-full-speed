@@ -104,6 +104,9 @@ def test_funding_clusters_hubs_and_persistence(tmp_path: Path) -> None:
     for i in range(10):  # a CEX hot wallet funds everybody: must not merge them all
         w.add_transfer(Transfer(T0, "cex", f"user{i}", 1.0))
     assert not w.same_cluster(w.id("user0"), w.id("user9"))
+    for i in range(10):  # everybody pays one sink (a pool or fee account): must not merge them all
+        w.add_transfer(Transfer(T0, f"buyer{i}", "sink", 1.0))
+    assert not w.same_cluster(w.id("buyer0"), w.id("buyer9"))
     assert w.is_fresh(w.id("a"), T0 + 100, 3600) and not w.is_fresh(w.id("a"), T0 + 7200, 3600)
     for _ in range(8):
         w.update(w.id("a"), True)
@@ -113,6 +116,7 @@ def test_funding_clusters_hubs_and_persistence(tmp_path: Path) -> None:
     np.testing.assert_allclose(w.skills(ids), [w.skill(int(i)) for i in ids])
     w.save(tmp_path / "w.json")
     back = WalletIntel.load(tmp_path / "w.json")
+    assert back.paid_by == w.paid_by
     assert back.score(back.id("a")) == w.score(w.id("a")) and back.same_cluster(back.id("a"), back.id("b"))
 
 

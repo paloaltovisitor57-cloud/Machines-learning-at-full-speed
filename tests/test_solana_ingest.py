@@ -634,3 +634,12 @@ def test_pumpswap_events_decode_in_either_pool_orientation() -> None:
         assert s.mint == MINT and s.is_buy is is_buy
         assert s.sol_amount == pytest.approx(1.0) and s.token_amount == pytest.approx(2.0)
         assert s.sol_reserve == pytest.approx(100.0) and s.token_reserve == pytest.approx(2e8)
+
+
+def test_decoder_ignores_inner_program_payments() -> None:
+    """A buy's CPI payment to the bonding curve is not funding; an outer transfer still is."""
+    curve, friend = pubkey_from_seed("curve"), pubkey_from_seed("friend")
+    tx = _tx([], [PUMP_IX, _transfer(USER, friend, 2 * 10**9)])
+    tx["meta"]["innerInstructions"] = [{"index": 0, "instructions": [_transfer(USER, curve, 3 * 10**9)]}]
+    transfers = [e for e in TransactionDecoder().decode(tx) if isinstance(e, Transfer)]
+    assert [(e.dest, e.sol_amount) for e in transfers] == [(friend, 2.0)]

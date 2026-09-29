@@ -244,3 +244,61 @@ paired token bootstrap of the AUC difference gives:
 * **Early runner-skill credit is neutral on this benchmark.** It is kept because it is the
   correct causal behaviour (live, a wallet's hit is known the moment it happens), but it is
   not claimed as a gain: 3.7 hours give wallet track records little time to build either way.
+
+## 11. Trying to beat the production runner model
+
+Six independent attempts were made to beat the production tail model on the section 10
+benchmark. Each chose its configuration on an inner, time-ordered validation split of the
+training tokens only, then scored the 760 test tokens once against the control, using the
+same paired token bootstrap.
+
+| attempt | what was tried | result on test |
+|---|---|---|
+| tuned tree detector | 131 HistGradientBoosting configurations per target, top-3 ensemble | worse at 2x (AUC 0.879 vs 0.896) and 5x (0.890 vs 0.917), level at 10x |
+| stacking | tail model + direct classifiers, out-of-fold combiners | no combiner beat the best single model; no test gain |
+| diverse ensemble | tail + gradient boosting + logistic + extra trees, rank-averaged | 5x AP 0.168 → 0.199, but 2x slightly worse; nothing significant |
+| tail capacity | hidden 32–128, 2–4 components, dropout, 5–10 members | significantly worse at 5x and 10x; seed variance exceeds capacity effects |
+| feature ablation | drop each of 10 feature families | dropping narratives looked best on validation, but lost 0.028 / 0.044 AUC at 5x / 10x on test, confirming section 10 |
+| token weighting | 21 row / token / first-K weighting schemes | worse at 5x and 10x; equal weight per token, as production does, is right |
+
+Two further attempts (label engineering and entry timing) were cut short by an
+infrastructure restart and are not reported.
+
+**Verdict: the production tail model stays.** On about 5 000 tokens, no change of model family,
+size, weighting or feature set beat it. The next gains have to come from better inputs, not a
+bigger model.
+
+**Bug found and fixed: buyers were glued into one funding cluster.** When a buy pays SOL to
+the bonding curve, the payment is a System transfer made inside pump.fun's instruction. It was
+being recorded as *funding*, so union-find joined every buyer of a token through the curve
+account. On the 22 segments of the 12-hour window, the median share of a token's buyers
+(tokens with ≥ 20 buyers) in its largest "cluster" was **0.71** (p90 0.91). That made every
+cluster feature (`holder_clusters_log`, `top_cluster_share`, `bundle_share`,
+`creator_cluster_share` and the graph and tape cluster fields) measure "bought something"
+rather than "shares an operator". Two fixes:
+
+* the decoder keeps only **top-level** System transfers; payments that a program makes
+  inside its own instruction (curve, fee and creator-vault payments) are not funding;
+* `WalletIntel` stops merging through a **sink**: a destination paid by more than
+  `hub_threshold` distinct wallets, mirroring the existing rule for exchange-like sources.
+
+Replaying the same transfers with both fixes, the median largest-cluster share falls to
+**0.04** (p90 0.11). The cluster features now describe operators. Their value for runner
+detection has not been re-measured yet: the stored segments were decoded before the fix, so
+a fresh fetch is needed.
+
+**Next inputs, from the research sweep (ranked, not yet built):**
+
+1. *Hidden supply*: in 47 % of fully observed launches a wallet sells more than it was seen
+   buying (9 % of all sell SOL), so concentration features understate insider supply.
+   Reading pre-trade token balances fixes this.
+2. *Real funding graph*: only 5 % of buyers ever appear as a transfer destination, because
+   funding happens in separate System-program transactions that are not fetched. Backfilling
+   each new wallet's first funder would make fresh-wallet, bundle and creator-family features
+   work.
+3. *Deployer fingerprints*: creator track record is already the second-strongest 2x feature.
+   Linking serial deployers that rotate addresses extends it.
+4. *Co-signed multi-wallet transactions*: 3 301 in 3.7 h, 2 372 of them all-sell dumps
+   across 585 tokens; a clean operator link and a coordinated-dump alarm.
+5. *Wash-adjusted order flow*: 19.6 % of trades reverse the same wallet's previous trade
+   in the same token within 10 s, which inflates volume and buyer counts.
