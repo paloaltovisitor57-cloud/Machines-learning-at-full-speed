@@ -100,7 +100,7 @@ flowchart TB
 | Continual learning | 3-pool replay (recent FIFO, historical reservoir, protected rare events), 5 sampling strategies, candidate cloning, distillation, EWC, full retraining with configurable weights |
 | Lifecycle | immutable checkpoints, champion/candidate/challenger/retired/failed registry with audit log, shadow mode, 10-gate promotion, manual and optional automatic rollback |
 | Representation | self-supervised pretraining (masked timestep, masked feature, contrastive), embedding export to Parquet/NumPy, KMeans / GMM / HDBSCAN regime discovery |
-| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 226 test functions |
+| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 228 test functions |
 
 ## Quick start
 
@@ -375,7 +375,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │                            edge/ (barriers · model · trees · backtest · research)
 │                            moonshot/ (labels · tail · guard · online · research)
 │                            tape/ (features · dataset · model · research · policy)
-└── tests/                   226 test functions incl. synthetic end-to-end pipeline
+└── tests/                   228 test functions incl. synthetic end-to-end pipeline
 ```
 
 ## Testing & quality gates
@@ -1136,9 +1136,27 @@ experts, ensembles, normalisation or checkpoints.
 Nardis does not need to be written in Python. Run the addon next to it as a local HTTP/JSON
 service and call it from anything:
 
+**One-time setup from real data** (on the machine that will run it):
+
 ```bash
-export SOLANA_RPC_URL=https://…                       # read-only RPC; never a wallet key
-nardis-neural solana serve --workspace ws --port 8787   # streams the chain in the background
+export SOLANA_RPC_URL=https://…                          # read-only RPC; never a wallet key
+nardis-neural solana fetch-history --out data/hist --hours 12   # resumable; rerun to continue
+nardis-neural solana bootstrap --events data/hist --workspace ws
+nardis-neural solana moonshot-research --workspace ws      # entry (tail) model
+nardis-neural solana tape-research --workspace ws          # crash / collapse model
+nardis-neural solana stopping-research --workspace ws      # exit model (--utility power for runner mode)
+```
+
+* `fetch-history` keeps only tokens created inside the window, SOL-priced. On a hosted node
+  it replays about 1.6 hours of history per hour (measured: 0.63x real time with 6 workers),
+  so 12 hours of history takes about 7 to 8 hours.
+* For long windows on a 16 GB machine, set `sample_interval_seconds: 60` in `ws/solana.yaml`
+  before `tape-research`. 10-second snapshots of a busy day exceed 16 GB.
+
+**Run** (every day):
+
+```bash
+nardis-neural solana serve --workspace ws --port 8787    # streams the chain in the background
 ```
 
 | call | when Nardis makes it | returns |
@@ -3253,6 +3271,21 @@ hold, timers and the ladder on later tokens, and install it.
 | `--utility` | str | "log" | installed exit objective: log (compounding) or power (runner mode) |
 | `--gamma` | float | 0.5 | risk aversion of power utility, 0 < gamma < 1 |
 
+### `nardis-neural solana fetch-history`
+
+Fetch pump.fun history into an event directory for `bootstrap` and the research commands.
+
+Resumable: rerun the same command after an interruption and it continues.  The saved
+history keeps only tokens created inside the window, SOL-priced (see clean_history).
+
+| option | type | default | description |
+|---|---|---|---|
+| `--out`, `-o` | path | required | event directory to write (resumable) |
+| `--hours` | float | 12.0 | length of history to fetch, hours |
+| `--end` | str | null | end of the window: unix seconds or ISO date (default: 15 min ago) |
+| `--workers` | int | 6 | parallel getTransaction calls (6 suits most nodes) |
+| `--rpc` | str | null | read-only (archival) RPC endpoint URL (env `SOLANA_RPC_URL`) |
+
 ### `nardis-neural solana serve`
 
 Run the addon as a local HTTP/JSON sidecar for the trading system (advice only).
@@ -4541,6 +4574,7 @@ Capital research: turn a research test period into bankroll and overfitting evid
 - `build_dataset(events: "Annotated[Path, typer.Option('--events', '-e', help='event directory (Parquet tables)')]", out: "Annotated[Path, typer.Option('--out', '-o', help='output .npy dataset directory')]", solana_config: 'SolCfg' = None, config: 'BaseCfg' = None) -> 'None'` — Causal replay + hindsight labelling → canonical neural dataset (+ risk labels).
 - `decode(input_file: "Annotated[Path, typer.Option('--input', '-i', help='JSONL of getTransaction results')]", out: "Annotated[Path, typer.Option('--out', '-o', help='event directory (Parquet tables)')]", min_transfer_sol: "Annotated[float, typer.Option('--min-transfer-sol', help='ignore SOL transfers below this amount, SOL')]" = 0.05) -> 'None'` — Decode raw Solana transactions (pump.fun, AMMs, SOL transfers) into market events.
 - `edge_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history + champion)')]", folds: "Annotated[int, typer.Option('--folds', help='walk-forward folds')]" = 4, take_profit: "Annotated[float, typer.Option('--take-profit', help='take-profit barrier, fractional return (0.25 = +25%)')]" = 0.25, stop_loss: "Annotated[float, typer.Option('--stop-loss', help='stop-loss barrier, fractional loss (0.15 = -15%)')]" = 0.15, max_hold: "Annotated[float, typer.Option('--max-hold', help='max holding time (time barrier), seconds')]" = 180.0, latency: "Annotated[float, typer.Option('--latency', help='entry/exit latency, seconds')]" = 1.0, max_positions: "Annotated[int, typer.Option('--max-positions', help='max concurrent open positions in the backtest')]" = 5, device: 'DeviceOpt' = None) -> 'None'` — Walk-forward edge research on the workspace history; installs the edge model.
+- `fetch_history_cmd(out: "Annotated[Path, typer.Option('--out', '-o', help='event directory to write (resumable)')]", hours: "Annotated[float, typer.Option('--hours', help='length of history to fetch, hours')]" = 12.0, end: "Annotated[str | None, typer.Option('--end', help='end of the window: unix seconds or ISO date (default: 15 min ago)')]" = None, workers: "Annotated[int, typer.Option('--workers', help='parallel getTransaction calls (6 suits most nodes)')]" = 6, rpc: "Annotated[str | None, typer.Option('--rpc', envvar='SOLANA_RPC_URL', help='read-only (archival) RPC endpoint URL')]" = None) -> 'None'` — Fetch pump.fun history into an event directory for `bootstrap` and the research commands.
 - `forward_report(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace')]") -> 'None'` — Paper-ticket scorecard of the ML signals (forward test recorded during stream / stream-train).
 - `init_config(out: "Annotated[Path, typer.Option('--out', '-o', help='YAML file to write')]" = PosixPath('configs/solana.yaml')) -> 'None'` — Write the default Solana configuration.
 - `moonshot_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history + champion)')]", inputs: "Annotated[str, typer.Option('--inputs', help='raw (on-chain features) or neural (walk-forward OOF stack)')]" = 'raw', size: "Annotated[float, typer.Option('--size', help='ticket size, SOL')]" = 0.5, latency: "Annotated[float, typer.Option('--latency', help='entry/exit latency, seconds')]" = 1.0, horizon_hours: "Annotated[float, typer.Option('--horizon-hours', help='outcome horizon after entry, hours')]" = 6.0, max_entry_age: "Annotated[float, typer.Option('--max-entry-age', help='latest entry after launch, seconds')]" = 600.0, min_ev: "Annotated[float, typer.Option('--min-ev', help='ticket when E[ladder payoff] per SOL is at least this')]" = 1.0, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of later tokens held out for the test')]" = 0.35, folds: "Annotated[int, typer.Option('--folds', help='walk-forward folds (neural inputs)')]" = 4, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Fat-tail research: P(≥2x … ≥1000x) per token, ladder payoff, lottery-Kelly sizing hints.
@@ -4727,6 +4761,8 @@ Render market events as ``getTransaction``-style JSON (jsonParsed encoding).
 Stream historical chain activity forward in time, storing nothing.
 
 - `chain(*sources: 'Iterable[Event]') -> 'Iterator[Event]'` — Concatenate event sources in order (e.g. a history replay followed by the live stream).
+- `clean_history(events: 'Iterable[Event]') -> 'tuple[list[Event], dict[str, int]]'` — Keep only tokens whose pump.fun creation is inside the history, SOL-priced throughout.
+- `fetch_history(rpc: 'SolanaRpc', out: 'Any', start_time: 'float', end_time: 'float', segment_seconds: 'float' = 600.0, workers: 'int' = 6, programs: 'list[str] | None' = None, log: 'Any' = None, retries: 'int' = 5, retry_wait: 'float' = 30.0) -> 'dict[str, int]'` — Replay ``[start_time, end_time)`` into ``out`` resumably, then write the cleaned history.
 - **class `HistoryWalker`** — Replays the watched programs' history from ``start_time`` to ``end_time`` (Unix seconds), oldest first, one ``segment_seconds`` segment at a time.
   - `events(self) -> 'Iterator[Event]'` — Yield decoded events in time order, segment by segment, updating :attr:`stats`.
 
@@ -5184,7 +5220,7 @@ Transparent PyTorch training engine.
 
 ## Test inventory
 
-226 test functions (some are parametrised over devices, experts or formats).
+228 test functions (some are parametrised over devices, experts or formats).
 
 ### `tests/test_cli.py`
 
@@ -5508,6 +5544,8 @@ Streaming training: forward history walker over an archival RPC, bounded-memory 
 - `test_market_eviction_keeps_what_was_learned`
 - `test_stream_train_bootstraps_bounds_memory_learns_online_and_resumes`
 - `test_tracker_labels_censors_and_roundtrips`
+- `test_clean_history_keeps_only_tokens_created_in_the_window`
+- `test_fetch_history_resumes_and_saves_a_clean_store`
 
 ### `tests/test_solana_suite.py`
 

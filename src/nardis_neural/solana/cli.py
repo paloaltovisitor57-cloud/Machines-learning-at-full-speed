@@ -566,6 +566,52 @@ def stopping_research(
     typer.echo(f"stopping model installed in {workspace / 'stopping'}")
 
 
+@app.command("fetch-history")
+def fetch_history_cmd(
+    out: Annotated[Path, typer.Option("--out", "-o", help="event directory to write (resumable)")],
+    hours: Annotated[float, typer.Option("--hours", help="length of history to fetch, hours")] = 12.0,
+    end: Annotated[
+        str | None,
+        typer.Option("--end", help="end of the window: unix seconds or ISO date (default: 15 min ago)"),
+    ] = None,
+    workers: Annotated[
+        int, typer.Option("--workers", help="parallel getTransaction calls (6 suits most nodes)")
+    ] = 6,
+    rpc: Annotated[
+        str | None,
+        typer.Option("--rpc", envvar="SOLANA_RPC_URL", help="read-only (archival) RPC endpoint URL"),
+    ] = None,
+) -> None:
+    """Fetch pump.fun history into an event directory for `bootstrap` and the research commands.
+
+    Resumable: rerun the same command after an interruption and it continues.  The saved
+    history keeps only tokens created inside the window, SOL-priced (see clean_history)."""
+    import time as _time
+
+    from nardis_neural.solana.ingest import SolanaRpc, fetch_history
+
+    if rpc is None:
+        raise typer.BadParameter("pass --rpc or set SOLANA_RPC_URL")
+    window = out / "window.json"
+    if window.exists():
+        w = json.loads(window.read_text())
+        start_t, end_t = float(w["start"]), float(w["end"])
+    else:
+        end_t = _when(end) if end else _time.time() - 900
+        start_t = end_t - hours * 3600
+        out.mkdir(parents=True, exist_ok=True)
+        window.write_text(json.dumps({"start": start_t, "end": end_t}))
+    stats = fetch_history(
+        SolanaRpc(rpc, retries=8, backoff=1.0, timeout=30.0),
+        out,
+        start_t,
+        end_t,
+        workers=workers,
+        log=typer.echo,
+    )
+    _echo(stats)
+
+
 @app.command("serve")
 def serve(
     workspace: Annotated[Path, typer.Option("--workspace", "-w", help="Solana workspace")],

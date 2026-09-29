@@ -8,9 +8,27 @@ experts, ensembles, normalisation or checkpoints.
 Nardis does not need to be written in Python. Run the addon next to it as a local HTTP/JSON
 service and call it from anything:
 
+**One-time setup from real data** (on the machine that will run it):
+
 ```bash
-export SOLANA_RPC_URL=https://…                       # read-only RPC; never a wallet key
-nardis-neural solana serve --workspace ws --port 8787   # streams the chain in the background
+export SOLANA_RPC_URL=https://…                          # read-only RPC; never a wallet key
+nardis-neural solana fetch-history --out data/hist --hours 12   # resumable; rerun to continue
+nardis-neural solana bootstrap --events data/hist --workspace ws
+nardis-neural solana moonshot-research --workspace ws      # entry (tail) model
+nardis-neural solana tape-research --workspace ws          # crash / collapse model
+nardis-neural solana stopping-research --workspace ws      # exit model (--utility power for runner mode)
+```
+
+* `fetch-history` keeps only tokens created inside the window, SOL-priced. On a hosted node
+  it replays about 1.6 hours of history per hour (measured: 0.63x real time with 6 workers),
+  so 12 hours of history takes about 7 to 8 hours.
+* For long windows on a 16 GB machine, set `sample_interval_seconds: 60` in `ws/solana.yaml`
+  before `tape-research`. 10-second snapshots of a busy day exceed 16 GB.
+
+**Run** (every day):
+
+```bash
+nardis-neural solana serve --workspace ws --port 8787    # streams the chain in the background
 ```
 
 | call | when Nardis makes it | returns |

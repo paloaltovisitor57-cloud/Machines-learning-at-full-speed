@@ -164,3 +164,59 @@ def test_tracker_labels_censors_and_roundtrips(history: Any, tmp_path: Path) -> 
     tr.save(tmp_path / "t.npz")
     back = MoonshotTracker.load(tmp_path / "t.npz", spec)
     assert len(back.resolved) == len(tr.resolved) and back.resolved_tokens == tr.resolved_tokens
+
+
+def test_clean_history_keeps_only_tokens_created_in_the_window() -> None:
+    from nardis_neural.solana.events import Event, Swap, TokenLaunch, Transfer
+    from nardis_neural.solana.ingest.history import clean_history
+
+    def swap(mint: str, t: float, sol_res: float = 40.0) -> Swap:
+        return Swap(mint, t, "w", True, 0.1, 1e6, sol_res, 8e8)
+
+    events: list[Event] = [
+        TokenLaunch("new", 1.0, "creator"),
+        swap("new", 2.0),
+        TokenLaunch("old", 1.5, "unknown"),  # first seen by a trade: inferred launch
+        swap("old", 2.5),
+        TokenLaunch("usdc", 1.2, "payer", venue="raydium"),  # pre-existing pool seen once
+        swap("usdc", 2.2),
+        TokenLaunch("v2", 1.3, "creator"),
+        swap("v2", 2.3, sol_res=0.0),  # BuyV2 / SellV2 curve without SOL reserves
+        TokenLaunch("new", 3.0, "unknown"),  # repeated inferred launch from a later segment
+        Transfer(2.0, "a", "b", 1.0),
+    ]
+    kept, stats = clean_history(events)
+    mints = {getattr(e, "mint", None) for e in kept}
+    assert mints == {"new", None} and stats["tokens"] == 1
+    assert sum(isinstance(e, TokenLaunch) for e in kept) == 1
+
+
+def test_fetch_history_resumes_and_saves_a_clean_store(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from nardis_neural.solana.ingest import history as hist
+
+    calls: list[float] = []
+
+    class FakeWalker:
+        def __init__(self, rpc, lo, hi, **kw) -> None:  # type: ignore[no-untyped-def]
+            self.lo, self.stats = lo, {"transactions": 1, "events": 2}
+            calls.append(lo)
+
+        def events(self):  # type: ignore[no-untyped-def]
+            from nardis_neural.solana.events import Swap, TokenLaunch
+
+            m = f"m{int(self.lo)}"
+            return [TokenLaunch(m, self.lo + 1, "c"), Swap(m, self.lo + 2, "w", True, 0.1, 1e6, 40.0, 8e8)]
+
+    real = hist.HistoryWalker
+    hist.HistoryWalker = FakeWalker  # type: ignore[misc,assignment]
+    try:
+        stats = hist.fetch_history(SolanaRpc(transport=lambda m, p: None), tmp_path, 0.0, 1800.0, 600.0)
+        assert calls == [0.0, 600.0, 1200.0] and stats["tokens"] == 3
+        calls.clear()
+        hist.fetch_history(SolanaRpc(transport=lambda m, p: None), tmp_path, 0.0, 1800.0, 600.0)
+        assert calls == []  # every segment already done
+    finally:
+        hist.HistoryWalker = real  # type: ignore[misc]
+    from nardis_neural.solana.market import EventStore
+
+    assert len(EventStore.load(tmp_path)) == 6

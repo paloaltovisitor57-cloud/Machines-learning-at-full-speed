@@ -27,6 +27,7 @@ from typing import Any
 
 from nardis_neural.solana.events import Event
 from nardis_neural.solana.ingest.decoder import TransactionDecoder
+from nardis_neural.solana.ingest.pumpfun import PUMP_FUN_PROGRAM
 from nardis_neural.solana.ingest.rpc import SolanaRpc
 from nardis_neural.solana.ingest.stream import DEFAULT_PROGRAMS
 from nardis_neural.solana.market import event_sort_key
@@ -155,3 +156,102 @@ def chain(*sources: Iterable[Event]) -> Iterator[Event]:
     """Concatenate event sources in order (e.g. a history replay followed by the live stream)."""
     for src in sources:
         yield from src
+
+
+def clean_history(events: Iterable[Event]) -> tuple[list[Event], dict[str, int]]:
+    """Keep only tokens whose pump.fun creation is inside the history, SOL-priced throughout.
+
+    Removes tokens first seen by a trade (their launch is inferred, so their age and early
+    features would be wrong), pools that existed before the window (e.g. SOL/USDC touched by
+    the same transactions), and tokens traded on curves that report no SOL reserves.
+    Events without a mint (SOL transfers) are kept.
+    """
+    from nardis_neural.solana.events import Swap, TokenLaunch
+
+    ordered = sorted(events, key=event_sort_key)
+    non_sol = {e.mint for e in ordered if isinstance(e, Swap) and e.sol_reserve <= 0}
+    created = {
+        e.mint
+        for e in ordered
+        if isinstance(e, TokenLaunch) and e.creator != "unknown" and e.venue == "pump_fun"
+    } - non_sol
+    seen: set[str] = set()
+    kept: list[Event] = []
+    for e in ordered:
+        mint = getattr(e, "mint", None)
+        if isinstance(e, TokenLaunch):
+            if e.mint not in created or e.creator == "unknown" or e.venue != "pump_fun" or e.mint in seen:
+                continue
+            seen.add(e.mint)
+        elif mint is not None and mint not in seen:
+            continue
+        kept.append(e)
+    stats = {
+        "events_in": len(ordered),
+        "events_kept": len(kept),
+        "tokens": len(created),
+        "non_sol_quoted": len(non_sol),
+    }
+    return kept, stats
+
+
+def fetch_history(
+    rpc: SolanaRpc,
+    out: Any,
+    start_time: float,
+    end_time: float,
+    segment_seconds: float = 600.0,
+    workers: int = 6,
+    programs: list[str] | None = None,
+    log: Any = None,
+    retries: int = 5,
+    retry_wait: float = 30.0,
+) -> dict[str, int]:
+    """Replay ``[start_time, end_time)`` into ``out`` resumably, then write the cleaned history.
+
+    Every segment is its own seeking :class:`HistoryWalker` saved under ``out/segments`` when
+    complete, so an interrupted run resumes where it stopped and a network error costs at most
+    one segment.  The merged, :func:`clean_history`-filtered events are saved to ``out``.
+    """
+    from pathlib import Path
+
+    from nardis_neural.solana.market import EventStore
+
+    say = log or (lambda _m: None)
+    root = Path(out)
+    seg_root = root / "segments"
+    seg_root.mkdir(parents=True, exist_ok=True)
+    n = max(1, int(-(-(end_time - start_time) // segment_seconds)))
+    for k in range(n):
+        d = seg_root / f"seg_{k:04d}"
+        if (d / "done").exists():
+            continue
+        lo, hi = start_time + k * segment_seconds, min(start_time + (k + 1) * segment_seconds, end_time)
+        for attempt in range(retries):
+            try:
+                w = HistoryWalker(
+                    rpc,
+                    lo,
+                    hi,
+                    programs=programs or [PUMP_FUN_PROGRAM],
+                    segment_seconds=segment_seconds,
+                    workers=workers,
+                )
+                store = EventStore(list(w.events()))
+                store.save(d)
+                (d / "done").write_text("1")
+                say(
+                    f"segment {k + 1}/{n}: {w.stats['transactions']} transactions, {w.stats['events']} events"
+                )
+                break
+            except Exception as exc:  # network trouble: retry this segment only
+                say(f"segment {k + 1}/{n} attempt {attempt + 1} failed: {type(exc).__name__}")
+                if attempt + 1 == retries:
+                    raise
+                time.sleep(retry_wait)
+    merged: list[Event] = []
+    for d in sorted(seg_root.glob("seg_*")):
+        merged.extend(EventStore.load(d).sorted())
+    kept, stats = clean_history(merged)
+    EventStore(kept).save(root)
+    return stats | {"segments": n}
