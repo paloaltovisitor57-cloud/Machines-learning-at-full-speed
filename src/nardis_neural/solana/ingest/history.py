@@ -55,6 +55,8 @@ class HistoryWalker:
     segment_seconds: float = 3600.0
     workers: int = 8
     page_size: int = 1000
+    batch_size: int = 2000
+    """Transactions fetched and decoded at a time (bounds memory on busy segments)."""
     seek: bool = True
     """Start listing at ``end_time`` (a signature from a block found by slot search) instead of
     paging back from the chain tip; makes old windows (archival RPC, Old Faithful) reachable."""
@@ -143,11 +145,23 @@ class HistoryWalker:
                             seen.add(s["signature"])
                             sigs.append(s)
                 sigs.sort(key=lambda s: (int(s.get("slot", 0)), float(s.get("blockTime") or 0.0)))
-                txs = [tx for tx in pool.map(lambda s: self.rpc.get_transaction(s["signature"]), sigs) if tx]
-                events = sorted((e for tx in txs for e in self._decode(tx)), key=event_sort_key)
+                # fetch and decode in batches: raw transactions are large, decoded events are small,
+                # so memory stays bounded however busy the segment is (the decoder sees slot order)
+                decoded: list[Event] = []
+                fetched = 0
+                for b in range(0, len(sigs), self.batch_size):
+                    batch = sigs[b : b + self.batch_size]
+                    txs = [
+                        tx for tx in pool.map(lambda s: self.rpc.get_transaction(s["signature"]), batch) if tx
+                    ]
+                    fetched += len(txs)
+                    for tx in txs:
+                        decoded.extend(self._decode(tx))
+                    del txs
+                events = sorted(decoded, key=event_sort_key)
                 self.stats["segments"] += 1
                 self.stats["signatures"] += len(sigs)
-                self.stats["transactions"] += len(txs)
+                self.stats["transactions"] += fetched
                 self.stats["events"] += len(events)
                 yield from events
 
