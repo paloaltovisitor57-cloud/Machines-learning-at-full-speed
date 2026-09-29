@@ -32,11 +32,19 @@ nardis-neural solana meta-train --workspace ws --archive /data/nardis/parquet   
 nardis-neural solana meta-train --workspace ws --archive /data/nardis/buffer.db --table trades
 ```
 
-**Run** (every day), training itself on the archive as it grows:
+**Run** (every day), training itself on the archive as it grows and pushing moonshots to Nardis:
 
 ```bash
-nardis-neural solana serve --workspace ws --port 8787 --archive /data/nardis/parquet
+nardis-neural solana serve --workspace ws --port 8787 --archive /data/nardis/parquet \
+    --alert-url http://127.0.0.1:9000/moonshot --alert-target 10 --alert-min-edge 2
 ```
+
+With `--alert-url`, the sidecar scans the live market every 5 seconds (`--alert-every`) and
+**POSTs each new candidate to Nardis the moment it qualifies**, once per token per hour:
+`{"type": "moonshot", "target": 10, "candidate": {mint, age_seconds, p_ge_2x … p_ge_1000x,
+edge_2x … edge_1000x, chase_target, trust, p_collapse_1m, flags, …}}`. A failed delivery is
+retried at the next scan and never stops the scanner. `GET /health` shows scans, sent alerts
+and errors.
 
 * The archive is a Parquet file or a directory (read recursively, so date-partitioned layouts
   work), or an SQLite `.db` with `--table`. The live service rescans it every 10 minutes
@@ -59,6 +67,7 @@ nardis-neural solana serve --workspace ws --port 8787 --archive /data/nardis/par
 |---|---|---|
 | `GET /health` | at start-up, then periodically | market clock, tracked tokens, installed models, learner status |
 | `GET /tokens?active_seconds=120` | to see what is live | active tokens, youngest first, with age and venue |
+| `GET /moonshots?target=10&min_edge=2` | to look for entries | tokens still in the entry window whose odds of reaching the target are at least `min_edge` times its break-even, best first, vetoed tokens excluded |
 | `GET /ranking?limit=20` | to look for entries | moonshot candidates with `chase_score`, expected multiple, P(≥10x / ≥100x), trust, crash risk, flags |
 | `GET /assess?mint=…` | for one token | the full assessment (risk, tail, tape, edge, guard) |
 | `POST /advise_trade` | **before every trade** | P(win / 10x / 100x) learned from Nardis's own trades, expected multiple, size multiplier 0–2, veto + reason |

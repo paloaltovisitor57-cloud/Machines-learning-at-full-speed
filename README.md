@@ -101,7 +101,7 @@ flowchart TB
 | Continual learning | 3-pool replay (recent FIFO, historical reservoir, protected rare events), 5 sampling strategies, candidate cloning, distillation, EWC, full retraining with configurable weights |
 | Lifecycle | immutable checkpoints, champion/candidate/challenger/retired/failed registry with audit log, shadow mode, 10-gate promotion, manual and optional automatic rollback |
 | Representation | self-supervised pretraining (masked timestep, masked feature, contrastive), embedding export to Parquet/NumPy, KMeans / GMM / HDBSCAN regime discovery |
-| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 240 test functions |
+| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 243 test functions |
 
 ## Quick start
 
@@ -376,7 +376,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │                            edge/ (barriers · model · trees · backtest · research)
 │                            moonshot/ (labels · tail · guard · online · research)
 │                            tape/ (features · dataset · model · research · policy)
-└── tests/                   240 test functions incl. synthetic end-to-end pipeline
+└── tests/                   243 test functions incl. synthetic end-to-end pipeline
 ```
 
 ## Testing & quality gates
@@ -1168,11 +1168,19 @@ nardis-neural solana meta-train --workspace ws --archive /data/nardis/parquet   
 nardis-neural solana meta-train --workspace ws --archive /data/nardis/buffer.db --table trades
 ```
 
-**Run** (every day), training itself on the archive as it grows:
+**Run** (every day), training itself on the archive as it grows and pushing moonshots to Nardis:
 
 ```bash
-nardis-neural solana serve --workspace ws --port 8787 --archive /data/nardis/parquet
+nardis-neural solana serve --workspace ws --port 8787 --archive /data/nardis/parquet \
+    --alert-url http://127.0.0.1:9000/moonshot --alert-target 10 --alert-min-edge 2
 ```
+
+With `--alert-url`, the sidecar scans the live market every 5 seconds (`--alert-every`) and
+**POSTs each new candidate to Nardis the moment it qualifies**, once per token per hour:
+`{"type": "moonshot", "target": 10, "candidate": {mint, age_seconds, p_ge_2x … p_ge_1000x,
+edge_2x … edge_1000x, chase_target, trust, p_collapse_1m, flags, …}}`. A failed delivery is
+retried at the next scan and never stops the scanner. `GET /health` shows scans, sent alerts
+and errors.
 
 * The archive is a Parquet file or a directory (read recursively, so date-partitioned layouts
   work), or an SQLite `.db` with `--table`. The live service rescans it every 10 minutes
@@ -1195,6 +1203,7 @@ nardis-neural solana serve --workspace ws --port 8787 --archive /data/nardis/par
 |---|---|---|
 | `GET /health` | at start-up, then periodically | market clock, tracked tokens, installed models, learner status |
 | `GET /tokens?active_seconds=120` | to see what is live | active tokens, youngest first, with age and venue |
+| `GET /moonshots?target=10&min_edge=2` | to look for entries | tokens still in the entry window whose odds of reaching the target are at least `min_edge` times its break-even, best first, vetoed tokens excluded |
 | `GET /ranking?limit=20` | to look for entries | moonshot candidates with `chase_score`, expected multiple, P(≥10x / ≥100x), trust, crash risk, flags |
 | `GET /assess?mint=…` | for one token | the full assessment (risk, tail, tape, edge, guard) |
 | `POST /advise_trade` | **before every trade** | P(win / 10x / 100x) learned from Nardis's own trades, expected multiple, size multiplier 0–2, veto + reason |
@@ -3486,8 +3495,9 @@ Train the meta-learner on the trading system's own trade archive (only new trade
 
 Run the addon as a local HTTP/JSON sidecar for the trading system (advice only).
 
-Endpoints: GET /health /ranking /assess; POST /advise_trade /settle_trade /hold_advice
-/allocate /ingest /save.  See docs/INTEGRATION.md.
+Endpoints: GET /health /tokens /moonshots /ranking /assess; POST /advise_trade /settle_trade
+/hold_advice /allocate /ingest /save.  --alert-url pushes new moonshot candidates.
+See docs/INTEGRATION.md.
 
 | option | type | default | description |
 |---|---|---|---|
@@ -5191,12 +5201,14 @@ Local HTTP/JSON service: the addon as a sidecar the trading system calls from an
 
 - **class `AddonService`** — Routes requests to the brain under a lock; see the module docstring for the API.
   - `advise_trade(self, p: 'dict[str, Any]') -> 'dict[str, Any]'`
+  - `alerts(self, url: 'str', target: 'float' = 10.0, min_edge: 'float' = 2.0, every: 'float' = 5.0, limit: 'int' = 20, post: 'Any' = None, remember_seconds: 'float' = 3600.0) -> 'threading.Thread'` — Push each new moonshot candidate to ``url`` (JSON POST) the moment it qualifies.
   - `allocate(self, p: 'dict[str, Any]') -> 'dict[str, Any]'`
   - `assess(self, mint: 'str') -> 'dict[str, Any]'`
   - `handle(self, method: 'str', path: 'str', payload: 'dict[str, Any]') -> 'tuple[int, dict[str, Any]]'` — Dispatch one request; returns ``(http_status, body)``.
   - `health(self) -> 'dict[str, Any]'`
   - `hold_advice(self, p: 'dict[str, Any]') -> 'dict[str, Any]'`
   - `ingest(self, p: 'dict[str, Any]') -> 'dict[str, Any]'` — Decode pushed transactions (``getTransaction`` JSON, ``jsonParsed`` encoding) into the brain.
+  - `moonshots(self, target: 'float', limit: 'int' = 20, min_edge: 'float' = 1.0) -> 'dict[str, Any]'` — Live tokens in the entry window whose odds of reaching ``target`` are at least ``min_edge`` times its break-even, best first (manipulation-vetoed tokens excluded).
   - `ranking(self, limit: 'int') -> 'dict[str, Any]'`
   - `save(self) -> 'dict[str, Any]'`
   - `settle_trade(self, p: 'dict[str, Any]') -> 'dict[str, Any]'`
@@ -5471,7 +5483,7 @@ Transparent PyTorch training engine.
 
 ## Test inventory
 
-240 test functions (some are parametrised over devices, experts or formats).
+243 test functions (some are parametrised over devices, experts or formats).
 
 ### `tests/test_cli.py`
 
@@ -5788,6 +5800,7 @@ Moonshot engine: executable peak-multiple labels with censoring, the censored po
 - `test_pushed_transactions_are_ingested`
 - `test_stream_thread_feeds_the_brain`
 - `test_sidecar_keeps_training_on_the_archive`
+- `test_moonshots_and_alerts`
 
 ### `tests/test_solana_signals.py`
 
@@ -5798,6 +5811,8 @@ Runner-specific wallet skill, creator-family track records, sybil-resistant clus
 - `test_cluster_counts_see_through_sybil_wallets`
 - `test_market_heat_windows`
 - `test_staged_insiders_behind_a_relay_are_seen_and_distrusted`
+- `test_runner_hits_are_credited_the_moment_they_happen` — A hit is known when the price crosses the target; only a miss waits for the horizon.
+- `test_market_checkpoints_from_before_early_crediting_still_load`
 
 ### `tests/test_solana_stopping.py`
 

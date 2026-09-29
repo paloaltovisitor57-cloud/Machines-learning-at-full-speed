@@ -132,3 +132,40 @@ def test_staged_insiders_behind_a_relay_are_seen_and_distrusted() -> None:
     assert staged.trust < 0.5 * clean.trust
     heavy = assess_manipulation(f | {"top_cluster_share": 0.3}, None, 0.0, 0.0, 0.0)
     assert any("hidden wallet cluster" in v for v in heavy.vetoes)
+
+
+def test_runner_hits_are_credited_the_moment_they_happen() -> None:
+    """A hit is known when the price crosses the target; only a miss waits for the horizon."""
+    tape = Tape()
+    tape.launch("RUN", T0, "dev")
+    tape.buy("RUN", T0 + 5, "early_bird", 0.5)
+    tape.launch("DUD", T0 + 1, "dev2")
+    tape.buy("DUD", T0 + 6, "bag_holder", 0.5)
+    w = tape.m.wallets
+    before = w.tail_skills(np.array([w.ids["early_bird"]]))[0]
+    for i in range(40):  # the run: right after the 5-minute early-buyer window
+        tape.buy("RUN", T0 + 310 + i, f"fomo_{i}", 5.0)
+    assert tape.m.now - T0 < 400 < tape.m.cfg.tail_horizon_seconds
+    assert tape.m.tail_early_hits == 1  # credited long before the 90-minute horizon
+    assert w.tail_skills(np.array([w.ids["early_bird"]]))[0] > before
+    assert tape.m.tail_updates == 1  # the miss is not known yet
+    tape.m.advance(T0 + tape.m.cfg.tail_horizon_seconds + 10)
+    assert tape.m.tail_updates == 2  # the miss resolves at the horizon; the hit is not counted twice
+    good, bad = w.tail_skills(np.array([w.ids["early_bird"], w.ids["bag_holder"]]))
+    assert good > 0 > bad
+
+
+def test_market_checkpoints_from_before_early_crediting_still_load() -> None:
+    import pickle
+
+    tape = Tape()
+    tape.launch("RUN", T0, "dev")
+    tape.buy("RUN", T0 + 5, "early_bird", 0.5)
+    state = dict(tape.m.__dict__)
+    for k in ("_tail_waiting", "_tail_done", "_tail_seq", "tail_early_hits"):
+        state.pop(k)
+    old = SolanaMarket.__new__(SolanaMarket)
+    old.__setstate__(state)
+    again = pickle.loads(pickle.dumps(old))
+    again.ingest(Swap("RUN", T0 + 30, "second", True, 0.1, 1e6, 40.0, 7e8))
+    assert again.tail_early_hits == 0 and len(again._tail_waiting["RUN"]) == 1  # new buys are tracked

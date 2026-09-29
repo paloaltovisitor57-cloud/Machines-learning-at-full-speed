@@ -115,3 +115,42 @@ def test_sidecar_keeps_training_on_the_archive(served, tmp_path) -> None:  # typ
     status, health = _call(port, "GET", "/health")
     assert status == 200
     assert health["archive"]["last"]["added"] == 30 and len(service.brain.meta.multiple) == before + 30
+
+
+def test_moonshots_and_alerts(served) -> None:  # type: ignore[no-untyped-def]
+    service, port = served
+    assert _call(port, "GET", "/moonshots?target=7")[0] == 400  # not a chase target
+
+    class A:  # a minimal assessment as moonshot_ranking returns it
+        def __init__(self, mint: str, p10: float) -> None:
+            self.mint = mint
+            self.flags: list[str] = []
+            self.tape: dict[str, float] = {}
+            self.moonshot = {"p_ge_10x": p10, "edge_10x": p10 / 0.0323, "chase_score": 1.0}
+
+    mint = next(iter(service.brain.market.tokens))
+    ranked = [A(mint, 0.20), A(mint, 0.02)]
+    real = service.brain.moonshot_ranking
+    service.brain.moonshot_ranking = lambda *a, **k: ranked
+    try:
+        status, body = _call(port, "GET", "/moonshots?target=10&min_edge=2")
+        assert status == 200 and [round(c["p_ge_10x"], 2) for c in body["candidates"]] == [0.2]
+        got: list[dict[str, Any]] = []
+        fail = {"n": 1}
+
+        def post(url: str, payload: dict[str, Any]) -> None:
+            if fail["n"]:
+                fail["n"] -= 1
+                raise ConnectionError("Nardis restarting")
+            got.append(payload)
+
+        service._stop.clear()
+        service.alerts("http://nardis/moon", target=10.0, min_edge=2.0, every=0.01, post=post)
+        deadline = time.time() + 10
+        while service.alert_stats["scans"] < 5 and time.time() < deadline:
+            time.sleep(0.02)
+        service._stop.set()
+        assert len(got) == 1 and got[0]["candidate"]["mint"] == mint  # retried once, then sent once
+        assert service.alert_stats["errors"] == 1
+    finally:
+        service.brain.moonshot_ranking = real

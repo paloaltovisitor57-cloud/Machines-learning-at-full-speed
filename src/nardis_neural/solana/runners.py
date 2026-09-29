@@ -217,6 +217,29 @@ def run_runner_research(
         entry["base_hit_rate"] = float(y[rows].mean()) if len(rows) else None
         report["targets"][f"{k:g}x"] = entry
 
+    # how early can a runner be called? each token entered at its first snapshot at least
+    # `age` seconds after launch, outcome measured from that entry
+    by_age: dict[str, Any] = {}
+    for age in (20.0, 60.0, 120.0, 300.0):
+        rows_a = test[first_signal(ts[test], mints[test], mds.age[test] >= age)]
+        if len(rows_a) == 0:
+            continue
+        surv = tail.predict(x[rows_a]).survival
+        cell: dict[str, Any] = {"entries": len(rows_a)}
+        for k in (2.0, 10.0):
+            y, known = runner_labels(lab.peak[rows_a], lab.censored[rows_a], k)
+            r = np.flatnonzero(known)
+            s_k = surv[:, levels.index(k)]
+            top = r[np.argsort(-s_k[r])][: max(1, round(len(r) * 0.10))] if len(r) else r
+            cell[f"{k:g}x"] = {
+                "auc": _auc(y[r], s_k[r]),
+                "base_rate": float(y[r].mean()) if len(r) else None,
+                "top10_hit_rate": float(y[top].mean()) if len(top) else None,
+                "hits": int(y[r].sum()),
+            }
+        by_age[f"{age:g}s"] = cell
+    report["by_entry_age"] = by_age
+
     # which signals identify runners: permutation importance on the test entries
     importance: dict[str, list[tuple[str, float]]] = {}
     for k in (2.0, 10.0):
@@ -255,6 +278,13 @@ def run_runner_research(
     return report, final
 
 
+def _age_cells(d: dict[str, Any]) -> tuple[str, str]:
+    auc = f"{d['auc']:.3f}" if d["auc"] is not None else "–"
+    if d["top10_hit_rate"] is None or d["base_rate"] is None:
+        return auc, "–"
+    return auc, f"{d['top10_hit_rate']:.0%} / {d['base_rate']:.0%}"
+
+
 def runner_markdown(report: dict[str, Any]) -> str:
     """Readable summary of :func:`run_runner_research`."""
     t = report["tokens"]
@@ -283,6 +313,18 @@ def runner_markdown(report: dict[str, Any]) -> str:
         "",
         f"Detector averaged into the chase for: {', '.join(report.get('blend_targets', [])) or 'none'}",
     ]
+    if report.get("by_entry_age"):
+        lines += [
+            "",
+            "How early can a runner be called (tail model; outcome from that entry price):",
+            "",
+            "| entry | entries | 2x AUC | 2x top 10 % / base | 10x AUC | 10x top 10 % / base |",
+            "|---|---|---|---|---|---|",
+        ]
+        for age, c in report["by_entry_age"].items():
+            a2, h2 = _age_cells(c["2x"])
+            a10, h10 = _age_cells(c["10x"])
+            lines.append(f"| {age} | {c['entries']} | {a2} | {h2} | {a10} | {h10} |")
     for tag, feats in report.get("importance", {}).items():
         lines += ["", f"What identifies {tag} runners (permutation importance, AUC drop):", ""]
         lines += [f"* `{n}`: {v:+.4f}" for n, v in feats if v > 0]

@@ -175,7 +175,14 @@ class SolanaMarket:
         self.family_of: dict[str, int] = {}
         self._tail_pending: list[tuple[float, int, str, int, float, float]] = []
         self._tail_open: dict[str, int] = {}
+        self._tail_waiting: dict[str, list[tuple[float, int, int]]] = {}
+        """Per token: min-heap of (hit price, key, wallet) of early buys still waiting to hit."""
+        self._tail_done: set[int] = set()
+        """Keys of early buys already credited as hits (skipped when their horizon falls due)."""
+        self._tail_seq = 0
         self.tail_updates = 0
+        self.tail_early_hits = 0
+        """Tail successes credited the moment the price crossed the target, before the horizon."""
         self.heat = {
             "launches": _Window(600.0),
             "graduations": _Window(3600.0),
@@ -200,13 +207,38 @@ class SolanaMarket:
             return 0.0
         return float((r["sol_reserve"][lo:hi] / np.maximum(r["token_reserve"][lo:hi], 1e-12)).max())
 
+    def _credit_tail_hits(self, mint: str, price: float) -> None:
+        """Credit every early buy of ``mint`` whose target price has just been reached.
+
+        A hit is known the moment it happens; only a miss needs the full tail horizon.
+        """
+        waiting = self._tail_waiting.get(mint)
+        while waiting and waiting[0][0] <= price:
+            _, key, wid = heapq.heappop(waiting)
+            self.wallets.update_tail(wid, True)
+            self._tail_done.add(key)
+            self.tail_updates += 1
+            self.tail_early_hits += 1
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        # checkpoints written before early tail crediting existed
+        state.setdefault("_tail_waiting", {})
+        state.setdefault("_tail_done", set())
+        state.setdefault("_tail_seq", len(state.get("_tail_pending", ())) + state.get("_seq", 0) + 1)
+        state.setdefault("tail_early_hits", 0)
+        self.__dict__.update(state)
+
     def advance(self, now: float) -> int:
         """Resolve every queued entry whose reputation (or tail) horizon has elapsed by ``now``."""
         while self._tail_pending and self._tail_pending[0][0] <= now:
-            due, _, mint, wid, entry_t, entry_price = heapq.heappop(self._tail_pending)
+            due, key, mint, wid, entry_t, entry_price = heapq.heappop(self._tail_pending)
             self._tail_open[mint] -= 1
             if not self._tail_open[mint]:
                 del self._tail_open[mint]
+                self._tail_waiting.pop(mint, None)
+            if key in self._tail_done:  # already credited as a hit when the price got there
+                self._tail_done.discard(key)
+                continue
             log = self.tokens.get(mint)
             if log is not None:
                 hit = self._max_price(log, entry_t, due) >= self.cfg.tail_multiple * entry_price
@@ -273,10 +305,16 @@ class SolanaMarket:
                 launch_price = log.launch.sol_reserve / max(log.launch.token_reserve, 1e-12)
                 self.peak[e.mint] = max(self.peak.get(e.mint, 1.0), price / max(launch_price, 1e-30))
                 self.heat["volume"].add(e.t, e.sol_amount)
+                self._credit_tail_hits(e.mint, price)
                 if e.is_buy and e.t - log.launch.t <= self.cfg.tail_entry_window:
+                    key = self._tail_seq
+                    self._tail_seq += 1
                     heapq.heappush(
                         self._tail_pending,
-                        (e.t + self.cfg.tail_horizon_seconds, self._seq, e.mint, wid, e.t, price),
+                        (e.t + self.cfg.tail_horizon_seconds, key, e.mint, wid, e.t, price),
+                    )
+                    heapq.heappush(
+                        self._tail_waiting.setdefault(e.mint, []), (self.cfg.tail_multiple * price, key, wid)
                     )
                     self._tail_open[e.mint] = self._tail_open.get(e.mint, 0) + 1
                 if e.is_buy:

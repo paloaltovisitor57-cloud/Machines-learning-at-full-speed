@@ -9,6 +9,8 @@ Endpoints (JSON in, JSON out):
 =========================  =====================================================================
 ``GET  /health``           market clock, tracked tokens, installed models, learner status
 ``GET  /tokens``           tokens active in the last ``?active_seconds=120``, newest launch first
+``GET  /moonshots``        ``?target=10&min_edge=1``: entry-window tokens whose odds of reaching the
+                           target beat its break-even ``min_edge``-fold, best first
 ``GET  /ranking``          moonshot candidates, best ``chase_score`` first (``?limit=20``)
 ``GET  /assess``           full assessment of one token (``?mint=…``)
 ``POST /advise_trade``     ``{trade_id, mint, t?, features{}}`` → P(win / 10x / 100x), size, veto
@@ -35,6 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+from nardis_neural.solana.chase import CHASE_TARGETS
 from nardis_neural.solana.metalabel import TradeOutcome, TradeProposal
 
 
@@ -70,6 +73,9 @@ class AddonService:
             ("GET", "/health"): self.health,
             ("GET", "/tokens"): lambda: self.tokens(float(query.get("active_seconds", 120))),
             ("GET", "/ranking"): lambda: self.ranking(int(query.get("limit", 20))),
+            ("GET", "/moonshots"): lambda: self.moonshots(
+                float(query.get("target", 10)), int(query.get("limit", 20)), float(query.get("min_edge", 1.0))
+            ),
             ("GET", "/assess"): lambda: self.assess(query.get("mint", "")),
             ("POST", "/advise_trade"): lambda: self.advise_trade(payload),
             ("POST", "/settle_trade"): lambda: self.settle_trade(payload),
@@ -110,6 +116,7 @@ class AddonService:
             },
             "stream": self.stream_stats,
             "archive": getattr(self, "archive_stats", {}),
+            "alerts": getattr(self, "alert_stats", {}),
         }
 
     def tokens(self, active_seconds: float) -> dict[str, Any]:
@@ -122,34 +129,101 @@ class AddonService:
         rows.sort(key=lambda r: r["age_seconds"])
         return {"time": now, "tokens": rows}
 
+    def _candidate(self, a: Any) -> dict[str, Any]:
+        m, t = a.moonshot, a.tape
+        row: dict[str, Any] = {
+            "mint": a.mint,
+            "age_seconds": self.brain.market.now - self.brain.market.token(a.mint).launch.t,
+            "chase_score": m.get("chase_score"),
+            "expected_multiple": m.get("expected_multiple_blend", m.get("expected_multiple")),
+            "chase_target": m.get("chase_target"),
+            "chase_edge": m.get("chase_edge"),
+            "tail_ev": m.get("tail_ev"),
+            "lottery_kelly": m.get("lottery_kelly"),
+            "trust": m.get("trust"),
+            "p_collapse_1m": t.get("p_collapse_1m"),
+            "p_collapse_5m": t.get("p_collapse_5m"),
+            "flags": a.flags,
+        }
+        for k in CHASE_TARGETS:
+            tag = f"{k:g}x"
+            row[f"p_ge_{tag}"] = m.get(f"p_ge_{tag}")
+            row[f"edge_{tag}"] = m.get(f"edge_{tag}")
+            if f"runner_p_{tag}" in m:
+                row[f"runner_p_{tag}"] = m[f"runner_p_{tag}"]
+        return row
+
     def ranking(self, limit: int) -> dict[str, Any]:
-        rows = []
-        for a in self.brain.moonshot_ranking()[: max(limit, 0)]:
-            m, t = a.moonshot, a.tape
-            rows.append(
-                {
-                    "mint": a.mint,
-                    "chase_score": m.get("chase_score"),
-                    "expected_multiple": m.get("expected_multiple_blend", m.get("expected_multiple")),
-                    "p_ge_10x": m.get("p_ge_10x"),
-                    "p_ge_100x": m.get("p_ge_100x"),
-                    "p_ge_1000x": m.get("p_ge_1000x"),
-                    "chase_target": m.get("chase_target"),
-                    "chase_edge": m.get("chase_edge"),
-                    "edge_2x": m.get("edge_2x"),
-                    "edge_5x": m.get("edge_5x"),
-                    "edge_10x": m.get("edge_10x"),
-                    "edge_100x": m.get("edge_100x"),
-                    "edge_1000x": m.get("edge_1000x"),
-                    "tail_ev": m.get("tail_ev"),
-                    "lottery_kelly": m.get("lottery_kelly"),
-                    "trust": m.get("trust"),
-                    "p_collapse_1m": t.get("p_collapse_1m"),
-                    "p_collapse_5m": t.get("p_collapse_5m"),
-                    "flags": a.flags,
-                }
-            )
+        rows = [self._candidate(a) for a in self.brain.moonshot_ranking()[: max(limit, 0)]]
         return {"time": self.brain.market.now, "candidates": rows}
+
+    def moonshots(self, target: float, limit: int = 20, min_edge: float = 1.0) -> dict[str, Any]:
+        """Live tokens in the entry window whose odds of reaching ``target`` are at least
+        ``min_edge`` times its break-even, best first (manipulation-vetoed tokens excluded)."""
+        if target not in CHASE_TARGETS:
+            raise ValueError(f"target must be one of {', '.join(f'{k:g}' for k in CHASE_TARGETS)}")
+        tag = f"{target:g}x"
+        rows = []
+        for a in self.brain.moonshot_ranking():
+            edge = a.moonshot.get(f"edge_{tag}")
+            if edge is not None and edge >= min_edge:
+                rows.append(self._candidate(a) | {"target": target, "edge": edge})
+        rows.sort(key=lambda r: -r["edge"])
+        return {
+            "time": self.brain.market.now,
+            "target": target,
+            "min_edge": min_edge,
+            "candidates": rows[:limit],
+        }
+
+    def alerts(
+        self,
+        url: str,
+        target: float = 10.0,
+        min_edge: float = 2.0,
+        every: float = 5.0,
+        limit: int = 20,
+        post: Any = None,
+        remember_seconds: float = 3600.0,
+    ) -> threading.Thread:
+        """Push each new moonshot candidate to ``url`` (JSON POST) the moment it qualifies.
+
+        Every ``every`` seconds the live market is scanned (:meth:`moonshots`); a token is sent
+        once per ``remember_seconds``.  Delivery failures are counted and retried at the next
+        scan; they never stop the scanner.
+        """
+        send = post or _post_json
+        sent: dict[str, float] = {}
+        stats: dict[str, Any] = {"scans": 0, "sent": 0, "errors": 0, "url": url}
+        self.alert_stats = stats
+
+        def loop() -> None:
+            while not self._stop.is_set():
+                try:
+                    with self.lock:
+                        found = self.moonshots(target, limit, min_edge)["candidates"]
+                    now = time.time()
+                    for mint in [m for m, ts in sent.items() if now - ts > remember_seconds]:
+                        del sent[mint]
+                    for row in found:
+                        if row["mint"] in sent:
+                            continue
+                        try:
+                            send(url, {"type": "moonshot", "target": target, "candidate": _clean(row)})
+                            sent[row["mint"]] = now
+                            stats["sent"] += 1
+                        except Exception:
+                            stats["errors"] += 1
+                    stats["scans"] += 1
+                except RuntimeError:  # no tail model installed yet
+                    stats["errors"] += 1
+                except Exception:
+                    stats["errors"] += 1
+                self._stop.wait(every)
+
+        thread = threading.Thread(target=loop, name="addon-alerts", daemon=True)
+        thread.start()
+        return thread
 
     def assess(self, mint: str) -> dict[str, Any]:
         if not mint:
@@ -319,6 +393,16 @@ class AddonService:
         self._stop.set()
         with self.lock:
             self.brain.save()
+
+
+def _post_json(url: str, body: dict[str, Any], timeout: float = 5.0) -> None:
+    import urllib.request
+
+    req = urllib.request.Request(
+        url, json.dumps(body).encode(), {"Content-Type": "application/json"}, method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        resp.read()
 
 
 def make_server(service: AddonService, host: str = "127.0.0.1", port: int = 8787) -> ThreadingHTTPServer:

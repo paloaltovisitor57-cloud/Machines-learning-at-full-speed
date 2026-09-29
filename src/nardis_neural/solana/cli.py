@@ -696,8 +696,9 @@ def serve(
 ) -> None:
     """Run the addon as a local HTTP/JSON sidecar for the trading system (advice only).
 
-    Endpoints: GET /health /ranking /assess; POST /advise_trade /settle_trade /hold_advice
-    /allocate /ingest /save.  See docs/INTEGRATION.md."""
+    Endpoints: GET /health /tokens /moonshots /ranking /assess; POST /advise_trade /settle_trade
+    /hold_advice /allocate /ingest /save.  --alert-url pushes new moonshot candidates.
+    See docs/INTEGRATION.md."""
     from nardis_neural.solana.brain import SolanaBrain
     from nardis_neural.solana.ingest import ChainStreamer, SolanaRpc
     from nardis_neural.solana.service import AddonService, make_server
