@@ -101,7 +101,7 @@ flowchart TB
 | Continual learning | 3-pool replay (recent FIFO, historical reservoir, protected rare events), 5 sampling strategies, candidate cloning, distillation, EWC, full retraining with configurable weights |
 | Lifecycle | immutable checkpoints, champion/candidate/challenger/retired/failed registry with audit log, shadow mode, 10-gate promotion, manual and optional automatic rollback |
 | Representation | self-supervised pretraining (masked timestep, masked feature, contrastive), embedding export to Parquet/NumPy, KMeans / GMM / HDBSCAN regime discovery |
-| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 237 test functions |
+| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 240 test functions |
 
 ## Quick start
 
@@ -376,7 +376,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │                            edge/ (barriers · model · trees · backtest · research)
 │                            moonshot/ (labels · tail · guard · online · research)
 │                            tape/ (features · dataset · model · research · policy)
-└── tests/                   237 test functions incl. synthetic end-to-end pipeline
+└── tests/                   240 test functions incl. synthetic end-to-end pipeline
 ```
 
 ## Testing & quality gates
@@ -3464,6 +3464,17 @@ Endpoints: GET /health /ranking /assess; POST /advise_trade /settle_trade /hold_
 | `--return-percent` | flag | false | return column in percent |
 | `--device` | str | null | cpu \| cuda \| cuda:0 \| mps (default: auto) |
 
+### `nardis-neural solana runner-research`
+
+Train the runner detector (P(reach 2x / 5x / 10x / 100x / 1000x)), score it against the tail
+model on later tokens, show which signals identify runners, and install it.
+
+| option | type | default | description |
+|---|---|---|---|
+| `--workspace`, `-w` | path | required | Solana workspace (history) |
+| `--horizon-minutes` | float | 30.0 | minutes after entry to hit the target |
+| `--test-fraction` | float | 0.35 | share of the latest-launched tokens held out for the test |
+
 ### `nardis-neural solana forward-report`
 
 Paper-ticket scorecard of the ML signals (forward test recorded during stream / stream-train).
@@ -4678,6 +4689,7 @@ SolanaBrain — the complete Solana ML module behind one small API.
   - `evict(self) -> 'list[str]'` — Label finished moonshot rows, then drop tokens idle for ``evict_idle_seconds``.
   - `fit_edge(self, spec: 'BarrierSpec | None' = None, n_folds: 'int' = 4, max_positions: 'int' = 5, history: 'EventStore | None' = None, log: 'Callable[[str], None] | None' = None) -> 'dict[str, Any]'` — Walk-forward edge research on the workspace history; installs the edge model.
   - `fit_moonshot(self, spec: 'MoonshotSpec | None' = None, inputs: 'str' = 'raw', n_folds: 'int' = 4, test_fraction: 'float' = 0.35, min_expected_multiple: 'float' = 1.0, history: 'EventStore | None' = None, archetypes: 'dict[str, str] | None' = None, log: 'Callable[[str], None] | None' = None) -> 'dict[str, Any]'` — Fat-tail research on the workspace history; installs the tail model.
+  - `fit_runners(self, spec: 'MoonshotSpec | None' = None, test_fraction: 'float' = 0.35, history: 'EventStore | None' = None, log: 'Callable[[str], None] | None' = None) -> 'dict[str, Any]'` — Runner-identification research on the workspace history; installs the refitted detector.
   - `fit_stopping(self, spec: 'MoonshotSpec | None' = None, test_fraction: 'float' = 0.35, spacing: 'float' = 30.0, history: 'EventStore | None' = None, archetypes: 'dict[str, str] | None' = None, log: 'Callable[[str], None] | None' = None, utility: 'str' = 'log', gamma: 'float' = 0.5) -> 'dict[str, Any]'` — Optimal-stopping exit research on the workspace history; installs the refitted model.
   - `fit_tape(self, spec: 'MoonshotSpec | None' = None, tape: 'TapeSpec | None' = None, test_fraction: 'float' = 0.35, members: 'int' = 3, epochs: 'int' = 40, history: 'EventStore | None' = None, archetypes: 'dict[str, str] | None' = None, log: 'Callable[[str], None] | None' = None, d: 'int' = 64, layers: 'int' = 2) -> 'dict[str, Any]'` — Tape Transformer research on the workspace history; installs the refitted model.
   - `hold_advice(self, mint: 'str', t_signal: 'float') -> 'dict[str, float]'` — Sell-or-hold advice for a ticket signalled at ``t_signal`` (an estimate, not an order).
@@ -4758,6 +4770,7 @@ The edge the addon always chases: 2x, 5x, 10x, 100x and 1000x.
 - `moonshot_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history + champion)')]", inputs: "Annotated[str, typer.Option('--inputs', help='raw (on-chain features) or neural (walk-forward OOF stack)')]" = 'raw', size: "Annotated[float, typer.Option('--size', help='ticket size, SOL')]" = 0.5, latency: "Annotated[float, typer.Option('--latency', help='entry/exit latency, seconds')]" = 1.0, horizon_hours: "Annotated[float, typer.Option('--horizon-hours', help='outcome horizon after entry, hours')]" = 6.0, max_entry_age: "Annotated[float, typer.Option('--max-entry-age', help='latest entry after launch, seconds')]" = 600.0, min_ev: "Annotated[float, typer.Option('--min-ev', help='ticket when E[ladder payoff] per SOL is at least this')]" = 1.0, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of later tokens held out for the test')]" = 0.35, folds: "Annotated[int, typer.Option('--folds', help='walk-forward folds (neural inputs)')]" = 4, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Fat-tail research: P(≥2x … ≥1000x) per token, ladder payoff, lottery-Kelly sizing hints.
 - `replay(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace directory')]", events: "Annotated[Path, typer.Option('--events', '-e', help='new events to stream in')]", every: "Annotated[float, typer.Option('--assess-every', help='seconds between assessment rounds')]" = 10.0, out: "Annotated[Path | None, typer.Option('--out', '-o', help='JSONL of assessments')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Stream events through the brain as if live: assess, resolve outcomes, then maintain.
 - `research_suite(seeds: "Annotated[str, typer.Option('--seeds', help='comma-separated simulator seeds')]" = '7,19,23', market: "Annotated[str, typer.Option('--market', help='archetype mix: default or degen')]" = 'degen', tokens: "Annotated[int, typer.Option('--tokens', help='launches per simulated market')]" = 150, hours: "Annotated[float, typer.Option('--hours', help='simulated hours per market')]" = 8.0, tape: "Annotated[bool, typer.Option('--tape/--no-tape', help='also run the (slower) tape research')]" = False, out: "Annotated[Path | None, typer.Option('--out', '-o', help='write the JSON result here')]" = None) -> 'None'` — Run the moonshot (and optionally tape) research on several independent simulated markets and report every metric as mean ± sd across seeds.
+- `runner_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history)')]", horizon_minutes: "Annotated[float, typer.Option('--horizon-minutes', help='minutes after entry to hit the target')]" = 30.0, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of the latest-launched tokens held out for the test')]" = 0.35) -> 'None'` — Train the runner detector (P(reach 2x / 5x / 10x / 100x / 1000x)), score it against the tail model on later tokens, show which signals identify runners, and install it.
 - `serve(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace')]", host: "Annotated[str, typer.Option('--host', help='bind address (keep 127.0.0.1 unless firewalled)')]" = '127.0.0.1', port: "Annotated[int, typer.Option('--port', help='HTTP port')]" = 8787, rpc: "Annotated[str | None, typer.Option('--rpc', envvar='SOLANA_RPC_URL', help='read-only RPC endpoint URL')]" = None, stream: "Annotated[bool, typer.Option('--stream/--no-stream', help='feed the live chain into the brain in the background')]" = True, poll_interval: "Annotated[float, typer.Option('--poll-interval', help='seconds between RPC polls')]" = 2.0, workers: "Annotated[int, typer.Option('--workers', help='parallel getTransaction calls')]" = 6, pumpswap: "Annotated[bool, typer.Option('--pumpswap/--no-pumpswap', help='also poll PumpSwap (heavy: hundreds of tx/s)')]" = False, archive: "Annotated[Path | None, typer.Option('--archive', '-a', help='trade archive to keep training on (Parquet or SQLite)')]" = None, table: "Annotated[str | None, typer.Option('--table', help='SQLite table holding the trades')]" = None, archive_every: "Annotated[float, typer.Option('--archive-every', help='seconds between archive rescans')]" = 600.0, maps: "Annotated[list[str] | None, typer.Option('--map', help='field=column (repeatable)')]" = None, features: "Annotated[str | None, typer.Option('--features', help='comma-separated feature columns')]" = None, return_percent: "Annotated[bool, typer.Option('--return-percent', help='return column in percent')]" = False, device: 'DeviceOpt' = None) -> 'None'` — Run the addon as a local HTTP/JSON sidecar for the trading system (advice only).
 - `simulate(out: "Annotated[Path, typer.Option('--out', '-o', help='event directory (Parquet tables)')]", tokens: "Annotated[int, typer.Option('--tokens', help='number of token launches to simulate')]" = 40, seed: "Annotated[int, typer.Option('--seed', help='random seed')]" = 0, prefix: "Annotated[str, typer.Option('--prefix', help='mint/wallet name prefix (distinguishes eras)')]" = 'Mint', start_time: "Annotated[float, typer.Option('--start-time', help='simulation start, unix seconds')]" = 1750000000.0, hours: "Annotated[float, typer.Option('--hours', help='simulated duration, hours')]" = 3.0, market: "Annotated[str, typer.Option('--market', help='archetype mix: default, or degen (mostly duds + runners)')]" = 'default', runners: "Annotated[float | None, typer.Option('--runners', help='override the share of 100–1000x runner launches')]" = None, herding: "Annotated[bool, typer.Option('--herding/--no-herding', help='self-exciting (Hawkes) retail demand')]" = False) -> 'None'` — Simulate memecoin launches (snipers, bundles, rugs, graduations, runners, smart money, bots).
 - `stopping_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history)')]", spacing: "Annotated[float, typer.Option('--spacing', help='minimum seconds between exit decisions')]" = 30.0, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of the latest-launched tokens held out for the test')]" = 0.35, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None, utility: "Annotated[str, typer.Option('--utility', help='installed exit objective: log (compounding) or power (runner mode)')]" = 'log', gamma: "Annotated[float, typer.Option('--gamma', help='risk aversion of power utility, 0 < gamma < 1')]" = 0.5) -> 'None'` — Fit the optimal-stopping exit model (Longstaff–Schwartz, log utility), score it against hold, timers and the ladder on later tokens, and install it.
@@ -5116,6 +5129,19 @@ Solana launch-risk model: P(rug), P(graduation), P(dev dump) within the risk hor
   - `predict(self, x: 'F32') -> 'tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]'` — Calibrated probabilities (N, L) and member disagreement (std, N, L).
   - `save(self, directory: 'str | Path') -> 'None'` — Write members, scaler and ``risk.json`` (calibrators, report) to ``directory``.
 
+### `nardis_neural.solana.runners`
+
+Runner identification: recognise, early, the tokens that go on to 2x, 5x, 10x, 100x, 1000x.
+
+- `run_runner_research(store: 'Any', cfg: 'Any', spec: 'Any' = None, test_fraction: 'float' = 0.35, seed: 'int' = 0, log: 'Any' = None, importance_repeats: 'int' = 5) -> 'tuple[dict[str, Any], RunnerDetector]'` — Train on earlier tokens (labels truncated at the cutoff), score once on later tokens.
+- `runner_labels(peak: 'F64', censored: 'npt.NDArray[np.bool_]', target: 'float') -> 'tuple[F64, npt.NDArray[np.bool_]]'` — ``(label, known)`` for reaching ``target``: resolved rows, plus censored rows that already hit it.
+- `runner_markdown(report: 'dict[str, Any]') -> 'str'` — Readable summary of :func:`run_runner_research`.
+- **class `RunnerDetector`** — One boosted classifier per chase target, exported to plain arrays.
+  - `fit(self, x: 'npt.NDArray[Any]', peak: 'F64', censored: 'npt.NDArray[np.bool_]') -> 'dict[str, Any]'` — Fit every target with enough known hits; returns per-target counts.
+  - `load(cls, directory: 'str | Path') -> 'RunnerDetector'`
+  - `predict(self, x: 'npt.NDArray[Any]') -> 'dict[float, F64]'` — P(reach k) per trained target, made monotone in k.
+  - `save(self, directory: 'str | Path') -> 'None'`
+
 ### `nardis_neural.solana.service`
 
 Local HTTP/JSON service: the addon as a sidecar the trading system calls from any language.
@@ -5402,7 +5428,7 @@ Transparent PyTorch training engine.
 
 ## Test inventory
 
-237 test functions (some are parametrised over devices, experts or formats).
+240 test functions (some are parametrised over devices, experts or formats).
 
 ### `tests/test_cli.py`
 
@@ -5705,6 +5731,12 @@ Moonshot engine: executable peak-multiple labels with censoring, the censored po
 - `test_manipulation_guard_only_lowers_trust`
 - `test_censoring_is_not_mistaken_for_the_outcome`
 - `test_runners_and_moonshot_brain_integration`
+
+### `tests/test_solana_runners.py`
+
+- `test_censored_rows_that_already_hit_are_known_positives`
+- `test_detector_learns_an_interaction_and_round_trips`
+- `test_runner_research_and_brain_integration`
 
 ### `tests/test_solana_service.py`
 

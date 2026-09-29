@@ -53,6 +53,7 @@ from nardis_neural.solana.moonshot.guard import GuardConfig, assess_manipulation
 from nardis_neural.solana.moonshot.labels import position_marks
 from nardis_neural.solana.moonshot.online import MoonshotTracker
 from nardis_neural.solana.risk import SolanaRiskModel
+from nardis_neural.solana.runners import RunnerDetector, run_runner_research, runner_markdown
 from nardis_neural.solana.stopping import (
     StoppingModel,
     StoppingPath,
@@ -219,6 +220,12 @@ class SolanaBrain:
             TapeModel.load(self.root / "tape") if (self.root / "tape" / "tape.json").exists() else None
         )
         """Tape Transformer (tail + collapse), installed by :meth:`fit_tape`."""
+        self.runners = (
+            RunnerDetector.load(self.root / "runners")
+            if (self.root / "runners" / "runners.json").exists()
+            else None
+        )
+        """Runner detector (P(reach 2x … 1000x)), installed by :meth:`fit_runners`."""
         meta_dir = self.root / "meta"
         self.meta = MetaLearner.load(meta_dir) if (meta_dir / "meta.json").exists() else MetaLearner()
         """Learns from the trading system's own trades (see :meth:`advise_trade`)."""
@@ -422,6 +429,7 @@ class SolanaBrain:
             x = np.nan_to_num(current).astype(np.float32)
         tp = model.predict(x)
         oor = model.out_of_range_share(x)
+        runner_p = self.runners.predict(np.nan_to_num(current).astype(np.float64)) if self.runners else {}
         ood = np.asarray(out.get("ood_score", np.zeros(len(mints))), dtype=np.float64).reshape(-1)
         rug_col = RISK_LABELS.index("rug")
         spec = model.spec
@@ -453,7 +461,17 @@ class SolanaBrain:
                 "chase_score": 0.0 if vetoed else verdict.trust * float(tp.expected_multiple[i]),
             }
             v |= {f"guard.{name}": value for name, value in verdict.factors.items()}
-            chase = chase_profile({k: v.get(f"p_ge_{k:g}x", 0.0) for k in CHASE_TARGETS})
+            for k, pk in runner_p.items():
+                v[f"runner_p_{k:g}x"] = float(pk[i])
+            # the chase uses the average of the tail model and the runner detector where both exist
+            chase = chase_profile(
+                {
+                    k: 0.5 * (v.get(f"p_ge_{k:g}x", 0.0) + v[f"runner_p_{k:g}x"])
+                    if f"runner_p_{k:g}x" in v
+                    else v.get(f"p_ge_{k:g}x", 0.0)
+                    for k in CHASE_TARGETS
+                }
+            )
             if vetoed:  # a manipulated token is never a chase, whatever its tail looks like
                 chase |= {"chase_target": 0.0, "chase_edge": 0.0}
             v |= {
@@ -763,6 +781,28 @@ class SolanaBrain:
         self.tape_model = research.model
         self.forward.alarm = self._ledger_alarm()
         return research.report
+
+    def fit_runners(
+        self,
+        spec: MoonshotSpec | None = None,
+        test_fraction: float = 0.35,
+        history: EventStore | None = None,
+        log: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        """Runner-identification research on the workspace history; installs the refitted detector."""
+        report, det = run_runner_research(
+            history or self.history,
+            self.cfg,
+            spec or (self.moonshot.spec if self.moonshot is not None else MoonshotSpec()),
+            test_fraction=test_fraction,
+            log=log,
+        )
+        d = self.root / "runners"
+        det.report = det.report | {"research": report}
+        det.save(d)
+        (d / "REPORT.md").write_text(runner_markdown(report))
+        self.runners = det
+        return report
 
     def trade_context(self, mint: str) -> dict[str, float]:
         """The addon's market view of a token right now, flattened for :meth:`advise_trade`."""

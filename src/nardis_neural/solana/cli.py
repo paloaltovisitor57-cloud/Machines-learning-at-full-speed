@@ -732,6 +732,32 @@ def serve(
         service.stop()
 
 
+@app.command("runner-research")
+def runner_research(
+    workspace: Annotated[Path, typer.Option("--workspace", "-w", help="Solana workspace (history)")],
+    horizon_minutes: Annotated[
+        float,
+        typer.Option("--horizon-minutes", help="minutes after entry to hit the target"),
+    ] = 30.0,
+    test_fraction: Annotated[
+        float,
+        typer.Option("--test-fraction", help="share of the latest-launched tokens held out for the test"),
+    ] = 0.35,
+) -> None:
+    """Train the runner detector (P(reach 2x / 5x / 10x / 100x / 1000x)), score it against the tail
+    model on later tokens, show which signals identify runners, and install it."""
+    from nardis_neural.solana.brain import SolanaBrain
+    from nardis_neural.solana.moonshot import MoonshotSpec
+    from nardis_neural.solana.runners import runner_markdown
+
+    brain = SolanaBrain(workspace)
+    report = brain.fit_runners(
+        MoonshotSpec(horizon_seconds=horizon_minutes * 60), test_fraction=test_fraction, log=typer.echo
+    )
+    typer.echo(runner_markdown(report))
+    typer.echo(f"runner detector installed in {workspace / 'runners'}")
+
+
 @app.command("forward-report")
 def forward_report(
     workspace: Annotated[Path, typer.Option("--workspace", "-w", help="Solana workspace")],
