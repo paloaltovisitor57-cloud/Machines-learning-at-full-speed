@@ -168,6 +168,8 @@ class TransactionDecoder:
         tok: float,
         lp_burned: float,
         slot: int,
+        name: str = "",
+        symbol: str = "",
     ) -> None:
         if mint in self.venue:
             return
@@ -186,6 +188,8 @@ class TransactionDecoder:
                 freeze_authority_revoked=freeze_ok,
                 lp_burned_fraction=lp_burned,
                 slot=slot,
+                name=name,
+                symbol=symbol,
             )
         )
 
@@ -258,7 +262,19 @@ class TransactionDecoder:
     # ------------------------------------------------------------------ pump.fun
     def _pump(self, ev: object, out: list[Event], swaps: list[Event], t: float, slot: int) -> None:
         if isinstance(ev, PumpCreate):
-            self._launch(out, ev.mint, t, ev.user, "pump_fun", PUMP_VIRTUAL_SOL, 1_073_000_000.0, 1.0, slot)
+            self._launch(
+                out,
+                ev.mint,
+                t,
+                ev.user,
+                "pump_fun",
+                PUMP_VIRTUAL_SOL,
+                1_073_000_000.0,
+                1.0,
+                slot,
+                name=ev.name,
+                symbol=ev.symbol,
+            )
         elif isinstance(ev, PumpTrade):
             if ev.virtual_sol_lamports == 0:
                 # BuyV2 / SellV2 curves report no SOL amounts or reserves (not SOL-quoted):

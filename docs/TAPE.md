@@ -1,7 +1,7 @@
 # Tape Transformer (`nardis_neural.solana.tape`)
 
 Every other model in this repository sees a token through aggregates: per-minute bars and
-73 summary features. That throws away the two things that decide a memecoin launch: **who**
+76 summary features. That throws away the two things that decide a memecoin launch: **who**
 is trading, and **in what order**. The Tape Transformer reads the raw trade tape directly.
 
 ```mermaid
@@ -12,7 +12,7 @@ flowchart LR
         R1[recency embedding]
     end
     TAPE --> ENC[pre-LayerNorm Transformer<br/>+ learned summary token<br/>padding masked]
-    CUR[73 current features] --> MLP[MLP]
+    CUR[76 current features] --> MLP[MLP]
     ENC --> FUSE[fuse: summary ‖ mean ‖ current]
     MLP --> FUSE
     FUSE --> TAIL[tail head<br/>mixture of log-logistics<br/>P ≥ 2x … 1000x]

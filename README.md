@@ -101,7 +101,7 @@ flowchart TB
 | Continual learning | 3-pool replay (recent FIFO, historical reservoir, protected rare events), 5 sampling strategies, candidate cloning, distillation, EWC, full retraining with configurable weights |
 | Lifecycle | immutable checkpoints, champion/candidate/challenger/retired/failed registry with audit log, shadow mode, 10-gate promotion, manual and optional automatic rollback |
 | Representation | self-supervised pretraining (masked timestep, masked feature, contrastive), embedding export to Parquet/NumPy, KMeans / GMM / HDBSCAN regime discovery |
-| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 243 test functions |
+| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 247 test functions |
 
 ## Quick start
 
@@ -376,7 +376,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │                            edge/ (barriers · model · trees · backtest · research)
 │                            moonshot/ (labels · tail · guard · online · research)
 │                            tape/ (features · dataset · model · research · policy)
-└── tests/                   243 test functions incl. synthetic end-to-end pipeline
+└── tests/                   247 test functions incl. synthetic end-to-end pipeline
 ```
 
 ## Testing & quality gates
@@ -442,7 +442,7 @@ The trading system never touches model internals.
   (sybil / bundle discovery) and Beta-posterior reputations learned online *only* from
   outcomes that have already resolved, plus rug attribution to creator clusters. A second,
   **runner-specific skill** credits wallets that buy early into tokens that later run 10x;
-- **73 named on-chain features**: holder concentration, dev / sniper / bundle /
+- **76 named on-chain features**: holder concentration, dev / sniper / bundle /
   creator-cluster exposure, fresh wallets, smart-money flow, runner-skilled buyers,
   sybil-resistant counts per funding cluster, the supply held by a hidden multi-wallet cluster, the **creator family's track record** (prior
   launches, best peak, rug and graduation rates), market-wide heat, bots, priority fees and
@@ -530,7 +530,7 @@ that runs 100x to 1000x. See [docs/MOONSHOT.md](docs/MOONSHOT.md).
 - the last 96 trades, each with 18 features (side, size, timing, price move, fees, and the
   trader's skill, runner skill, cluster, creator link and freshness as known now), plus a
   **learned wallet embedding** keyed by a stable hash of the address;
-- a small pre-LayerNorm **Transformer** with a summary token, fused with the 73 current
+- a small pre-LayerNorm **Transformer** with a summary token, fused with the 76 current
   features. Frequency gating and wallet dropout stop the wallet table from memorising noise;
 - two heads: the censored power-law **tail** (P ≥ 2x … 1000x) and a discrete-time **collapse
   hazard** (P value halves within 1 min / 5 min / 15 min / 1 h), which is the exit signal;
@@ -1473,7 +1473,7 @@ flowchart LR
     T --> WI[WalletIntel<br/>funding clusters · hubs]
     MK -->|buys queued, resolved after horizon| REP[Wallet reputations<br/>Beta posterior · rug marks]
     WI --> REP
-    MK & REP --> FB[SolanaFeatureBuilder<br/>73 named features · 1s/5s/30s bars · wallet graph]
+    MK & REP --> FB[SolanaFeatureBuilder<br/>76 named features · 1s/5s/30s bars · wallet graph]
     FB --> NE[Neural ensemble<br/>Transformer · GRU · TCN · MLP · Graph + MoE]
     NE --> EMB[MarketStateEmbedding]
     EMB & FB --> RK[Risk ensemble<br/>P rug · P graduation · P dev dump]
@@ -1511,7 +1511,7 @@ canonical order (launch → transfer → migration → LP → swap at equal time
 
 ### 3. Features (`features.py`)
 
-73 named current-state features (`CURRENT_FEATURES`):
+76 named current-state features (`CURRENT_FEATURES`):
 
 | Group | Features |
 |---|---|
@@ -1528,12 +1528,21 @@ canonical order (launch → transfer → migration → LP → swap at equal time
 | Creator family | prior launches, best prior peak multiple, prior rug rate, prior graduation rate, time since the family's last launch |
 | Criticality | Hawkes branching ratio of buys and of sells, its two-minute trend, herding timescale, endogenous share of buys ([CRITICALITY.md](docs/CRITICALITY.md)) |
 | Market heat | launches in 10 min, graduations in 1 h, total swap volume in 5 min (all tokens) |
+| **Narratives** | heat of the token's hottest name/symbol word (other tokens with that word climbing 2x…1000x, 30-min half-life, its own run excluded), copycats with the same name or symbol in the last hour, copies a token that reached 5x in the last 6 h ([narrative.py](src/nardis_neural/solana/narrative.py)) |
 
 **Runner skill** is a second, separate wallet reputation. A buy in a token's first
 `tail_entry_window` seconds (300) counts as a success if the price later reaches
 `tail_multiple` × the entry price (10x) within `tail_horizon_seconds` (1.5 h). The skill
 is an evidence-shrunk log-lift of the wallet's hit rate over a Beta(0.1, 1.9) prior (base
 rate 5 %). Being good at 60-second scalps and being early to runners are different skills.
+A **hit is credited the moment the price crosses the target**; only a miss waits for the
+full horizon. The first real-data runs showed why this matters: with 90-minute-late credit,
+runner skill stayed blind for the first 1.5 hours of any window and live trading learned of
+a wallet's hit long after it happened.
+
+**Narratives** come from the token's name and symbol (carried on `TokenLaunch` from the
+pump.fun creation event). Memecoins run in themes: when a cat token runs, other cat tokens
+get bought, and a hot name draws copycats within minutes.
 
 A **creator family** is the creator's funder, or the creator itself when the funder is an
 exchange-like hub (more than `hub_threshold` funded wallets). Serial deployers who spin up
@@ -1639,7 +1648,7 @@ An agent-based simulator used for tests and demos. It is not a market model.
 |---|---|
 | simulate 40 launches (~50 k events) | ~4 s |
 | replay 52 k events into a market | ~0.8 s |
-| build one observation (73 features + 3 bar streams + graph) | ~2.9 ms |
+| build one observation (73 features when measured + 3 bar streams + graph) | ~2.9 ms |
 | extract one 96-trade tape | ~0.9 ms |
 | dataset from 40 launches (~7.8 k leakage-free snapshots) | ~25 s |
 | `assess_many` 1 / 8 / 32 tokens (tiny 2-member test model) | ~23 / 38 / 74 ms |
@@ -1796,7 +1805,7 @@ is real.
 
 ```mermaid
 flowchart LR
-    H[(event history)] --> DS[causal snapshots<br/>73 features · bars · graph]
+    H[(event history)] --> DS[causal snapshots<br/>76 features · bars · graph]
     H --> TB[executable triple-barrier outcomes<br/>latency · impact · fees · TP / SL / time]
     DS --> WF[walk-forward retraining<br/>neural ensemble + risk model]
     WF --> OOF[out-of-fold forecasts<br/>= what a live system would have seen]
@@ -1837,7 +1846,7 @@ The inputs are:
 * the neural forecasts per horizon: mean, standard deviation, z-score, event
   probabilities, max upside and drawdown, volatility;
 * uncertainty: epistemic, aleatoric, OOD, disagreement;
-* expert gate weights, P(rug / graduation / dev dump), and all raw on-chain features (53 when the results below were measured, 73 now).
+* expert gate weights, P(rug / graduation / dev dump), and all raw on-chain features (53 when the results below were measured, 76 now).
 
 It is a bootstrap ensemble of MLPs with two heads:
 
@@ -1986,7 +1995,7 @@ without supervision.
 * **Deep ensemble**: members are fitted on token-bootstrap resamples, with early stopping
   on the most recently launched tokens. The predictive survival is the members' average,
   and their spread is the epistemic uncertainty.
-* **Inputs**: `raw` uses the 73 on-chain features and is fast on any CPU. `neural` adds
+* **Inputs**: `raw` uses the 76 on-chain features and is fast on any CPU. `neural` adds
   the walk-forward out-of-fold neural forecasts, uncertainty, expert gates and risk
   probabilities, the same stack the edge model uses.
 
@@ -2125,7 +2134,7 @@ and how much of a bankroll such a lottery ticket can justify.
 ## Tape Transformer (`nardis_neural.solana.tape`)
 
 Every other model in this repository sees a token through aggregates: per-minute bars and
-73 summary features. That throws away the two things that decide a memecoin launch: **who**
+76 summary features. That throws away the two things that decide a memecoin launch: **who**
 is trading, and **in what order**. The Tape Transformer reads the raw trade tape directly.
 
 ```mermaid
@@ -2136,7 +2145,7 @@ flowchart LR
         R1[recency embedding]
     end
     TAPE --> ENC[pre-LayerNorm Transformer<br/>+ learned summary token<br/>padding masked]
-    CUR[73 current features] --> MLP[MLP]
+    CUR[76 current features] --> MLP[MLP]
     ENC --> FUSE[fuse: summary ‖ mean ‖ current]
     MLP --> FUSE
     FUSE --> TAIL[tail head<br/>mixture of log-logistics<br/>P ≥ 2x … 1000x]
@@ -2655,7 +2664,7 @@ All three utilities (log, power, linear) are fitted and reported by the research
 **Longstaff–Schwartz** (2001) estimates `C_k` by regressing realised future values on the
 current state along observed paths. Here:
 
-* **State**: all 73 causal market features at `t_k` (flow, wallets, criticality, curve
+* **State**: all 76 causal market features at `t_k` (flow, wallets, criticality, curve
   state…), plus time held (log seconds), the current log multiple, the running peak log
   multiple and the drawdown from that peak. The peak and drawdown are path-dependent;
   they are what makes a trailing rule possible.
@@ -3875,7 +3884,7 @@ Every field, its type, its default and its description. Nested keys use dots, as
 
 ## Solana features
 
-### Current-state vector (73 features, in model input order)
+### Current-state vector (76 features, in model input order)
 
 | # | feature | meaning |
 |---|---|---|
@@ -3952,6 +3961,9 @@ Every field, its type, its default and its description. Nested keys use dots, as
 | 70 | `market_launches_600s_log` | log1p of launches across the market in the last 10 min |
 | 71 | `market_graduations_3600s_log` | log1p of graduations across the market in the last hour |
 | 72 | `market_volume_300s_log` | log1p of SOL swapped across all tokens in the last 5 min |
+| 73 | `narrative_heat_log` | log1p heat of the token's hottest name/symbol word: credit from other tokens with that word climbing 2x/5x/10x/100x/1000x, 30-min half-life (its own run excluded) |
+| 74 | `name_copycats_3600s_log` | log1p of other tokens launched in the last hour with the same symbol or name |
+| 75 | `copies_recent_runner` | 1 if its symbol or name matches another token that reached 5x in the last 6 h |
 
 ### Trade bars (`fast` 1 s × 60, `medium` 5 s × 48, `slow` 30 s × 40)
 
@@ -5170,6 +5182,18 @@ Conditional power-law tail model of a ticket's peak multiple.
   - `survival(self, x: 'npt.NDArray[Any]', k: 'list[float] | F64', calibrated: 'bool' = True) -> 'F64'` — Ensemble-mean P(M ≥ k) per row at multiples ``k`` (calibrated unless ``calibrated`` is False).
 - **class `TailPrediction`** — Per-row tail outputs: P(M ≥ k), its epistemic spread, median / expected multiple, lottery Kelly fraction and tail index.
 
+### `nardis_neural.solana.narrative`
+
+Narratives: memecoins run in themes.
+
+- `name_words(name: 'str', symbol: 'str') -> 'tuple[str, ...]'` — Distinct theme words of a token: name words of 3+ characters (no stopwords) and its symbol.
+- **class `NarrativeBook`** — Causal word heat, copycat counts and recent-runner names across the market.
+  - `features(self, mint: 'str', now: 'float') -> 'dict[str, float]'` — ``narrative_heat_log``, ``name_copycats_3600s_log`` and ``copies_recent_runner`` for ``mint``.
+  - `forget(self, mint: 'str', now: 'float') -> 'None'` — Drop a token's own records (its credit stays in the word heat); prunes cold words.
+  - `on_launch(self, mint: 'str', t: 'float', name: 'str', symbol: 'str') -> 'None'` — Register a launch (its theme words and copycat keys).
+  - `on_peak(self, mint: 'str', t: 'float', peak_multiple: 'float') -> 'None'` — Credit the token's words when its running peak (vs launch) climbs a new rung.
+- `normalise(text: 'str') -> 'str'` — Lower-case alphanumerics only (``"$PEPE 2.0"`` → ``"pepe20"``).
+
 ### `nardis_neural.solana.risk`
 
 Solana launch-risk model: P(rug), P(graduation), P(dev dump) within the risk horizon.
@@ -5483,7 +5507,7 @@ Transparent PyTorch training engine.
 
 ## Test inventory
 
-243 test functions (some are parametrised over devices, experts or formats).
+247 test functions (some are parametrised over devices, experts or formats).
 
 ### `tests/test_cli.py`
 
@@ -5786,6 +5810,13 @@ Moonshot engine: executable peak-multiple labels with censoring, the censored po
 - `test_manipulation_guard_only_lowers_trust`
 - `test_censoring_is_not_mistaken_for_the_outcome`
 - `test_runners_and_moonshot_brain_integration`
+
+### `tests/test_solana_narrative.py`
+
+- `test_name_words_and_normalisation`
+- `test_heat_credits_the_theme_but_never_the_token_itself`
+- `test_copycats_and_recent_runner_names`
+- `test_market_feeds_narratives_from_named_launches`
 
 ### `tests/test_solana_runners.py`
 

@@ -96,6 +96,9 @@ CURRENT_FEATURES: tuple[str, ...] = (
     "market_launches_600s_log",
     "market_graduations_3600s_log",
     "market_volume_300s_log",
+    "narrative_heat_log",
+    "name_copycats_3600s_log",
+    "copies_recent_runner",
 )
 
 FEATURE_DOCS: dict[str, str] = {
@@ -172,6 +175,10 @@ FEATURE_DOCS: dict[str, str] = {
     "market_launches_600s_log": "log1p of launches across the market in the last 10 min",
     "market_graduations_3600s_log": "log1p of graduations across the market in the last hour",
     "market_volume_300s_log": "log1p of SOL swapped across all tokens in the last 5 min",
+    "narrative_heat_log": "log1p heat of the token's hottest name/symbol word: credit from other tokens "
+    "with that word climbing 2x/5x/10x/100x/1000x, 30-min half-life (its own run excluded)",
+    "name_copycats_3600s_log": "log1p of other tokens launched in the last hour with the same symbol or name",
+    "copies_recent_runner": "1 if its symbol or name matches another token that reached 5x in the last 6 h",
 }
 """One line per entry of :data:`CURRENT_FEATURES` (a test keeps the two in sync)."""
 

@@ -348,6 +348,9 @@ class SolanaFeatureBuilder:
                 "market_launches_600s_log": 0.0,
                 "market_graduations_3600s_log": 0.0,
                 "market_volume_300s_log": 0.0,
+                "narrative_heat_log": 0.0,
+                "name_copycats_3600s_log": 0.0,
+                "copies_recent_runner": 0.0,
             }
         rec = market.creator_record(log.mint, now)
         n = rec["launches"]
@@ -361,7 +364,7 @@ class SolanaFeatureBuilder:
             "market_launches_600s_log": float(np.log1p(heat["launches"])),
             "market_graduations_3600s_log": float(np.log1p(heat["graduations"])),
             "market_volume_300s_log": float(np.log1p(heat["volume"])),
-        }
+        } | market.narrative.features(log.mint, now)
 
     # ------------------------------------------------------------------ bars
     def bars(self, log: TokenEventLog, now: float, spec: BarSpec) -> SequenceInput:

@@ -21,7 +21,7 @@ flowchart LR
     T --> WI[WalletIntel<br/>funding clusters · hubs]
     MK -->|buys queued, resolved after horizon| REP[Wallet reputations<br/>Beta posterior · rug marks]
     WI --> REP
-    MK & REP --> FB[SolanaFeatureBuilder<br/>73 named features · 1s/5s/30s bars · wallet graph]
+    MK & REP --> FB[SolanaFeatureBuilder<br/>76 named features · 1s/5s/30s bars · wallet graph]
     FB --> NE[Neural ensemble<br/>Transformer · GRU · TCN · MLP · Graph + MoE]
     NE --> EMB[MarketStateEmbedding]
     EMB & FB --> RK[Risk ensemble<br/>P rug · P graduation · P dev dump]
@@ -59,7 +59,7 @@ canonical order (launch → transfer → migration → LP → swap at equal time
 
 ## 3. Features (`features.py`)
 
-73 named current-state features (`CURRENT_FEATURES`):
+76 named current-state features (`CURRENT_FEATURES`):
 
 | Group | Features |
 |---|---|
@@ -76,12 +76,21 @@ canonical order (launch → transfer → migration → LP → swap at equal time
 | Creator family | prior launches, best prior peak multiple, prior rug rate, prior graduation rate, time since the family's last launch |
 | Criticality | Hawkes branching ratio of buys and of sells, its two-minute trend, herding timescale, endogenous share of buys ([CRITICALITY.md](CRITICALITY.md)) |
 | Market heat | launches in 10 min, graduations in 1 h, total swap volume in 5 min (all tokens) |
+| **Narratives** | heat of the token's hottest name/symbol word (other tokens with that word climbing 2x…1000x, 30-min half-life, its own run excluded), copycats with the same name or symbol in the last hour, copies a token that reached 5x in the last 6 h ([narrative.py](../src/nardis_neural/solana/narrative.py)) |
 
 **Runner skill** is a second, separate wallet reputation. A buy in a token's first
 `tail_entry_window` seconds (300) counts as a success if the price later reaches
 `tail_multiple` × the entry price (10x) within `tail_horizon_seconds` (1.5 h). The skill
 is an evidence-shrunk log-lift of the wallet's hit rate over a Beta(0.1, 1.9) prior (base
 rate 5 %). Being good at 60-second scalps and being early to runners are different skills.
+A **hit is credited the moment the price crosses the target**; only a miss waits for the
+full horizon. The first real-data runs showed why this matters: with 90-minute-late credit,
+runner skill stayed blind for the first 1.5 hours of any window and live trading learned of
+a wallet's hit long after it happened.
+
+**Narratives** come from the token's name and symbol (carried on `TokenLaunch` from the
+pump.fun creation event). Memecoins run in themes: when a cat token runs, other cat tokens
+get bought, and a hot name draws copycats within minutes.
 
 A **creator family** is the creator's funder, or the creator itself when the funder is an
 exchange-like hub (more than `hub_threshold` funded wallets). Serial deployers who spin up
@@ -187,7 +196,7 @@ An agent-based simulator used for tests and demos. It is not a market model.
 |---|---|
 | simulate 40 launches (~50 k events) | ~4 s |
 | replay 52 k events into a market | ~0.8 s |
-| build one observation (73 features + 3 bar streams + graph) | ~2.9 ms |
+| build one observation (73 features when measured + 3 bar streams + graph) | ~2.9 ms |
 | extract one 96-trade tape | ~0.9 ms |
 | dataset from 40 launches (~7.8 k leakage-free snapshots) | ~25 s |
 | `assess_many` 1 / 8 / 32 tokens (tiny 2-member test model) | ~23 / 38 / 74 ms |

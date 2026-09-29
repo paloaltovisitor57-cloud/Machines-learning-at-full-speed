@@ -56,7 +56,7 @@ All three utilities (log, power, linear) are fitted and reported by the research
 **Longstaff–Schwartz** (2001) estimates `C_k` by regressing realised future values on the
 current state along observed paths. Here:
 
-* **State**: all 73 causal market features at `t_k` (flow, wallets, criticality, curve
+* **State**: all 76 causal market features at `t_k` (flow, wallets, criticality, curve
   state…), plus time held (log seconds), the current log multiple, the running peak log
   multiple and the drawdown from that peak. The peak and drawdown are path-dependent;
   they are what makes a trailing rule possible.

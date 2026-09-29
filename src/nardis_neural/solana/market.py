@@ -29,6 +29,7 @@ from nardis_neural.solana.events import (
     Transfer,
     slot_of,
 )
+from nardis_neural.solana.narrative import NarrativeBook
 from nardis_neural.solana.wallets import WalletIntel
 
 EVENT_TYPES: dict[str, type[Any]] = {
@@ -182,6 +183,8 @@ class SolanaMarket:
         self._tail_seq = 0
         self.tail_updates = 0
         self.tail_early_hits = 0
+        self.narrative = NarrativeBook()
+        """Theme-word heat, copycats and recent-runner names (see :mod:`narrative`)."""
         """Tail successes credited the moment the price crossed the target, before the horizon."""
         self.heat = {
             "launches": _Window(600.0),
@@ -226,6 +229,7 @@ class SolanaMarket:
         state.setdefault("_tail_done", set())
         state.setdefault("_tail_seq", len(state.get("_tail_pending", ())) + state.get("_seq", 0) + 1)
         state.setdefault("tail_early_hits", 0)
+        state.setdefault("narrative", NarrativeBook())
         self.__dict__.update(state)
 
     def advance(self, now: float) -> int:
@@ -291,6 +295,7 @@ class SolanaMarket:
             self.family_of[e.mint] = fam
             stats.live.append(e.mint)
             self.heat["launches"].add(e.t)
+            self.narrative.on_launch(e.mint, e.t, e.name, e.symbol)
         elif isinstance(e, Transfer):
             self.wallets.add_transfer(e)
         else:
@@ -304,6 +309,7 @@ class SolanaMarket:
                 price = e.sol_reserve / max(e.token_reserve, 1e-12)
                 launch_price = log.launch.sol_reserve / max(log.launch.token_reserve, 1e-12)
                 self.peak[e.mint] = max(self.peak.get(e.mint, 1.0), price / max(launch_price, 1e-30))
+                self.narrative.on_peak(e.mint, e.t, self.peak[e.mint])
                 self.heat["volume"].add(e.t, e.sol_amount)
                 self._credit_tail_hits(e.mint, price)
                 if e.is_buy and e.t - log.launch.t <= self.cfg.tail_entry_window:
@@ -367,6 +373,7 @@ class SolanaMarket:
         ]
         for m in gone:
             log = self.tokens.pop(m)
+            self.narrative.forget(m, now)
             fam = self.families.get(self.family_of.pop(m, -1))
             if fam is not None:  # fold the token into its family's finished record
                 fam.launches += 1

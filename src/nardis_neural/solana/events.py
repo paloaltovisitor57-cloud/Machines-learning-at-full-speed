@@ -41,6 +41,10 @@ class TokenLaunch:
     freeze_authority_revoked: bool = True
     lp_burned_fraction: float = 0.0
     slot: int = -1
+    name: str = ""
+    """Token name from the creation (empty when unknown, e.g. inferred launches)."""
+    symbol: str = ""
+    """Token symbol from the creation (empty when unknown)."""
 
 
 @dataclass(frozen=True)
