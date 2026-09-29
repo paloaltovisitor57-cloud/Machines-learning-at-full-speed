@@ -34,13 +34,16 @@ from nardis_neural.solana.ingest.pumpfun import (
     JITO_TIP_ACCOUNTS,
     LAMPORTS_PER_SOL,
     PUMP_FUN_PROGRAM,
+    PUMP_SWAP_PROGRAM,
     PUMP_TOKEN_DECIMALS,
     SYSTEM_PROGRAM,
     WSOL_MINT,
     PumpComplete,
     PumpCreate,
+    PumpSwapTrade,
     PumpTrade,
     decode_log_events,
+    decode_pumpswap_log_events,
 )
 
 MintInfo = Callable[[str], tuple[bool, bool] | None]
@@ -231,9 +234,17 @@ class TransactionDecoder:
         if PUMP_FUN_PROGRAM in programs:
             for ev in decode_log_events(list(meta.get("logMessages") or [])):
                 self._pump(ev, events, swaps, t, slot)
-        amm = [AMM_PROGRAMS[p] for p in programs if p in AMM_PROGRAMS]
-        if amm:
-            self._amm(tx, keys, payer, amm[0], events, swaps, t, slot)  # type: ignore[arg-type]
+        pumpswap = (
+            decode_pumpswap_log_events(list(meta.get("logMessages") or []))
+            if PUMP_SWAP_PROGRAM in programs
+            else []
+        )
+        if pumpswap:  # exact pool reserves from PumpSwap's own events beat the vault heuristic
+            self._pumpswap(meta, keys, pumpswap, events, swaps, t, slot)
+        else:
+            amm = [AMM_PROGRAMS[p] for p in programs if p in AMM_PROGRAMS]
+            if amm:
+                self._amm(tx, keys, payer, amm[0], events, swaps, t, slot)  # type: ignore[arg-type]
 
         if swaps and (priority_fee or jito_tip):
             first = swaps[0]
@@ -302,6 +313,74 @@ class TransactionDecoder:
             )
 
     # ------------------------------------------------------------------ AMM pools
+    def _pumpswap(
+        self,
+        meta: Mapping[str, Any],
+        keys: list[str],
+        trades: list[PumpSwapTrade],
+        out: list[Event],
+        swaps: list[Event],
+        t: float,
+        slot: int,
+    ) -> None:
+        """Swaps from PumpSwap ``BuyEvent`` / ``SellEvent`` logs; pools are oriented by the user's
+        token accounts (token/WSOL or WSOL/token); pools without WSOL are skipped."""
+        book = _token_balances(meta.get("preTokenBalances") or [], keys) | _token_balances(
+            meta.get("postTokenBalances") or [], keys
+        )
+        for tr in trades:
+            base, quote = book.get(tr.user_base_account), book.get(tr.user_quote_account)
+            base_mint = base.mint if base else None
+            quote_mint = quote.mint if quote else None
+            if base_mint and base_mint != WSOL_MINT and quote_mint in (WSOL_MINT, None):
+                assert base is not None
+                mint, dec = base_mint, base.decimals
+                sol_res, tok_res = tr.pool_quote_reserves / LAMPORTS_PER_SOL, tr.pool_base_reserves / 10**dec
+                sol_amt, tok_amt, is_buy = (
+                    tr.quote_amount / LAMPORTS_PER_SOL,
+                    tr.base_amount / 10**dec,
+                    tr.is_base_buy,
+                )
+            elif quote_mint and quote_mint != WSOL_MINT and base_mint in (WSOL_MINT, None):
+                assert quote is not None
+                mint, dec = quote_mint, quote.decimals
+                sol_res, tok_res = tr.pool_base_reserves / LAMPORTS_PER_SOL, tr.pool_quote_reserves / 10**dec
+                sol_amt, tok_amt = tr.base_amount / LAMPORTS_PER_SOL, tr.quote_amount / 10**dec
+                is_buy = not tr.is_base_buy
+            else:
+                continue
+            if sol_res <= 0 or tok_res <= 0:
+                continue
+            if mint not in self.venue:
+                if not self.implicit_launches:
+                    continue
+                self._launch(out, mint, t, "unknown", "pumpswap", sol_res, tok_res, 0.0, slot)
+            elif self.venue[mint] == "pump_fun":
+                self.venue[mint] = "pumpswap"
+                out.append(
+                    Migration(
+                        mint=mint,
+                        t=t,
+                        venue="pumpswap",
+                        sol_reserve=sol_res,
+                        token_reserve=tok_res,
+                        slot=slot,
+                    )
+                )
+            s = Swap(
+                mint=mint,
+                t=t,
+                wallet=tr.user,
+                is_buy=is_buy,
+                sol_amount=sol_amt,
+                token_amount=tok_amt,
+                sol_reserve=sol_res,
+                token_reserve=tok_res,
+                slot=slot,
+            )
+            out.append(s)
+            swaps.append(s)
+
     def _amm(
         self,
         tx: Mapping[str, Any],

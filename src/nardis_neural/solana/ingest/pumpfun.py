@@ -172,6 +172,85 @@ def decode_log_events(logs: list[str], program: str | None = PUMP_FUN_PROGRAM) -
     return out
 
 
+SWAP_BUY_DISC = discriminator("BuyEvent")
+SWAP_SELL_DISC = discriminator("SellEvent")
+
+
+@dataclass(frozen=True)
+class PumpSwapTrade:
+    """PumpSwap ``BuyEvent`` / ``SellEvent``: a trade against one pool, in raw units.
+
+    ``is_base_buy`` is True when the user received the pool's *base* asset.  Pools usually hold
+    the token as base and WSOL as quote, but some are the other way round, so the orientation is
+    resolved against the transaction's token accounts (see the decoder).
+    """
+
+    is_base_buy: bool
+    timestamp: int
+    base_amount: int
+    quote_amount: int
+    pool_base_reserves: int
+    pool_quote_reserves: int
+    pool: str
+    user: str
+    user_base_account: str
+    user_quote_account: str
+
+
+def decode_pumpswap_event(payload: bytes) -> PumpSwapTrade | None:
+    """Decode one PumpSwap ``Program data`` payload; None for other events."""
+    disc = payload[:8]
+    if disc not in (SWAP_BUY_DISC, SWAP_SELL_DISC):
+        return None
+    r = _Reader(payload[8:])
+    ts = r.i64()
+    base_amount = r.u64()  # base_amount_out (buy) / base_amount_in (sell)
+    r.u64()  # max_quote_amount_in / min_quote_amount_out
+    r.u64()  # user base reserves
+    r.u64()  # user quote reserves
+    pool_base, pool_quote = r.u64(), r.u64()
+    quote_amount = r.u64()  # quote_amount_in / quote_amount_out
+    for _ in range(6):  # fee fields and the two quote totals
+        r.u64()
+    pool, user, base_acct, quote_acct = r.pubkey(), r.pubkey(), r.pubkey(), r.pubkey()
+    return PumpSwapTrade(
+        disc == SWAP_BUY_DISC,
+        ts,
+        base_amount,
+        quote_amount,
+        pool_base,
+        pool_quote,
+        pool,
+        user,
+        base_acct,
+        quote_acct,
+    )
+
+
+def decode_pumpswap_log_events(logs: list[str]) -> list[PumpSwapTrade]:
+    """PumpSwap trades logged by the PumpSwap program itself (attributed like :func:`decode_log_events`)."""
+    out: list[PumpSwapTrade] = []
+    stack: list[str] = []
+    for line in logs:
+        if line.startswith("Program ") and " invoke [" in line:
+            stack.append(line.split()[1])
+            continue
+        if line.startswith("Program ") and (line.endswith(" success") or " failed" in line):
+            parts = line.split()
+            if len(parts) > 1 and stack and stack[-1] == parts[1]:
+                stack.pop()
+            continue
+        if not line.startswith("Program data: ") or not stack or stack[-1] != PUMP_SWAP_PROGRAM:
+            continue
+        try:
+            ev = decode_pumpswap_event(base64.b64decode(line[len("Program data: ") :]))
+        except (ValueError, struct.error):
+            continue
+        if ev is not None:
+            out.append(ev)
+    return out
+
+
 # ---------------------------------------------------------------- encoders (fixtures / replay tools)
 def _pk(key: str) -> bytes:
     raw = b58decode(key)

@@ -568,3 +568,69 @@ def test_first_sight_of_an_existing_pool_is_not_a_creation() -> None:
     )
     launch = next(e for e in dec.decode(swap) if isinstance(e, TokenLaunch))
     assert launch.creator == "unknown"
+
+
+def _swap_event(
+    buy: bool, base_amt: int, quote_amt: int, base_res: int, quote_res: int, accts: list[str]
+) -> str:
+    import struct
+
+    from nardis_neural.solana.ingest.pumpfun import SWAP_BUY_DISC, SWAP_SELL_DISC, _pk
+
+    body = struct.pack("<q", T) + struct.pack("<7Q", base_amt, 0, 0, 0, base_res, quote_res, quote_amt)
+    body += struct.pack("<6Q", 20, 0, 5, 0, 0, 0) + b"".join(_pk(a) for a in accts)
+    return base64.b64encode((SWAP_BUY_DISC if buy else SWAP_SELL_DISC) + body + bytes(64)).decode()
+
+
+def test_pumpswap_events_decode_in_either_pool_orientation() -> None:
+    from nardis_neural.solana.ingest.pumpfun import PUMP_SWAP_PROGRAM
+
+    pool, ub, uq = pubkey_from_seed("pool"), pubkey_from_seed("ub"), pubkey_from_seed("uq")
+    ix = {"programId": PUMP_SWAP_PROGRAM, "accounts": [], "data": ""}
+
+    def tx(log: str, base_mint: str, quote_mint: str, base_dec: int, quote_dec: int) -> dict[str, Any]:
+        rows = [
+            {
+                "accountIndex": 1,
+                "mint": base_mint,
+                "owner": USER,
+                "uiTokenAmount": {"amount": "0", "decimals": base_dec},
+            },
+            {
+                "accountIndex": 2,
+                "mint": quote_mint,
+                "owner": USER,
+                "uiTokenAmount": {"amount": "0", "decimals": quote_dec},
+            },
+        ]
+        logs = [
+            f"Program {PUMP_SWAP_PROGRAM} invoke [1]",
+            f"Program data: {log}",
+            f"Program {PUMP_SWAP_PROGRAM} success",
+        ]
+        return _tx(logs, [ix], pre=rows, post=rows, keys=[ub, uq])
+
+    # token is base, WSOL quote: a BuyEvent buys the token
+    buy = tx(
+        _swap_event(True, 2_000_000, 10**9, 200_000_000 * 10**6, 100 * 10**9, [pool, USER, ub, uq]),
+        MINT,
+        WSOL_MINT,
+        6,
+        9,
+    )
+    # WSOL is base, token quote: a BuyEvent buys WSOL, i.e. sells the token
+    sell = tx(
+        _swap_event(True, 10**9, 2_000_000, 100 * 10**9, 200_000_000 * 10**6, [pool, USER, ub, uq]),
+        WSOL_MINT,
+        MINT,
+        9,
+        6,
+    )
+    for raw, is_buy in ((buy, True), (sell, False)):
+        dec = TransactionDecoder()
+        swaps = [e for e in dec.decode(raw) if isinstance(e, Swap)]
+        assert len(swaps) == 1
+        s = swaps[0]
+        assert s.mint == MINT and s.is_buy is is_buy
+        assert s.sol_amount == pytest.approx(1.0) and s.token_amount == pytest.approx(2.0)
+        assert s.sol_reserve == pytest.approx(100.0) and s.token_reserve == pytest.approx(2e8)
