@@ -527,3 +527,28 @@ def test_history_walker_skips_undecodable_transactions() -> None:
 
     walker = HistoryWalker(SolanaRpc(transport=lambda m, p: None), 0.0, 1.0, decoder=Broken(), seek=False)
     assert walker._decode({"slot": 1}) == [] and walker.stats["decode_errors"] == 1
+
+
+def test_pump_events_are_attributed_to_the_emitting_program() -> None:
+    trade = PumpTrade(MINT, 1_500_000_000, 42_000_000, True, USER, T, 31_500_000_000, 1_020_000_000_000_000)
+    other = PumpTrade(MINT, 0, 7, False, USER, T, 0, 5)  # same event name from a router program
+    logs = [
+        "Program Router1111111111111111111111111111111 invoke [1]",
+        f"Program data: {encode_event(other)}",
+        f"Program {PUMP_FUN_PROGRAM} invoke [2]",
+        f"Program data: {encode_event(trade)}",
+        f"Program {PUMP_FUN_PROGRAM} success",
+        f"Program data: {encode_event(other)}",
+        "Program Router1111111111111111111111111111111 success",
+    ]
+    assert decode_log_events(logs) == [trade]
+    assert len(decode_log_events(logs, program=None)) == 3
+
+
+def test_decoder_skips_non_sol_quoted_curves() -> None:
+    """BuyV2 / SellV2 curves report zero SOL reserves; their trades are skipped, not zero-priced."""
+    dec = TransactionDecoder()
+    v2 = PumpTrade(MINT, 0, 6_000_000, True, USER, T, 0, 972_262_028_209_242)
+    later = PumpTrade(MINT, 2_000_000_000, 60_000_000, True, USER, T, 32_000_000_000, 10**15)
+    evs = [e for ev in (v2, later) for e in dec.decode(_tx([f"Program data: {encode_event(ev)}"], [PUMP_IX]))]
+    assert not any(isinstance(e, Swap) for e in evs) and MINT in dec.non_sol_quoted

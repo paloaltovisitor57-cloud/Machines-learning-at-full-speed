@@ -133,6 +133,8 @@ class TransactionDecoder:
         self.venue: dict[str, Venue] = {}
         self.pools: dict[str, PoolInfo] = {}
         self.virtual: dict[str, tuple[float, float]] = {}
+        self.non_sol_quoted: set[str] = set()
+        """Mints traded through curves that report no SOL reserves (skipped)."""
         self.stats = DecodeStats()
         self._last_t = 0.0
 
@@ -247,6 +249,13 @@ class TransactionDecoder:
         if isinstance(ev, PumpCreate):
             self._launch(out, ev.mint, t, ev.user, "pump_fun", PUMP_VIRTUAL_SOL, 1_073_000_000.0, 1.0, slot)
         elif isinstance(ev, PumpTrade):
+            if ev.virtual_sol_lamports == 0:
+                # BuyV2 / SellV2 curves report no SOL amounts or reserves (not SOL-quoted):
+                # outside what the SOL-denominated features and labels can describe
+                self.non_sol_quoted.add(ev.mint)
+                return
+            if ev.mint in self.non_sol_quoted:
+                return
             if ev.mint not in self.venue:
                 if not self.implicit_launches:
                     return

@@ -140,11 +140,28 @@ def decode_event(payload: bytes) -> PumpEvent | None:
     return None
 
 
-def decode_log_events(logs: list[str]) -> list[PumpEvent]:
-    """pump.fun events in a transaction's ``Program data:`` log lines; other or corrupt lines are skipped."""
+def decode_log_events(logs: list[str], program: str | None = PUMP_FUN_PROGRAM) -> list[PumpEvent]:
+    """pump.fun events in a transaction's ``Program data:`` log lines; other or corrupt lines are skipped.
+
+    Other programs (routers, forks) emit events with the same Anchor name, hence the same
+    discriminator, in different layouts.  When the logs carry ``Program <id> invoke`` lines, only
+    data logged while ``program`` is the executing program is decoded.
+    """
     out: list[PumpEvent] = []
+    stack: list[str] = []
+    attributed = program is not None and any(" invoke [" in line for line in logs)
     for line in logs:
+        if line.startswith("Program ") and " invoke [" in line:
+            stack.append(line.split()[1])
+            continue
+        if line.startswith("Program ") and (line.endswith(" success") or " failed" in line):
+            parts = line.split()
+            if len(parts) > 1 and stack and stack[-1] == parts[1]:
+                stack.pop()
+            continue
         if not line.startswith("Program data: "):
+            continue
+        if attributed and (not stack or stack[-1] != program):
             continue
         try:
             ev = decode_event(base64.b64decode(line[len("Program data: ") :]))
