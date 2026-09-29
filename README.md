@@ -2992,6 +2992,49 @@ Ranking skill, out of sample: **AUC 0.87 for reaching 2x** and **0.78 for reachi
 * Small samples: 18 tokens in the top 5 %. Treat this as a direction, confirmed or refuted
   by the forward ledger and the learning layer as Nardis trades.
 
+### 9. Runner identification: which tokens go to 2x, 5x, 10x?
+
+Same 2 h 20 min window, 30-minute horizon, snapshots every 20 s; trained on the earlier 1 930
+tokens and scored on the later 1 039 (838 entries). Here a row counts as a known positive as
+soon as the token has reached the target, even if the window then ends, and censored rows
+below the target are left out. That keeps the rare runners, but it makes the absolute hit
+rates below **optimistic** (the 2x base rate is 22 % here against 11 % on resolved rows only).
+The comparison between models is fair, because they are scored on the same rows.
+
+| target (known rows / hits) | tail model AUC | runner detector AUC | average AUC | tail: top 10 % hits |
+|---|---|---|---|---|
+| 2x (399 / 88) | **0.842** | 0.770 | 0.830 | 26 of 40 |
+| 5x (363 / 20) | 0.824 | 0.809 | **0.832** | 10 of 36 |
+| 10x (354 / 7) | **0.846** | 0.746 | 0.838 | **5 of 35** |
+| 100x / 1000x | no hits in the window | | | |
+
+* **The tail model is already a strong runner identifier on real data** (AUC 0.82–0.85 for
+  2x, 5x and 10x). Its top 10 % by P(≥10x) contained 5 of the 7 tokens that reached 10x.
+* **The boosted runner detector does not beat it yet.** With 7 real 10x examples there is
+  too little to learn feature interactions from. The detector therefore only feeds the chase
+  for targets where the average matched or beat the tail model out of sample (here: 5x). This
+  gate is re-decided by every `runner-research` run as history grows.
+
+**What identifies runners** (permutation importance on the later tokens: how much the AUC
+drops when a feature is scrambled):
+
+| rank | 2x runners | 10x runners |
+|---|---|---|
+| 1 | `rv_30s`: 30-second realised volatility | `rv_300s`: 5-minute realised volatility |
+| 2 | `creator_prior_best_peak_log`: the creator's best previous launch | `avg_buy_size_60s_log`: average buy size |
+| 3 | `bot_share_60s`: share of bot trading | `market_volume_300s_log`: market-wide volume |
+| 4 | `rv_300s` | `market_launches_600s_log`: how busy the launch market is |
+| 5 | `since_last_trade_log` | `dev_sold_fraction`: how much the dev has sold |
+| 6 | `net_flow_300s`: net buying | `sniper_share` |
+| 7 | `sell_branching_ratio` (criticality) | `buy_branching_ratio` (criticality: herding) |
+| 8 | `market_launches_600s_log` | `bot_share_60s` |
+
+Runners are identified mainly through **early volatility, buy size, the creator's track
+record, how busy the whole launch market is, who is trading (bots, snipers, the dev) and the
+criticality (herding) measures**. Permutation importance says which signals matter, not in
+which direction. One window of 7 10x runners is a first look; the ranking will firm up as
+more history is added.
+
 # Part III — Generated reference
 
 Generated from the code; it cannot drift.

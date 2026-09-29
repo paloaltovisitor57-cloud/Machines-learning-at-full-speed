@@ -463,11 +463,12 @@ class SolanaBrain:
             v |= {f"guard.{name}": value for name, value in verdict.factors.items()}
             for k, pk in runner_p.items():
                 v[f"runner_p_{k:g}x"] = float(pk[i])
-            # the chase uses the average of the tail model and the runner detector where both exist
+            # the detector joins the chase only for targets where it proved itself out of sample
+            blend = set(self.runners.blend_targets) if self.runners else set()
             chase = chase_profile(
                 {
                     k: 0.5 * (v.get(f"p_ge_{k:g}x", 0.0) + v[f"runner_p_{k:g}x"])
-                    if f"runner_p_{k:g}x" in v
+                    if k in blend and f"runner_p_{k:g}x" in v
                     else v.get(f"p_ge_{k:g}x", 0.0)
                     for k in CHASE_TARGETS
                 }

@@ -65,6 +65,9 @@ class RunnerDetector:
         self.min_positives, self.seed = min_positives, seed
         self.models: dict[float, TreeEnsemble] = {}
         self.report: dict[str, Any] = {}
+        self.blend_targets: list[float] = []
+        """Targets where averaging with the tail model matched or beat the tail model alone on
+        later tokens (set by :func:`run_runner_research`); only these feed the chase."""
 
     def fit(self, x: npt.NDArray[Any], peak: F64, censored: npt.NDArray[np.bool_]) -> dict[str, Any]:
         """Fit every target with enough known hits; returns per-target counts."""
@@ -113,6 +116,7 @@ class RunnerDetector:
             "min_positives": self.min_positives,
             "seed": self.seed,
             "targets": list(self.models),
+            "blend_targets": self.blend_targets,
             "report": self.report,
         }
         (d / "runners.json").write_text(json.dumps(meta, indent=2, default=float))
@@ -124,6 +128,7 @@ class RunnerDetector:
         det = cls(list(meta["feature_names"]), int(meta["min_positives"]), int(meta["seed"]))
         det.models = {float(k): TreeEnsemble.load(d / f"runner_{float(k):g}x.npz") for k in meta["targets"]}
         det.report = dict(meta.get("report", {}))
+        det.blend_targets = [float(k) for k in meta.get("blend_targets", [])]
         return det
 
 
@@ -238,6 +243,15 @@ def run_runner_research(
     rows_all = np.flatnonzero(lab.valid)
     final = RunnerDetector(list(names), seed=seed)
     final.fit(x[rows_all], lab.peak[rows_all], lab.censored[rows_all])
+    blend = []
+    for k in CHASE_TARGETS:
+        e = report["targets"][f"{k:g}x"]
+        a_blend = e.get("blend", {}).get("auc")
+        a_tail = e["tail"]["auc"]
+        if k in final.models and a_blend is not None and a_tail is not None and a_blend >= a_tail:
+            blend.append(k)
+    final.blend_targets = blend
+    report["blend_targets"] = [f"{k:g}x" for k in blend]
     return report, final
 
 
@@ -265,6 +279,10 @@ def runner_markdown(report: dict[str, Any]) -> str:
             lines.append(
                 f"| {tag} | {e['known_entries']} / {e['hits']} | {base} | {name} | {auc} | {t5} | {t10} |"
             )
+    lines += [
+        "",
+        f"Detector averaged into the chase for: {', '.join(report.get('blend_targets', [])) or 'none'}",
+    ]
     for tag, feats in report.get("importance", {}).items():
         lines += ["", f"What identifies {tag} runners (permutation importance, AUC drop):", ""]
         lines += [f"* `{n}`: {v:+.4f}" for n, v in feats if v > 0]
