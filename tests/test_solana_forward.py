@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from nardis_neural.solana.forward import ForwardLedger
 from nardis_neural.solana.moonshot import MoonshotSpec
 from tests.test_solana_edge import T0, _market
@@ -53,3 +55,21 @@ def test_ledger_opens_alarms_settles_and_roundtrips(tmp_path: Path) -> None:
     led.save()
     back = ForwardLedger.load(tmp_path / "fwd", SPEC)
     assert back.alarm == ("p_collapse_1m", 0.5) and len(back.closed) == 1 and "TOK" in back.seen
+
+
+def test_ledger_save_is_atomic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    led = ForwardLedger(tmp_path / "fwd", SPEC)
+    led.observe([_report("TOK", 3.0, 0.0)], T0 + 2)
+    led.save()
+    assert not list((tmp_path / "fwd").glob("*.tmp"))
+    led.observe([_report("TOK2", 3.0, 0.0)], T0 + 3)
+
+    def crash(self: Path, target: Path) -> Path:
+        raise OSError("power cut")
+
+    monkeypatch.setattr(Path, "replace", crash)
+    with pytest.raises(OSError):
+        led.save()
+    monkeypatch.undo()
+    back = ForwardLedger.load(tmp_path / "fwd", SPEC)
+    assert set(back.open) == {"TOK"}, "the previous complete ledger, never a torn file"

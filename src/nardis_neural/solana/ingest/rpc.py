@@ -3,13 +3,16 @@
 Only query methods are allowed — the client refuses anything that could submit or sign
 a transaction, so the ML module can never move funds.  Retries with exponential backoff on
 rate limits (HTTP 429) and transient server errors.  HTTP connections are kept alive per
-thread (through an ``HTTPS_PROXY`` tunnel when one is set): opening a fresh TLS connection per
-request limited throughput to about 12 requests/s on a hosted node, reuse reached 60–100.
+thread (through an ``HTTPS_PROXY`` tunnel when one is set, with ``user:pass@`` credentials sent
+as ``Proxy-Authorization``, unless ``NO_PROXY`` names the host or a parent domain): opening a
+fresh TLS connection per request limited throughput to about 12 requests/s on a hosted node,
+reuse reached 60–100.
 A custom ``transport`` can be injected (tests, websockets bridges, provider SDKs).
 """
 
 from __future__ import annotations
 
+import base64
 import http.client
 import json
 import os
@@ -49,9 +52,42 @@ def _ssl_context() -> ssl.SSLContext:
 class _TunnelledHTTPS(http.client.HTTPSConnection):
     """HTTPS to ``host:port`` through an HTTP CONNECT proxy, verified against the system CAs."""
 
-    def __init__(self, proxy_host: str, proxy_port: int, host: str, port: int, timeout: float) -> None:
+    def __init__(
+        self,
+        proxy_host: str,
+        proxy_port: int,
+        host: str,
+        port: int,
+        timeout: float,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         super().__init__(proxy_host, proxy_port, timeout=timeout, context=_ssl_context())
-        self.set_tunnel(host, port)
+        self.set_tunnel(host, port, headers)
+
+
+def _proxy_headers(proxy: urllib.parse.SplitResult) -> dict[str, str]:
+    """``Proxy-Authorization`` for the CONNECT request when the proxy URL carries ``user:pass@``."""
+    if proxy.username is None:
+        return {}
+    user = urllib.parse.unquote(proxy.username)
+    password = urllib.parse.unquote(proxy.password or "")
+    token = base64.b64encode(f"{user}:{password}".encode()).decode("ascii")
+    return {"Proxy-Authorization": f"Basic {token}"}
+
+
+def _bypass_proxy(host: str) -> bool:
+    """True when ``NO_PROXY`` / ``no_proxy`` exempts ``host``: ``*``, the host itself or any parent
+    domain (``example.com`` and ``.example.com`` both match ``rpc.example.com``)."""
+    no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+    host = host.lower().rstrip(".")
+    for entry in no_proxy.split(","):
+        name = entry.strip().lower().lstrip(".").rstrip(".")
+        if name == "*":
+            return True
+        name = name.rsplit(":", 1)[0] if name.count(":") == 1 else name  # "host:port" → "host"
+        if name and (host == name or host.endswith("." + name)):
+            return True
+    return False
 
 
 class RpcError(RuntimeError):
@@ -96,16 +132,14 @@ class SolanaRpc:
             "https_proxy" if secure else "http_proxy"
         )
         host = u.hostname or ""
-        no_proxy = [
-            h.strip() for h in (os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or "").split(",")
-        ]
-        if proxy and host not in no_proxy:
+        if proxy and not _bypass_proxy(host):
             p = urllib.parse.urlsplit(proxy)
+            auth = _proxy_headers(p)
             if secure:  # TLS to the endpoint through the proxy's CONNECT tunnel
-                conn = _TunnelledHTTPS(p.hostname or "", p.port or 80, host, port, self.timeout)
+                conn = _TunnelledHTTPS(p.hostname or "", p.port or 80, host, port, self.timeout, auth)
             else:
                 conn = http.client.HTTPConnection(p.hostname or "", p.port or 80, timeout=self.timeout)
-                conn.set_tunnel(host, port)
+                conn.set_tunnel(host, port, auth)
         elif secure:
             conn = http.client.HTTPSConnection(host, port, timeout=self.timeout, context=_ssl_context())
         else:

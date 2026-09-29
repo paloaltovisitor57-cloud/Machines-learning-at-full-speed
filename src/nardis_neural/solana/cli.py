@@ -133,6 +133,12 @@ def bootstrap(
         str | None, typer.Option("--profile", help="auto | cpu-lite | cpu | gpu | gpu-frontier")
     ] = None,
     device: DeviceOpt = None,
+    overwrite: Annotated[
+        bool,
+        typer.Option(
+            "--overwrite", help="replace an existing workspace (only once the new models have trained)"
+        ),
+    ] = False,
 ) -> None:
     """Train the neural ensemble + risk model from history and create a Solana workspace."""
     from nardis_neural.config import load_config
@@ -148,9 +154,18 @@ def bootstrap(
         base.training.epochs = epochs
     if device is not None:
         base.training.device = device
-    brain = SolanaBrain.bootstrap(
-        workspace, EventStore.load(events), _sol_cfg(solana_config), base, device=device, log=typer.echo
-    )
+    try:
+        brain = SolanaBrain.bootstrap(
+            workspace,
+            EventStore.load(events),
+            _sol_cfg(solana_config),
+            base,
+            device=device,
+            log=typer.echo,
+            overwrite=overwrite,
+        )
+    except FileExistsError as exc:
+        raise typer.BadParameter(str(exc).replace("overwrite=True", "--overwrite")) from exc
     _echo(
         {
             "workspace": str(workspace),
@@ -250,13 +265,14 @@ def backfill(
     raw: Annotated[Path | None, typer.Option("--raw", help="also save raw transactions as JSONL")] = None,
 ) -> None:
     """Fetch recent pump.fun / PumpSwap history over RPC (read-only) and decode it."""
-    from nardis_neural.solana.ingest import ChainStreamer, SolanaRpc
+    from nardis_neural.solana.ingest import ChainStreamer, SolanaRpc, TransactionDecoder
     from nardis_neural.solana.market import EventStore
 
     if rpc is None:
         raise typer.BadParameter("pass --rpc or set SOLANA_RPC_URL")
     client = SolanaRpc(rpc)
-    streamer = ChainStreamer(client, initial_limit=limit)
+    # history is decoded without mint-account lookups: today's authorities would leak the future
+    streamer = ChainStreamer(client, decoder=TransactionDecoder(), initial_limit=limit)
     raw_fh = raw.open("a") if raw is not None else None
     if raw_fh is not None:
         streamer.raw_sink = lambda tx: raw_fh.write(json.dumps(tx) + "\n")
@@ -303,6 +319,32 @@ def stream(
     _echo(stats)
 
 
+ResearchEvents = Annotated[
+    Path | None,
+    typer.Option(
+        "--events",
+        "-e",
+        help="event directory to research (default: the workspace history; required once the "
+        "workspace streams, since stream/market.pkl keeps no event history)",
+    ),
+]
+
+
+def _research_history(brain: Any, events: Path | None) -> Any:
+    """The history a research command fits on: ``--events`` if given, else the workspace's own
+    (``None``); a streaming workspace without ``--events`` is refused with a clear message."""
+    from nardis_neural.solana.market import EventStore
+
+    if events is not None:
+        return EventStore.load(events)
+    if not len(brain.history):
+        raise typer.BadParameter(
+            "the workspace keeps no event history (a streaming checkpoint, stream/market.pkl, "
+            "replaces it); pass --events <event directory>, e.g. one written by fetch-history"
+        )
+    return None
+
+
 @app.command("edge-research")
 def edge_research(
     workspace: Annotated[
@@ -322,6 +364,7 @@ def edge_research(
     max_positions: Annotated[
         int, typer.Option("--max-positions", help="max concurrent open positions in the backtest")
     ] = 5,
+    events: ResearchEvents = None,
     device: DeviceOpt = None,
 ) -> None:
     """Walk-forward edge research on the workspace history; installs the edge model.
@@ -339,7 +382,8 @@ def edge_research(
         latency_seconds=latency,
         size_sol=brain.cfg.trade_size_sol,
     )
-    report = brain.fit_edge(spec, n_folds=folds, max_positions=max_positions, log=typer.echo)
+    history = _research_history(brain, events)
+    report = brain.fit_edge(spec, n_folds=folds, max_positions=max_positions, history=history, log=typer.echo)
     typer.echo(research_markdown(report))
     typer.echo(f"edge model installed in {workspace / 'edge'}")
 
@@ -370,6 +414,7 @@ def moonshot_research(
     archetypes: Annotated[
         Path | None, typer.Option("--archetypes", help="simulator archetypes.json for diagnostics")
     ] = None,
+    events: ResearchEvents = None,
     device: DeviceOpt = None,
 ) -> None:
     """Fat-tail research: P(≥2x … ≥1000x) per token, ladder payoff, lottery-Kelly sizing hints.
@@ -387,8 +432,10 @@ def moonshot_research(
         max_entry_age_seconds=max_entry_age,
     )
     arch = json.loads(archetypes.read_text()) if archetypes is not None else None
+    history = _research_history(brain, events)
     report = brain.fit_moonshot(
         spec,
+        history=history,
         inputs=inputs,
         n_folds=folds,
         test_fraction=test_fraction,
@@ -502,6 +549,7 @@ def tape_research(
     archetypes: Annotated[
         Path | None, typer.Option("--archetypes", help="simulator archetypes.json for diagnostics")
     ] = None,
+    events: ResearchEvents = None,
     device: DeviceOpt = None,
 ) -> None:
     """Train the Tape Transformer (trade tape + wallet embeddings → tail and collapse) and
@@ -512,8 +560,10 @@ def tape_research(
 
     brain = SolanaBrain(workspace, device=device)
     arch = json.loads(archetypes.read_text()) if archetypes is not None else None
+    history = _research_history(brain, events)
     report = brain.fit_tape(
         tape=TapeSpec(max_trades=max_trades),
+        history=history,
         test_fraction=test_fraction,
         members=members,
         epochs=epochs,
@@ -546,6 +596,7 @@ def stopping_research(
     gamma: Annotated[
         float, typer.Option("--gamma", help="risk aversion of power utility, 0 < gamma < 1")
     ] = 0.5,
+    events: ResearchEvents = None,
 ) -> None:
     """Fit the optimal-stopping exit model (Longstaff–Schwartz, log utility), score it against
     hold, timers and the ladder on later tokens, and install it."""
@@ -554,7 +605,9 @@ def stopping_research(
 
     brain = SolanaBrain(workspace)
     arch = json.loads(archetypes.read_text()) if archetypes is not None else None
+    history = _research_history(brain, events)
     report = brain.fit_stopping(
+        history=history,
         test_fraction=test_fraction,
         spacing=spacing,
         archetypes=arch,
@@ -701,19 +754,43 @@ def serve(
     return_percent: Annotated[
         bool, typer.Option("--return-percent", help="return column in percent")
     ] = False,
+    alert_url: Annotated[
+        str | None,
+        typer.Option("--alert-url", help="POST each new moonshot candidate (JSON) to this URL"),
+    ] = None,
+    alert_target: Annotated[
+        float, typer.Option("--alert-target", help="chase target of the alerts: 2, 5, 10, 100 or 1000")
+    ] = 10.0,
+    alert_min_edge: Annotated[
+        float, typer.Option("--alert-min-edge", help="alert when the odds beat break-even this many times")
+    ] = 2.0,
+    alert_every: Annotated[
+        float, typer.Option("--alert-every", help="seconds between alert scans of the live market")
+    ] = 5.0,
+    assess_every: Annotated[
+        float,
+        typer.Option("--assess-every", help="seconds between assessment rounds of active tokens (0 = off)"),
+    ] = 10.0,
     device: DeviceOpt = None,
 ) -> None:
     """Run the addon as a local HTTP/JSON sidecar for the trading system (advice only).
 
     Endpoints: GET /health /tokens /moonshots /ranking /assess; POST /advise_trade /settle_trade
-    /hold_advice /allocate /ingest /save.  --alert-url pushes new moonshot candidates.
+    /hold_advice /allocate /ingest /save.  With or without the live stream (--no-stream: Nardis
+    pushes transactions to POST /ingest) a background thread assesses active tokens, resolves
+    outcomes, evicts idle tokens, maintains and checkpoints every 5 minutes.  --alert-url pushes
+    new moonshot candidates.  Ctrl-C or SIGTERM stops it with a final checkpoint.
     See docs/INTEGRATION.md."""
     from nardis_neural.solana.brain import SolanaBrain
+    from nardis_neural.solana.chase import CHASE_TARGETS
     from nardis_neural.solana.ingest import ChainStreamer, SolanaRpc
     from nardis_neural.solana.service import AddonService, make_server
 
-    brain = SolanaBrain(workspace, device=device)
-    service = AddonService(brain)
+    if alert_url is not None and alert_target not in CHASE_TARGETS:
+        raise typer.BadParameter(
+            f"--alert-target must be one of {', '.join(f'{k:g}' for k in CHASE_TARGETS)}"
+        )
+    streamer = None
     if stream:
         if rpc is None:
             raise typer.BadParameter("pass --rpc or set SOLANA_RPC_URL, or use --no-stream")
@@ -726,18 +803,36 @@ def serve(
             state_file=workspace / "stream_cursor.json",
             workers=workers,
         )
-        service.stream(streamer, poll_interval=poll_interval)
+    service = AddonService(SolanaBrain(workspace, device=device))
+    # without the stream, events come through POST /ingest; the thread then runs the upkeep alone
+    service.stream(streamer, poll_interval=poll_interval, assess_every=assess_every)
     if archive is not None:
         service.train_on_archive(
             archive, _archive_mapping(maps, features, return_percent), table, archive_every
         )
+    if alert_url is not None:
+        service.alerts(alert_url, target=alert_target, min_edge=alert_min_edge, every=alert_every)
     server = make_server(service, host, port)
     typer.echo(f"addon listening on http://{host}:{port} (stream {'on' if stream else 'off'})")
+    _serve_until_stopped(server, service)
+
+
+def _serve_until_stopped(server: Any, service: Any) -> None:
+    """Serve until Ctrl-C or SIGTERM; either way the service threads stop and the workspace is saved."""
+    import signal
+    import threading
+
+    def on_term(signum: int, frame: Any) -> None:
+        # shutdown() waits for serve_forever to return, so it cannot run in this (the serving) thread
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    previous = signal.signal(signal.SIGTERM, on_term)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        signal.signal(signal.SIGTERM, previous)
         server.server_close()
         service.stop()
 
@@ -753,6 +848,7 @@ def runner_research(
         float,
         typer.Option("--test-fraction", help="share of the latest-launched tokens held out for the test"),
     ] = 0.35,
+    events: ResearchEvents = None,
 ) -> None:
     """Train the runner detector (P(reach 2x / 5x / 10x / 100x / 1000x)), score it against the tail
     model on later tokens, show which signals identify runners, and install it."""
@@ -761,8 +857,12 @@ def runner_research(
     from nardis_neural.solana.runners import runner_markdown
 
     brain = SolanaBrain(workspace)
+    history = _research_history(brain, events)
     report = brain.fit_runners(
-        MoonshotSpec(horizon_seconds=horizon_minutes * 60), test_fraction=test_fraction, log=typer.echo
+        MoonshotSpec(horizon_seconds=horizon_minutes * 60),
+        history=history,
+        test_fraction=test_fraction,
+        log=typer.echo,
     )
     typer.echo(runner_markdown(report))
     typer.echo(f"runner detector installed in {workspace / 'runners'}")
@@ -810,13 +910,17 @@ def allocate(
     peak: Annotated[
         float | None, typer.Option("--peak", help="peak bankroll in SOL (drawdown governor)")
     ] = None,
+    day_start: Annotated[
+        float | None,
+        typer.Option("--day-start-equity", help="the day's opening bankroll in SOL (daily loss stop)"),
+    ] = None,
     device: DeviceOpt = None,
 ) -> None:
     """Recommended stakes for the current moonshot opportunities (advice only, never orders)."""
     from nardis_neural.solana.brain import SolanaBrain
 
     brain = SolanaBrain(workspace, device=device)
-    allocations = brain.allocate(equity, peak_equity_sol=peak)
+    allocations = brain.allocate(equity, peak_equity_sol=peak, day_start_equity_sol=day_start)
     _echo(
         {
             "track_record": brain.forward.track_record(),

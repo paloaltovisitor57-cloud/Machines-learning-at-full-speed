@@ -222,3 +222,135 @@ def test_solana_cli_cycle(tmp_path: Path) -> None:
     first = json.loads(out.strip().splitlines()[0])
     assert {"mint", "risk", "expected_net_return", "flags"} <= set(first)
     assert np.isfinite(first["round_trip_cost"])
+
+
+def _copy(brain_ws: Path, tmp_path: Path) -> Path:
+    ws = tmp_path / "ws"
+    shutil.copytree(brain_ws, ws)
+    return ws
+
+
+def test_maintenance_survives_a_learner_that_cannot_adapt_and_still_saves(
+    tmp_path: Path, brain_ws: Path
+) -> None:
+    ws = _copy(brain_ws, tmp_path)
+    brain = SolanaBrain(ws, device="cpu")
+    brain.learner.state.new_since_adapt = 10**6  # due, but the replay buffer holds nothing new
+    (ws / "solana_state.json").unlink(missing_ok=True)
+    status = brain.maintenance()
+    assert status["adapted"] is None and "need at least 10" in status["adapt_error"]
+    assert status["full_retrain_error"] is None
+    assert (ws / "solana_state.json").exists(), "the save still runs"
+
+
+def test_state_file_is_strict_json_and_old_infinity_still_loads(tmp_path: Path, brain_ws: Path) -> None:
+    ws = _copy(brain_ws, tmp_path)
+    brain = SolanaBrain(ws, device="cpu")
+    brain.save()
+
+    def strict(name: str) -> float:
+        raise ValueError(f"non-standard JSON constant {name}")
+
+    state = json.loads((ws / "solana_state.json").read_text(), parse_constant=strict)
+    assert state["moonshot_last_refit"] is None
+    assert SolanaBrain(ws, device="cpu").moonshot_last_refit == -np.inf
+    state["moonshot_last_refit"] = -np.inf  # written by older versions as -Infinity
+    (ws / "solana_state.json").write_text(json.dumps(state))
+    assert SolanaBrain(ws, device="cpu").moonshot_last_refit == -np.inf
+    assert not list(ws.glob("*.tmp")), "written through a temporary file"
+
+
+def test_edge_model_without_its_research_report_still_loads(
+    tmp_path: Path, brain_ws: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nardis_neural.solana.edge.model import EdgeModel
+
+    ws = _copy(brain_ws, tmp_path)
+    (ws / "edge").mkdir()
+    (ws / "edge" / "edge.json").write_text("{}")
+    sentinel = object()
+    monkeypatch.setattr(EdgeModel, "load", classmethod(lambda cls, d: sentinel))
+    brain = SolanaBrain(ws, device="cpu")
+    assert brain.edge is sentinel and brain.edge_meta == {}
+
+
+def test_bootstrap_refuses_an_existing_workspace_unless_told_to_overwrite(
+    tmp_path: Path, brain_ws: Path
+) -> None:
+    ws = _copy(brain_ws, tmp_path)
+    registry = (ws / "registry.json").read_text()
+    small = simulate_launches(
+        LaunchSimSpec(
+            n_tokens=6, seed=5, n_retail=80, duration_seconds=1800, mint_prefix="B", start_time=T_HIST
+        )
+    )[0]
+    with pytest.raises(FileExistsError, match="overwrite"):
+        SolanaBrain.bootstrap(ws, small, _sol_cfg(), _tiny(), device="cpu")
+    assert (ws / "registry.json").read_text() == registry, "nothing was touched"
+    before = sorted(p.name for p in ws.iterdir())
+    with pytest.raises(ValueError, match="no labelled snapshots"):  # the rebuild fails before training
+        SolanaBrain.bootstrap(ws, EventStore(), _sol_cfg(), _tiny(), device="cpu", overwrite=True)
+    assert sorted(p.name for p in ws.iterdir()) == before, "a failed rebuild keeps the old workspace"
+    assert (ws / "registry.json").read_text() == registry
+    old = json.loads(registry)["champion"]
+    (ws / "notes.txt").write_text("mine")
+    cfg = _tiny()
+    cfg.training.epochs = 1
+    cfg.ensemble.size = 1
+    brain = SolanaBrain.bootstrap(ws, small, _sol_cfg(), cfg, device="cpu", overwrite=True)
+    assert brain.learner.registry.champion_version != old
+    assert brain.learner.registry.versions() == [brain.learner.registry.champion_version]
+    assert brain.market.tokens and all(m.startswith("B") for m in brain.market.tokens)
+    assert (ws / "notes.txt").read_text() == "mine", "only workspace entries are removed"
+
+
+def test_allocator_book_is_remembered_across_calls_and_restarts(
+    tmp_path: Path, brain_ws: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    ws = _copy(brain_ws, tmp_path)
+    brain = SolanaBrain(ws, device="cpu")
+
+    def ranking(max_idle_seconds: float = 120.0) -> list[SimpleNamespace]:
+        moon = {"expected_multiple": 3.0, "lottery_kelly": 0.05, "epistemic": 0.0, "vetoed": 0.0}
+        return [
+            SimpleNamespace(
+                mint="Y", timestamp=brain.market.now, moonshot=moon, features={"liquidity_sol_log": 20.0}
+            )
+        ]
+
+    monkeypatch.setattr(brain, "moonshot_ranking", ranking)
+    brain.market.family_of |= {"X": 7, "Y": 7}  # one creator family
+    first = brain.allocate(100.0)[0]
+    assert first.reason == "position cap" and first.stake_sol == pytest.approx(4.0)
+    capped = brain.allocate(100.0, {"X": 7.5})[0]
+    assert capped.reason == "family cap" and capped.stake_sol == pytest.approx(0.5), "X is in Y's family"
+    assert brain.allocate(80.0)[0].reason == "daily loss stop", "down 20 % on the day"
+    again = SolanaBrain(ws, device="cpu")
+    monkeypatch.setattr(again, "moonshot_ranking", ranking)
+    assert again.allocate(80.0)[0].reason == "daily loss stop", "the day's opening equity survives restarts"
+    assert again.allocate(80.0, day_start_equity_sol=85.0)[0].reason == "position cap"
+
+
+def test_pending_assessments_survive_a_restart_and_are_still_labelled(
+    tmp_path: Path, brain_ws: Path, live: tuple[EventStore, dict[str, str]]
+) -> None:
+    ws = _copy(brain_ws, tmp_path)
+    brain = SolanaBrain(ws, device="cpu")
+    events = [e for e in live[0].sorted() if e.t >= T_LIVE - 3600]
+    head, tail = events[: len(events) // 3], events[len(events) // 3 :]
+    brain.ingest_many(head)
+    brain.assess_active()
+    assert brain.pending and brain.resolve() == 0, "their horizons have not elapsed yet"
+    brain.save()
+    again = SolanaBrain(ws, device="cpu")
+    assert [(p.mint, p.t) for p in again.pending] == [(p.mint, p.t) for p in brain.pending]
+    assert not again.learner.pending, "the learner's own pending book was not kept"
+    again.ingest_many(tail)
+    again.market.advance(again.market.now + again.cfg.risk_horizon_seconds + 400)
+    start = again.learner.buffer.next_seq
+    resolved = again.resolve()
+    new = [e for e in again.learner.buffer.all() if e.seq >= start]
+    assert resolved > 0 and len(new) == resolved
+    assert all(e.model_version for e in new), "each is linked to the prediction made before the restart"

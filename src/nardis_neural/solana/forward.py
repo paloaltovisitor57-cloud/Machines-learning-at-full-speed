@@ -168,7 +168,8 @@ class ForwardLedger:
         return realised / max(predicted, 1e-9)
 
     def save(self) -> None:
-        """Write the ledger (open and closed tickets) and its summary as JSON."""
+        """Write the ledger (open and closed tickets) and its summary as JSON, each atomically
+        (temporary file, then rename), so a crash never leaves a torn ledger."""
         self.path.mkdir(parents=True, exist_ok=True)
         state = {
             "alarm": list(self.alarm) if self.alarm else None,
@@ -177,8 +178,13 @@ class ForwardLedger:
             "closed": [asdict(t) for t in self.closed],
             "seen": sorted(self.seen),
         }
-        (self.path / "ledger.json").write_text(json.dumps(state, default=float))
-        (self.path / "summary.json").write_text(json.dumps(self.summary(), indent=2, default=float))
+        for name, text in (
+            ("ledger.json", json.dumps(state, default=float)),
+            ("summary.json", json.dumps(self.summary(), indent=2, default=float)),
+        ):
+            tmp = self.path / f"{name}.tmp"
+            tmp.write_text(text)
+            tmp.replace(self.path / name)
 
     @classmethod
     def load(

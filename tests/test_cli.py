@@ -320,3 +320,153 @@ def test_train_into_existing_workspace_registers_challenger(cli_env: dict[str, P
     assert "challenger" in out
     after = _last_json(run("status", "--workspace", ws))
     assert after["champion"] == before["champion"] and after["challenger"] is not None
+
+
+# ---------------------------------------------------------------- solana serve / research
+class _FakeService:
+    last: _FakeService | None = None
+
+    def __init__(self, brain: object) -> None:
+        self.calls: dict[str, object] = {}
+        _FakeService.last = self
+
+    def stream(self, streamer: object, **kw: object) -> None:
+        self.calls["stream"] = (streamer, kw)
+
+    def alerts(self, url: str, **kw: object) -> None:
+        self.calls["alerts"] = (url, kw)
+
+    def stop(self) -> None:
+        self.calls["stop"] = True
+
+
+class _FakeServer:
+    def serve_forever(self) -> None:
+        raise KeyboardInterrupt
+
+    def server_close(self) -> None:
+        return None
+
+
+def test_solana_serve_starts_alerts_and_upkeep_without_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nardis_neural.solana import brain, service
+
+    monkeypatch.setattr(brain, "SolanaBrain", lambda ws, device=None: object())
+    monkeypatch.setattr(service, "AddonService", _FakeService)
+    monkeypatch.setattr(service, "make_server", lambda svc, host, port: _FakeServer())
+    serve = ["solana", "serve", "--workspace", str(tmp_path), "--no-stream"]
+    alerts = ["--alert-url", "http://127.0.0.1:9/moon", "--alert-target", "100", "--alert-min-edge", "3"]
+    run(*serve, *alerts, "--alert-every", "1.5", "--assess-every", "7")
+    svc = _FakeService.last
+    assert svc is not None and svc.calls["stop"] is True
+    assert svc.calls["alerts"] == (
+        "http://127.0.0.1:9/moon",
+        {"target": 100.0, "min_edge": 3.0, "every": 1.5},
+    )
+    assert svc.calls["stream"] == (None, {"poll_interval": 2.0, "assess_every": 7.0}), (
+        "upkeep runs without the stream"
+    )
+    res = runner.invoke(app, [*serve, "--alert-url", "x", "--alert-target", "7"])
+    assert res.exit_code != 0  # not a chase target
+
+
+def test_serve_stops_and_saves_on_sigterm() -> None:
+    import os
+    import signal
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from nardis_neural.solana.cli import _serve_until_stopped
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
+    svc = _FakeService(object())
+    before = signal.getsignal(signal.SIGTERM)
+    timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGTERM))
+    timer.start()
+    _serve_until_stopped(server, svc)
+    timer.join()
+    assert svc.calls.get("stop") is True, "SIGTERM stops the service and checkpoints"
+    assert signal.getsignal(signal.SIGTERM) == before
+
+
+class _FakeBrain:
+    def __init__(self, history_len: int) -> None:
+        from nardis_neural.solana.config import SolanaConfig
+
+        self.history = [object()] * history_len
+        self.cfg = SolanaConfig()
+        self.fitted: dict[str, object] = {}
+
+    def __getattr__(self, name: str) -> object:
+        if not name.startswith("fit_"):
+            raise AttributeError(name)
+
+        def fit(*a: object, **k: object) -> dict[str, object]:
+            self.fitted[name] = k.get("history")
+            return {}
+
+        return fit
+
+
+@pytest.mark.parametrize(
+    ("command", "fit", "markdown"),
+    [
+        ("edge-research", "fit_edge", "nardis_neural.solana.edge.research_markdown"),
+        ("moonshot-research", "fit_moonshot", "nardis_neural.solana.moonshot.moonshot_markdown"),
+        ("tape-research", "fit_tape", "nardis_neural.solana.tape.research.tape_markdown"),
+        ("stopping-research", "fit_stopping", "nardis_neural.solana.stopping.stopping_markdown"),
+        ("runner-research", "fit_runners", "nardis_neural.solana.runners.runner_markdown"),
+    ],
+)
+def test_research_commands_read_events_on_a_streaming_workspace(
+    command: str, fit: str, markdown: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nardis_neural.solana import LaunchSimSpec, brain, simulate_launches
+
+    store, _ = simulate_launches(LaunchSimSpec(n_tokens=1, seed=1, n_retail=5, duration_seconds=60))
+    store.save(tmp_path / "events")
+    fake = _FakeBrain(history_len=0)  # streaming checkpoint: no event history
+    monkeypatch.setattr(brain, "SolanaBrain", lambda ws, device=None: fake)
+    monkeypatch.setattr(markdown, lambda report: "report")
+    res = runner.invoke(app, ["solana", command, "--workspace", str(tmp_path)])
+    assert res.exit_code != 0 and "--events" in res.output
+    run("solana", command, "--workspace", tmp_path, "--events", tmp_path / "events")
+    assert len(fake.fitted[fit]) == len(store)  # type: ignore[arg-type]
+
+
+def test_bootstrap_overwrite_and_allocate_day_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from nardis_neural.solana import LaunchSimSpec, brain, simulate_launches
+
+    calls: dict[str, dict[str, object]] = {}
+
+    class Fake:
+        def __init__(self, ws: object, device: object = None) -> None:
+            self.forward = SimpleNamespace(track_record=lambda: {})
+
+        @classmethod
+        def bootstrap(cls, *a: object, **k: object) -> object:
+            calls["bootstrap"] = k
+            if not k["overwrite"]:
+                raise FileExistsError("ws already holds a workspace; pass overwrite=True to rebuild it")
+            return SimpleNamespace(
+                learner=SimpleNamespace(registry=SimpleNamespace(champion_version=1)), risk=None
+            )
+
+        def allocate(self, equity: float, **k: object) -> list[object]:
+            calls["allocate"] = k
+            return []
+
+    store, _ = simulate_launches(LaunchSimSpec(n_tokens=1, seed=1, n_retail=5, duration_seconds=60))
+    store.save(tmp_path / "events")
+    monkeypatch.setattr(brain, "SolanaBrain", Fake)
+    boot = ["solana", "bootstrap", "--events", str(tmp_path / "events"), "--workspace", str(tmp_path / "ws")]
+    res = runner.invoke(app, boot)
+    assert res.exit_code == 2 and "--overwrite" in res.output and "Traceback" not in res.output
+    run(*boot, "--overwrite")
+    assert calls["bootstrap"]["overwrite"] is True
+    run("solana", "allocate", "--workspace", tmp_path, "--equity", "10", "--day-start-equity", "12")
+    assert calls["allocate"] == {"peak_equity_sol": None, "day_start_equity_sol": 12.0}

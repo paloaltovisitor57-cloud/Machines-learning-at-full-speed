@@ -107,7 +107,7 @@ flowchart TB
 | Continual learning | 3-pool replay (recent FIFO, historical reservoir, protected rare events), 5 sampling strategies, candidate cloning, distillation, EWC, full retraining with configurable weights |
 | Lifecycle | immutable checkpoints, champion/candidate/challenger/retired/failed registry with audit log, shadow mode, 10-gate promotion, manual and optional automatic rollback |
 | Representation | self-supervised pretraining (masked timestep, masked feature, contrastive), embedding export to Parquet/NumPy, KMeans / GMM / HDBSCAN regime discovery |
-| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 250 test functions |
+| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 288 test functions |
 
 ## Quick start
 
@@ -384,7 +384,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │                            edge/ (barriers · model · trees · backtest · research)
 │                            moonshot/ (labels · tail · guard · online · research)
 │                            tape/ (features · dataset · model · research · policy)
-└── tests/                   250 test functions incl. synthetic end-to-end pipeline
+└── tests/                   288 test functions incl. synthetic end-to-end pipeline
 ```
 
 ## Testing & quality gates
@@ -6156,6 +6156,7 @@ Train the neural ensemble + risk model from history and create a Solana workspac
 | `--epochs` | int | null | training epochs (default: from config) |
 | `--profile` | str | null | auto \| cpu-lite \| cpu \| gpu \| gpu-frontier |
 | `--device` | str | null | cpu \| cuda \| cuda:0 \| mps (default: auto) |
+| `--overwrite` | flag | false | replace an existing workspace (only once the new models have trained) |
 
 ### `nardis-neural solana replay`
 
@@ -6231,6 +6232,7 @@ chosen on a tune period, one report on an untouched test period vs baselines.
 | `--max-hold` | float | 180.0 | max holding time (time barrier), seconds |
 | `--latency` | float | 1.0 | entry/exit latency, seconds |
 | `--max-positions` | int | 5 | max concurrent open positions in the backtest |
+| `--events`, `-e` | path | null | event directory to research (default: the workspace history; required once the workspace streams, since stream/market.pkl keeps no event history) |
 | `--device` | str | null | cpu \| cuda \| cuda:0 \| mps (default: auto) |
 
 ### `nardis-neural solana moonshot-research`
@@ -6252,6 +6254,7 @@ against every-launch, random and momentum tickets; installs the tail model.
 | `--test-fraction` | float | 0.35 | share of later tokens held out for the test |
 | `--folds` | int | 4 | walk-forward folds (neural inputs) |
 | `--archetypes` | path | null | simulator archetypes.json for diagnostics |
+| `--events`, `-e` | path | null | event directory to research (default: the workspace history; required once the workspace streams, since stream/market.pkl keeps no event history) |
 | `--device` | str | null | cpu \| cuda \| cuda:0 \| mps (default: auto) |
 
 ### `nardis-neural solana stream-train`
@@ -6293,6 +6296,7 @@ score it against the raw-feature tail model on later tokens; installs the model.
 | `--layers` | int | 2 | Transformer layers |
 | `--test-fraction` | float | 0.35 | share of the latest-launched tokens held out for the test |
 | `--archetypes` | path | null | simulator archetypes.json for diagnostics |
+| `--events`, `-e` | path | null | event directory to research (default: the workspace history; required once the workspace streams, since stream/market.pkl keeps no event history) |
 | `--device` | str | null | cpu \| cuda \| cuda:0 \| mps (default: auto) |
 
 ### `nardis-neural solana stopping-research`
@@ -6308,6 +6312,7 @@ hold, timers and the ladder on later tokens, and install it.
 | `--archetypes` | path | null | simulator archetypes.json for diagnostics |
 | `--utility` | str | "log" | installed exit objective: log (compounding) or power (runner mode) |
 | `--gamma` | float | 0.5 | risk aversion of power utility, 0 < gamma < 1 |
+| `--events`, `-e` | path | null | event directory to research (default: the workspace history; required once the workspace streams, since stream/market.pkl keeps no event history) |
 
 ### `nardis-neural solana fetch-history`
 
@@ -6343,7 +6348,10 @@ Train the meta-learner on the trading system's own trade archive (only new trade
 Run the addon as a local HTTP/JSON sidecar for the trading system (advice only).
 
 Endpoints: GET /health /tokens /moonshots /ranking /assess; POST /advise_trade /settle_trade
-/hold_advice /allocate /ingest /save.  --alert-url pushes new moonshot candidates.
+/hold_advice /allocate /ingest /save.  With or without the live stream (--no-stream: Nardis
+pushes transactions to POST /ingest) a background thread assesses active tokens, resolves
+outcomes, evicts idle tokens, maintains and checkpoints every 5 minutes.  --alert-url pushes
+new moonshot candidates.  Ctrl-C or SIGTERM stops it with a final checkpoint.
 See docs/INTEGRATION.md.
 
 | option | type | default | description |
@@ -6362,6 +6370,11 @@ See docs/INTEGRATION.md.
 | `--map` | str | null | field=column (repeatable) |
 | `--features` | str | null | comma-separated feature columns |
 | `--return-percent` | flag | false | return column in percent |
+| `--alert-url` | str | null | POST each new moonshot candidate (JSON) to this URL |
+| `--alert-target` | float | 10.0 | chase target of the alerts: 2, 5, 10, 100 or 1000 |
+| `--alert-min-edge` | float | 2.0 | alert when the odds beat break-even this many times |
+| `--alert-every` | float | 5.0 | seconds between alert scans of the live market |
+| `--assess-every` | float | 10.0 | seconds between assessment rounds of active tokens (0 = off) |
 | `--device` | str | null | cpu \| cuda \| cuda:0 \| mps (default: auto) |
 
 ### `nardis-neural solana runner-research`
@@ -6374,6 +6387,7 @@ model on later tokens, show which signals identify runners, and install it.
 | `--workspace`, `-w` | path | required | Solana workspace (history) |
 | `--horizon-minutes` | float | 30.0 | minutes after entry to hit the target |
 | `--test-fraction` | float | 0.35 | share of the latest-launched tokens held out for the test |
+| `--events`, `-e` | path | null | event directory to research (default: the workspace history; required once the workspace streams, since stream/market.pkl keeps no event history) |
 
 ### `nardis-neural solana forward-report`
 
@@ -6406,6 +6420,7 @@ Recommended stakes for the current moonshot opportunities (advice only, never or
 | `--workspace`, `-w` | path | required | Solana workspace |
 | `--equity` | float | required | current bankroll in SOL |
 | `--peak` | float | null | peak bankroll in SOL (drawdown governor) |
+| `--day-start-equity` | float | null | the day's opening bankroll in SOL (daily loss stop) |
 | `--device` | str | null | cpu \| cuda \| cuda:0 \| mps (default: auto) |
 
 
@@ -7570,8 +7585,9 @@ Solana DEX pricing maths: pump.fun bonding curve and constant-product AMM pools.
 Train the meta-learner from the trading system's own trade archive.
 
 - **class `ArchiveMapping`** — Explicit column names; anything left ``None`` is found through :data:`ALIASES`.
+- `learn_trades(learner: 'MetaLearner', trades: 'pl.DataFrame', log: 'Callable[[str], None] | None' = None) -> 'dict[str, Any]'` — Learn the trades of a normalised archive (see :func:`normalise_trades`) the learner has not seen, in exit-time order, then refit once.
 - `normalise_trades(df: 'pl.DataFrame', mapping: 'ArchiveMapping | None' = None) -> 'pl.DataFrame'` — One row per settled trade: ``trade_id, mint, t_entry, t_exit, multiple, peak_multiple`` + feature columns. Open trades (no exit or no result) are left out.
-- `read_table(path: 'str | Path', table: 'str | None' = None) -> 'pl.DataFrame'` — Read a Parquet file or directory (recursively, partitions included) or an SQLite table.
+- `read_table(path: 'str | Path', table: 'str | None' = None, unreadable: 'list[str] | None' = None) -> 'pl.DataFrame'` — Read a Parquet file or directory (recursively, partitions included) or an SQLite table.
 - `train_from_archive(learner: 'MetaLearner', path: 'str | Path', mapping: 'ArchiveMapping | None' = None, table: 'str | None' = None, log: 'Callable[[str], None] | None' = None) -> 'dict[str, Any]'` — Replay every settled trade the learner has not seen, in exit-time order, then refit.
 
 ### `nardis_neural.solana.brain`
@@ -7583,11 +7599,11 @@ SolanaBrain — the complete Solana ML module behind one small API.
 - **class `SolanaAssessment`** — Everything the ML module knows about one token right now (no trade decision).
 - **class `SolanaBrain`** — Live Solana intelligence over one workspace: causal market, neural ensemble, risk, edge and moonshot models.
   - `advise_trade(self, proposal: 'TradeProposal', with_market: 'bool' = True) -> 'TradeAdvice'` — Advice on a trade the trading system is about to make, learned from its own settled trades, joined with this addon's market view of the token when ``with_market``.
-  - `allocate(self, equity_sol: 'float', open_stakes: 'dict[str, float] | None' = None, peak_equity_sol: 'float | None' = None, cfg: 'AllocatorConfig | None' = None, max_idle_seconds: 'float' = 120.0) -> 'list[Allocation]'` — Recommended stakes for the current moonshot opportunities (advice, never orders).
+  - `allocate(self, equity_sol: 'float', open_stakes: 'dict[str, float] | None' = None, peak_equity_sol: 'float | None' = None, cfg: 'AllocatorConfig | None' = None, max_idle_seconds: 'float' = 120.0, day_start_equity_sol: 'float | None' = None) -> 'list[Allocation]'` — Recommended stakes for the current moonshot opportunities (advice, never orders).
   - `assess(self, mint: 'str') -> 'SolanaAssessment'` — Assess one token at the current market time (see :meth:`assess_many`).
   - `assess_active(self, max_idle_seconds: 'float' = 120.0, min_age_seconds: 'float | None' = None) -> 'list[SolanaAssessment]'` — Assess every token that traded within ``max_idle_seconds`` and is at least ``min_age_seconds`` old (default ``cfg.min_token_age_seconds``).
   - `assess_many(self, mints: 'list[str]') -> 'list[SolanaAssessment]'` — Assess several tokens at the current market time with one batched forward pass.
-  - `bootstrap(cls, workspace: 'str | Path', history: 'EventStore', cfg: 'SolanaConfig | None' = None, neural_cfg: 'NeuralConfig | None' = None, device: 'torch.device | str | None' = None, log: 'Callable[[str], None] | None' = None) -> 'SolanaBrain'` — Train the neural ensemble and the risk model from historical events.
+  - `bootstrap(cls, workspace: 'str | Path', history: 'EventStore', cfg: 'SolanaConfig | None' = None, neural_cfg: 'NeuralConfig | None' = None, device: 'torch.device | str | None' = None, log: 'Callable[[str], None] | None' = None, overwrite: 'bool' = False) -> 'SolanaBrain'` — Train the neural ensemble and the risk model from historical events.
   - `enable_streaming(self, evict_idle_seconds: 'float' = 7200.0) -> 'None'` — Bounded-memory mode for long streams (months of history or live).
   - `evict(self) -> 'list[str]'` — Label finished moonshot rows, then drop tokens idle for ``evict_idle_seconds``.
   - `fit_edge(self, spec: 'BarrierSpec | None' = None, n_folds: 'int' = 4, max_positions: 'int' = 5, history: 'EventStore | None' = None, log: 'Callable[[str], None] | None' = None) -> 'dict[str, Any]'` — Walk-forward edge research on the workspace history; installs the edge model.
@@ -7602,7 +7618,7 @@ SolanaBrain — the complete Solana ML module behind one small API.
   - `moonshot_ranking(self, max_idle_seconds: 'float' = 120.0, include_vetoed: 'bool' = False) -> 'list[SolanaAssessment]'` — Active tokens inside the moonshot entry window, best ``chase_score`` first.
   - `refit_moonshot_online(self, every_seconds: 'float' = 21600.0, min_tokens: 'int' = 40, members: 'int' = 3, epochs: 'int' = 60, tolerance: 'float' = 0.02) -> 'dict[str, Any] | None'` — Retrain the raw-input tail model from the streamed buffer, behind a hold-out gate.
   - `resolve(self) -> 'int'` — Label every assessment whose longest horizon has elapsed and learn from it.
-  - `save(self) -> 'None'` — Checkpoint the workspace: learner, event history (or the pickled market when streaming), moonshot buffer, risk samples and ``solana_state.json``.
+  - `save(self) -> 'None'` — Checkpoint the workspace: learner, event history (or the pickled market when streaming), pending assessments, moonshot buffer, risk samples and ``solana_state.json``.
   - `settle_trade(self, outcome: 'TradeOutcome') -> 'bool'` — Report a closed trade; the learner updates (refits when due).
   - `trade_context(self, mint: 'str') -> 'dict[str, float]'` — The addon's market view of a token right now, flattened for :meth:`advise_trade`.
 
@@ -7659,27 +7675,27 @@ The edge the addon always chases: 2x, 5x, 10x, 100x and 1000x.
 
 ``nardis-neural solana …`` commands.
 
-- `allocate(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace')]", equity: "Annotated[float, typer.Option('--equity', help='current bankroll in SOL')]", peak: "Annotated[float | None, typer.Option('--peak', help='peak bankroll in SOL (drawdown governor)')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Recommended stakes for the current moonshot opportunities (advice only, never orders).
+- `allocate(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace')]", equity: "Annotated[float, typer.Option('--equity', help='current bankroll in SOL')]", peak: "Annotated[float | None, typer.Option('--peak', help='peak bankroll in SOL (drawdown governor)')]" = None, day_start: 'Annotated[float | None, typer.Option(\'--day-start-equity\', help="the day\'s opening bankroll in SOL (daily loss stop)")]' = None, device: 'DeviceOpt' = None) -> 'None'` — Recommended stakes for the current moonshot opportunities (advice only, never orders).
 - `assess(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace directory')]", mint: "Annotated[str | None, typer.Option('--mint', help='token mint to assess (default: all recently active tokens)')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Assess token(s) at the workspace's current market time.
 - `backfill(out: "Annotated[Path, typer.Option('--out', '-o', help='event directory (Parquet tables)')]", rpc: 'RpcOpt' = None, limit: "Annotated[int, typer.Option('--limit', help='max signatures per program')]" = 1000, raw: "Annotated[Path | None, typer.Option('--raw', help='also save raw transactions as JSONL')]" = None) -> 'None'` — Fetch recent pump.fun / PumpSwap history over RPC (read-only) and decode it.
-- `bootstrap(events: "Annotated[Path, typer.Option('--events', '-e', help='historical event directory (Parquet tables)')]", workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace directory to create')]", solana_config: 'SolCfg' = None, config: 'BaseCfg' = None, epochs: "Annotated[int | None, typer.Option('--epochs', help='training epochs (default: from config)')]" = None, profile: "Annotated[str | None, typer.Option('--profile', help='auto | cpu-lite | cpu | gpu | gpu-frontier')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Train the neural ensemble + risk model from history and create a Solana workspace.
+- `bootstrap(events: "Annotated[Path, typer.Option('--events', '-e', help='historical event directory (Parquet tables)')]", workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace directory to create')]", solana_config: 'SolCfg' = None, config: 'BaseCfg' = None, epochs: "Annotated[int | None, typer.Option('--epochs', help='training epochs (default: from config)')]" = None, profile: "Annotated[str | None, typer.Option('--profile', help='auto | cpu-lite | cpu | gpu | gpu-frontier')]" = None, device: 'DeviceOpt' = None, overwrite: "Annotated[bool, typer.Option('--overwrite', help='replace an existing workspace (only once the new models have trained)')]" = False) -> 'None'` — Train the neural ensemble + risk model from history and create a Solana workspace.
 - `build_dataset(events: "Annotated[Path, typer.Option('--events', '-e', help='event directory (Parquet tables)')]", out: "Annotated[Path, typer.Option('--out', '-o', help='output .npy dataset directory')]", solana_config: 'SolCfg' = None, config: 'BaseCfg' = None) -> 'None'` — Causal replay + hindsight labelling → canonical neural dataset (+ risk labels).
 - `decode(input_file: "Annotated[Path, typer.Option('--input', '-i', help='JSONL of getTransaction results')]", out: "Annotated[Path, typer.Option('--out', '-o', help='event directory (Parquet tables)')]", min_transfer_sol: "Annotated[float, typer.Option('--min-transfer-sol', help='ignore SOL transfers below this amount, SOL')]" = 0.05) -> 'None'` — Decode raw Solana transactions (pump.fun, AMMs, SOL transfers) into market events.
-- `edge_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history + champion)')]", folds: "Annotated[int, typer.Option('--folds', help='walk-forward folds')]" = 4, take_profit: "Annotated[float, typer.Option('--take-profit', help='take-profit barrier, fractional return (0.25 = +25%)')]" = 0.25, stop_loss: "Annotated[float, typer.Option('--stop-loss', help='stop-loss barrier, fractional loss (0.15 = -15%)')]" = 0.15, max_hold: "Annotated[float, typer.Option('--max-hold', help='max holding time (time barrier), seconds')]" = 180.0, latency: "Annotated[float, typer.Option('--latency', help='entry/exit latency, seconds')]" = 1.0, max_positions: "Annotated[int, typer.Option('--max-positions', help='max concurrent open positions in the backtest')]" = 5, device: 'DeviceOpt' = None) -> 'None'` — Walk-forward edge research on the workspace history; installs the edge model.
+- `edge_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history + champion)')]", folds: "Annotated[int, typer.Option('--folds', help='walk-forward folds')]" = 4, take_profit: "Annotated[float, typer.Option('--take-profit', help='take-profit barrier, fractional return (0.25 = +25%)')]" = 0.25, stop_loss: "Annotated[float, typer.Option('--stop-loss', help='stop-loss barrier, fractional loss (0.15 = -15%)')]" = 0.15, max_hold: "Annotated[float, typer.Option('--max-hold', help='max holding time (time barrier), seconds')]" = 180.0, latency: "Annotated[float, typer.Option('--latency', help='entry/exit latency, seconds')]" = 1.0, max_positions: "Annotated[int, typer.Option('--max-positions', help='max concurrent open positions in the backtest')]" = 5, events: 'ResearchEvents' = None, device: 'DeviceOpt' = None) -> 'None'` — Walk-forward edge research on the workspace history; installs the edge model.
 - `fetch_history_cmd(out: "Annotated[Path, typer.Option('--out', '-o', help='event directory to write (resumable)')]", hours: "Annotated[float, typer.Option('--hours', help='length of history to fetch, hours')]" = 12.0, end: "Annotated[str | None, typer.Option('--end', help='end of the window: unix seconds or ISO date (default: 15 min ago)')]" = None, workers: "Annotated[int, typer.Option('--workers', help='parallel getTransaction calls (6 suits most nodes)')]" = 6, rpc: "Annotated[str | None, typer.Option('--rpc', envvar='SOLANA_RPC_URL', help='read-only (archival) RPC endpoint URL')]" = None, follow_hours: "Annotated[float, typer.Option('--follow-graduates-hours', help='follow graduated tokens through PumpSwap this many hours past the window (0 = off)')]" = 6.0) -> 'None'` — Fetch pump.fun history into an event directory for `bootstrap` and the research commands.
 - `forward_report(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace')]") -> 'None'` — Paper-ticket scorecard of the ML signals (forward test recorded during stream / stream-train).
 - `init_config(out: "Annotated[Path, typer.Option('--out', '-o', help='YAML file to write')]" = PosixPath('configs/solana.yaml')) -> 'None'` — Write the default Solana configuration.
 - `meta_train(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace')]", archive: "Annotated[Path, typer.Option('--archive', '-a', help='trade archive: Parquet file/directory or SQLite .db')]", table: "Annotated[str | None, typer.Option('--table', help='SQLite table holding the trades')]" = None, maps: "Annotated[list[str] | None, typer.Option('--map', help='field=column, e.g. --map mint=token_ca (repeatable)')]" = None, features: "Annotated[str | None, typer.Option('--features', help='comma-separated feature columns (default: all numeric)')]" = None, return_percent: "Annotated[bool, typer.Option('--return-percent', help='the return column is in percent (50 = +50 %)')]" = False) -> 'None'` — Train the meta-learner on the trading system's own trade archive (only new trades are added).
-- `moonshot_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history + champion)')]", inputs: "Annotated[str, typer.Option('--inputs', help='raw (on-chain features) or neural (walk-forward OOF stack)')]" = 'raw', size: "Annotated[float, typer.Option('--size', help='ticket size, SOL')]" = 0.5, latency: "Annotated[float, typer.Option('--latency', help='entry/exit latency, seconds')]" = 1.0, horizon_hours: "Annotated[float, typer.Option('--horizon-hours', help='outcome horizon after entry, hours')]" = 6.0, max_entry_age: "Annotated[float, typer.Option('--max-entry-age', help='latest entry after launch, seconds')]" = 600.0, min_ev: "Annotated[float, typer.Option('--min-ev', help='ticket when E[ladder payoff] per SOL is at least this')]" = 1.0, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of later tokens held out for the test')]" = 0.35, folds: "Annotated[int, typer.Option('--folds', help='walk-forward folds (neural inputs)')]" = 4, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Fat-tail research: P(≥2x … ≥1000x) per token, ladder payoff, lottery-Kelly sizing hints.
+- `moonshot_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history + champion)')]", inputs: "Annotated[str, typer.Option('--inputs', help='raw (on-chain features) or neural (walk-forward OOF stack)')]" = 'raw', size: "Annotated[float, typer.Option('--size', help='ticket size, SOL')]" = 0.5, latency: "Annotated[float, typer.Option('--latency', help='entry/exit latency, seconds')]" = 1.0, horizon_hours: "Annotated[float, typer.Option('--horizon-hours', help='outcome horizon after entry, hours')]" = 6.0, max_entry_age: "Annotated[float, typer.Option('--max-entry-age', help='latest entry after launch, seconds')]" = 600.0, min_ev: "Annotated[float, typer.Option('--min-ev', help='ticket when E[ladder payoff] per SOL is at least this')]" = 1.0, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of later tokens held out for the test')]" = 0.35, folds: "Annotated[int, typer.Option('--folds', help='walk-forward folds (neural inputs)')]" = 4, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None, events: 'ResearchEvents' = None, device: 'DeviceOpt' = None) -> 'None'` — Fat-tail research: P(≥2x … ≥1000x) per token, ladder payoff, lottery-Kelly sizing hints.
 - `replay(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace directory')]", events: "Annotated[Path, typer.Option('--events', '-e', help='new events to stream in')]", every: "Annotated[float, typer.Option('--assess-every', help='seconds between assessment rounds')]" = 10.0, out: "Annotated[Path | None, typer.Option('--out', '-o', help='JSONL of assessments')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Stream events through the brain as if live: assess, resolve outcomes, then maintain.
 - `research_suite(seeds: "Annotated[str, typer.Option('--seeds', help='comma-separated simulator seeds')]" = '7,19,23', market: "Annotated[str, typer.Option('--market', help='archetype mix: default or degen')]" = 'degen', tokens: "Annotated[int, typer.Option('--tokens', help='launches per simulated market')]" = 150, hours: "Annotated[float, typer.Option('--hours', help='simulated hours per market')]" = 8.0, tape: "Annotated[bool, typer.Option('--tape/--no-tape', help='also run the (slower) tape research')]" = False, out: "Annotated[Path | None, typer.Option('--out', '-o', help='write the JSON result here')]" = None) -> 'None'` — Run the moonshot (and optionally tape) research on several independent simulated markets and report every metric as mean ± sd across seeds.
-- `runner_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history)')]", horizon_minutes: "Annotated[float, typer.Option('--horizon-minutes', help='minutes after entry to hit the target')]" = 30.0, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of the latest-launched tokens held out for the test')]" = 0.35) -> 'None'` — Train the runner detector (P(reach 2x / 5x / 10x / 100x / 1000x)), score it against the tail model on later tokens, show which signals identify runners, and install it.
-- `serve(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace')]", host: "Annotated[str, typer.Option('--host', help='bind address (keep 127.0.0.1 unless firewalled)')]" = '127.0.0.1', port: "Annotated[int, typer.Option('--port', help='HTTP port')]" = 8787, rpc: "Annotated[str | None, typer.Option('--rpc', envvar='SOLANA_RPC_URL', help='read-only RPC endpoint URL')]" = None, stream: "Annotated[bool, typer.Option('--stream/--no-stream', help='feed the live chain into the brain in the background')]" = True, poll_interval: "Annotated[float, typer.Option('--poll-interval', help='seconds between RPC polls')]" = 2.0, workers: "Annotated[int, typer.Option('--workers', help='parallel getTransaction calls')]" = 6, pumpswap: "Annotated[bool, typer.Option('--pumpswap/--no-pumpswap', help='also poll PumpSwap (heavy: hundreds of tx/s)')]" = False, archive: "Annotated[Path | None, typer.Option('--archive', '-a', help='trade archive to keep training on (Parquet or SQLite)')]" = None, table: "Annotated[str | None, typer.Option('--table', help='SQLite table holding the trades')]" = None, archive_every: "Annotated[float, typer.Option('--archive-every', help='seconds between archive rescans')]" = 600.0, maps: "Annotated[list[str] | None, typer.Option('--map', help='field=column (repeatable)')]" = None, features: "Annotated[str | None, typer.Option('--features', help='comma-separated feature columns')]" = None, return_percent: "Annotated[bool, typer.Option('--return-percent', help='return column in percent')]" = False, device: 'DeviceOpt' = None) -> 'None'` — Run the addon as a local HTTP/JSON sidecar for the trading system (advice only).
+- `runner_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history)')]", horizon_minutes: "Annotated[float, typer.Option('--horizon-minutes', help='minutes after entry to hit the target')]" = 30.0, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of the latest-launched tokens held out for the test')]" = 0.35, events: 'ResearchEvents' = None) -> 'None'` — Train the runner detector (P(reach 2x / 5x / 10x / 100x / 1000x)), score it against the tail model on later tokens, show which signals identify runners, and install it.
+- `serve(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace')]", host: "Annotated[str, typer.Option('--host', help='bind address (keep 127.0.0.1 unless firewalled)')]" = '127.0.0.1', port: "Annotated[int, typer.Option('--port', help='HTTP port')]" = 8787, rpc: "Annotated[str | None, typer.Option('--rpc', envvar='SOLANA_RPC_URL', help='read-only RPC endpoint URL')]" = None, stream: "Annotated[bool, typer.Option('--stream/--no-stream', help='feed the live chain into the brain in the background')]" = True, poll_interval: "Annotated[float, typer.Option('--poll-interval', help='seconds between RPC polls')]" = 2.0, workers: "Annotated[int, typer.Option('--workers', help='parallel getTransaction calls')]" = 6, pumpswap: "Annotated[bool, typer.Option('--pumpswap/--no-pumpswap', help='also poll PumpSwap (heavy: hundreds of tx/s)')]" = False, archive: "Annotated[Path | None, typer.Option('--archive', '-a', help='trade archive to keep training on (Parquet or SQLite)')]" = None, table: "Annotated[str | None, typer.Option('--table', help='SQLite table holding the trades')]" = None, archive_every: "Annotated[float, typer.Option('--archive-every', help='seconds between archive rescans')]" = 600.0, maps: "Annotated[list[str] | None, typer.Option('--map', help='field=column (repeatable)')]" = None, features: "Annotated[str | None, typer.Option('--features', help='comma-separated feature columns')]" = None, return_percent: "Annotated[bool, typer.Option('--return-percent', help='return column in percent')]" = False, alert_url: "Annotated[str | None, typer.Option('--alert-url', help='POST each new moonshot candidate (JSON) to this URL')]" = None, alert_target: "Annotated[float, typer.Option('--alert-target', help='chase target of the alerts: 2, 5, 10, 100 or 1000')]" = 10.0, alert_min_edge: "Annotated[float, typer.Option('--alert-min-edge', help='alert when the odds beat break-even this many times')]" = 2.0, alert_every: "Annotated[float, typer.Option('--alert-every', help='seconds between alert scans of the live market')]" = 5.0, assess_every: "Annotated[float, typer.Option('--assess-every', help='seconds between assessment rounds of active tokens (0 = off)')]" = 10.0, device: 'DeviceOpt' = None) -> 'None'` — Run the addon as a local HTTP/JSON sidecar for the trading system (advice only).
 - `simulate(out: "Annotated[Path, typer.Option('--out', '-o', help='event directory (Parquet tables)')]", tokens: "Annotated[int, typer.Option('--tokens', help='number of token launches to simulate')]" = 40, seed: "Annotated[int, typer.Option('--seed', help='random seed')]" = 0, prefix: "Annotated[str, typer.Option('--prefix', help='mint/wallet name prefix (distinguishes eras)')]" = 'Mint', start_time: "Annotated[float, typer.Option('--start-time', help='simulation start, unix seconds')]" = 1750000000.0, hours: "Annotated[float, typer.Option('--hours', help='simulated duration, hours')]" = 3.0, market: "Annotated[str, typer.Option('--market', help='archetype mix: default, or degen (mostly duds + runners)')]" = 'default', runners: "Annotated[float | None, typer.Option('--runners', help='override the share of 100–1000x runner launches')]" = None, herding: "Annotated[bool, typer.Option('--herding/--no-herding', help='self-exciting (Hawkes) retail demand')]" = False) -> 'None'` — Simulate memecoin launches (snipers, bundles, rugs, graduations, runners, smart money, bots).
-- `stopping_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history)')]", spacing: "Annotated[float, typer.Option('--spacing', help='minimum seconds between exit decisions')]" = 30.0, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of the latest-launched tokens held out for the test')]" = 0.35, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None, utility: "Annotated[str, typer.Option('--utility', help='installed exit objective: log (compounding) or power (runner mode)')]" = 'log', gamma: "Annotated[float, typer.Option('--gamma', help='risk aversion of power utility, 0 < gamma < 1')]" = 0.5) -> 'None'` — Fit the optimal-stopping exit model (Longstaff–Schwartz, log utility), score it against hold, timers and the ladder on later tokens, and install it.
+- `stopping_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history)')]", spacing: "Annotated[float, typer.Option('--spacing', help='minimum seconds between exit decisions')]" = 30.0, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of the latest-launched tokens held out for the test')]" = 0.35, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None, utility: "Annotated[str, typer.Option('--utility', help='installed exit objective: log (compounding) or power (runner mode)')]" = 'log', gamma: "Annotated[float, typer.Option('--gamma', help='risk aversion of power utility, 0 < gamma < 1')]" = 0.5, events: 'ResearchEvents' = None) -> 'None'` — Fit the optimal-stopping exit model (Longstaff–Schwartz, log utility), score it against hold, timers and the ladder on later tokens, and install it.
 - `stream(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace directory')]", rpc: 'RpcOpt' = None, out: "Annotated[Path | None, typer.Option('--out', '-o', help='append assessments as JSONL')]" = None, polls: "Annotated[int | None, typer.Option('--polls', help='stop after N polls (default: run forever)')]" = None, poll_interval: "Annotated[float, typer.Option('--poll-interval', help='seconds between RPC polls')]" = 2.0, assess_every: "Annotated[float, typer.Option('--assess-every', help='seconds between assessment rounds')]" = 10.0, maintenance_every: "Annotated[float, typer.Option('--maintenance-every', help='seconds between maintenance runs')]" = 600.0, device: 'DeviceOpt' = None) -> 'None'` — Stream live chain activity into a Solana workspace (read-only) and emit assessments.
 - `stream_train_cmd(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (created if new, else resumed)')]", events: "Annotated[Path | None, typer.Option('--events', '-e', help='stream a saved event directory instead of RPC')]" = None, rpc: 'RpcOpt' = None, start: "Annotated[str | None, typer.Option('--start', help='unix seconds or ISO date (RPC mode)')]" = None, end: "Annotated[str | None, typer.Option('--end', help='unix seconds or ISO date (RPC mode)')]" = None, segment_minutes: "Annotated[float, typer.Option('--segment-minutes', help='history segment length, minutes (RPC mode)')]" = 60.0, workers: "Annotated[int, typer.Option('--workers', help='parallel getTransaction calls')]" = 8, warmup_hours: "Annotated[float, typer.Option('--warmup-hours', help='hours of stream used to bootstrap a new workspace')]" = 6.0, evict_idle_hours: "Annotated[float, typer.Option('--evict-idle-hours', help='forget tokens idle this many hours')]" = 2.0, solana_config: 'SolCfg' = None, config: 'BaseCfg' = None, profile: "Annotated[str | None, typer.Option('--profile', help='auto | cpu-lite | cpu | gpu | gpu-frontier')]" = 'auto', device: 'DeviceOpt' = None) -> 'None'` — Learn by streaming history through the brain — nothing is downloaded to disk.
-- `tape_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history + champion)')]", max_trades: "Annotated[int, typer.Option('--max-trades', help='trades per tape (most recent kept)')]" = 96, members: "Annotated[int, typer.Option('--members', help='ensemble members')]" = 3, epochs: "Annotated[int, typer.Option('--epochs', help='maximum training epochs per member')]" = 40, d: "Annotated[int, typer.Option('--d', help='Transformer width')]" = 64, layers: "Annotated[int, typer.Option('--layers', help='Transformer layers')]" = 2, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of the latest-launched tokens held out for the test')]" = 0.35, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Train the Tape Transformer (trade tape + wallet embeddings → tail and collapse) and score it against the raw-feature tail model on later tokens; installs the model.
+- `tape_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history + champion)')]", max_trades: "Annotated[int, typer.Option('--max-trades', help='trades per tape (most recent kept)')]" = 96, members: "Annotated[int, typer.Option('--members', help='ensemble members')]" = 3, epochs: "Annotated[int, typer.Option('--epochs', help='maximum training epochs per member')]" = 40, d: "Annotated[int, typer.Option('--d', help='Transformer width')]" = 64, layers: "Annotated[int, typer.Option('--layers', help='Transformer layers')]" = 2, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of the latest-launched tokens held out for the test')]" = 0.35, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None, events: 'ResearchEvents' = None, device: 'DeviceOpt' = None) -> 'None'` — Train the Tape Transformer (trade tape + wallet embeddings → tail and collapse) and score it against the raw-feature tail model on later tokens; installs the model.
 
 ### `nardis_neural.solana.config`
 
@@ -7801,7 +7817,7 @@ Forward-test ledger: what the ML signals would have earned, recorded as they fir
 - **class `ForwardLedger`** — Paper tickets opened and settled from live (or replayed) assessments.
   - `load(cls, path: 'str | Path', spec: 'MoonshotSpec', alarm: 'tuple[str, float] | None' = None) -> 'ForwardLedger'` — Restore a saved ledger (or start an empty one); ``alarm`` overrides the saved alarm.
   - `observe(self, reports: 'list[Any]', now: 'float') -> 'int'` — Open tickets and arm exit alarms from a round of ``SolanaAssessment`` objects.
-  - `save(self) -> 'None'` — Write the ledger (open and closed tickets) and its summary as JSON.
+  - `save(self) -> 'None'` — Write the ledger (open and closed tickets) and its summary as JSON, each atomically (temporary file, then rename), so a crash never leaves a torn ledger.
   - `settle(self, market: 'SolanaMarket', now: 'float', force: 'bool' = False) -> 'int'` — Settle tickets whose run is over (or all of them with ``force``).
   - `summary(self) -> 'dict[str, Any]'` — Realised ticket statistics and how well the entry signals ranked the outcomes.
   - `track_record(self, min_tickets: 'int' = 10) -> 'float'` — Realised / predicted payoff of settled tickets (1.0 until ``min_tickets`` have settled).
@@ -7898,7 +7914,8 @@ Minimal **read-only** Solana JSON-RPC client (standard library only).
 Live chain streaming into :class:`SolanaBrain` (read-only).
 
 - **class `ChainStreamer`** — Polls the watched programs for new transactions and decodes them into events.
-  - `poll(self) -> 'list[Event]'` — Fetch and decode everything since the last poll; returns events in time order and saves cursors.
+  - `commit(self, cursor: 'dict[str, str] | None' = None) -> 'None'` — Persist ``cursor`` (default: the current one) to ``state_file``.
+  - `poll(self) -> 'list[Event]'` — Fetch and decode everything since the last poll; returns events in time order.
 - `run_live(brain: 'Any', streamer: 'ChainStreamer', assess_every: 'float' = 10.0, maintenance_every: 'float' = 600.0, poll_interval: 'float' = 2.0, out: 'IO[str] | None' = None, max_polls: 'int | None' = None, sleep: 'Callable[[float], None]' = <built-in function sleep>, clock: 'Callable[[], float]' = <built-in function time>) -> 'dict[str, int]'` — Stream the chain into ``brain`` (a :class:`SolanaBrain`) until ``max_polls``.
 
 ### `nardis_neural.solana.labels`
@@ -7941,12 +7958,12 @@ Meta-labeling: learn from the trading system's own trades.
 
 - `advice_dict(a: 'TradeAdvice') -> 'dict[str, Any]'` — Plain dict of an advice (for JSON transport to the trading system).
 - **class `MetaLearner`** — Online meta-labeling of the trading system's proposals.
-  - `advise(self, proposal: 'TradeProposal', market: 'dict[str, float] | None' = None, record: 'bool' = True) -> 'TradeAdvice'` — Score a proposal; with ``record`` it is kept pending until :meth:`settle`.
+  - `advise(self, proposal: 'TradeProposal', market: 'dict[str, float] | None' = None, record: 'bool' = True) -> 'TradeAdvice'` — Score a proposal; with ``record`` it is kept pending until :meth:`settle` (or until ``max_pending`` newer proposals push it out). A trade id already settled is not recorded again.
   - `knows(self, trade_id: 'str') -> 'bool'` — True when this trade has already been settled into the history.
-  - `load(cls, directory: 'str | Path') -> 'MetaLearner'` — Rebuild a learner saved by :meth:`save`.
+  - `load(cls, directory: 'str | Path') -> 'MetaLearner'` — Rebuild a learner saved by :meth:`save` (also the older layout without generations).
   - `refit(self) -> 'dict[str, Any]'` — Champion / challenger refit on all settled trades (see the module docstring).
   - `save(self, directory: 'str | Path') -> 'None'` — Write ``meta.json`` (history, pending proposals, report) and the deployed trees.
-  - `settle(self, outcome: 'TradeOutcome') -> 'bool'` — Record a settled trade; refits when due. Returns False for unknown trade ids.
+  - `settle(self, outcome: 'TradeOutcome') -> 'bool'` — Record a settled trade; refits when due. Returns False for unknown, dropped (see ``max_pending``) or already settled trade ids (a trade is learned once).
 - **class `TradeAdvice`** — What the learner thinks of a proposal (advice only).
 - **class `TradeOutcome`** — The settled result of a proposal.
 - **class `TradeProposal`** — A trade the trading system is about to make.
@@ -8075,11 +8092,12 @@ Local HTTP/JSON service: the addon as a sidecar the trading system calls from an
   - `ranking(self, limit: 'int') -> 'dict[str, Any]'`
   - `save(self) -> 'dict[str, Any]'`
   - `settle_trade(self, p: 'dict[str, Any]') -> 'dict[str, Any]'`
-  - `stop(self) -> 'None'` — Stop the stream thread and checkpoint.
-  - `stream(self, streamer: 'Any', poll_interval: 'float' = 2.0, resolve_every: 'float' = 10.0, maintenance_every: 'float' = 600.0, save_every: 'float' = 300.0, chunk: 'int' = 50, bounded_memory: 'bool' = True) -> 'threading.Thread'` — Feed the chain into the brain on a daemon thread until :meth:`stop`.
+  - `stop(self) -> 'None'` — Stop the background threads and checkpoint (brain, then the stream cursor it covers).
+  - `stream(self, streamer: 'Any', poll_interval: 'float' = 2.0, resolve_every: 'float' = 10.0, maintenance_every: 'float' = 600.0, save_every: 'float' = 300.0, chunk: 'int' = 50, bounded_memory: 'bool' = True, assess_every: 'float' = 10.0) -> 'threading.Thread'` — Keep the brain up to date on a daemon thread until :meth:`stop`.
   - `tokens(self, active_seconds: 'float') -> 'dict[str, Any]'`
   - `train_on_archive(self, path: 'Any', mapping: 'Any' = None, table: 'str | None' = None, every: 'float' = 600.0) -> 'threading.Thread'` — Keep training the meta-learner on the trade archive: rescan every ``every`` seconds and learn only the trades it has not seen yet.
 - `make_server(service: 'AddonService', host: 'str' = '127.0.0.1', port: 'int' = 8787) -> 'ThreadingHTTPServer'` — An HTTP server bound to ``host:port`` that routes to ``service``.
+- **class `NotReadyError`** — A required model is not installed yet (reported as 409).
 
 ### `nardis_neural.solana.simulator`
 
@@ -8346,7 +8364,7 @@ Transparent PyTorch training engine.
 
 ## Test inventory
 
-250 test functions (some are parametrised over devices, experts or formats).
+288 test functions (some are parametrised over devices, experts or formats).
 
 ### `tests/test_cli.py`
 
@@ -8359,6 +8377,10 @@ Drives every CLI command through a complete train → adapt → shadow → promo
 - `test_pretrain_cli`
 - `test_cli_errors`
 - `test_train_into_existing_workspace_registers_challenger`
+- `test_solana_serve_starts_alerts_and_upkeep_without_stream`
+- `test_serve_stops_and_saves_on_sigterm`
+- `test_research_commands_read_events_on_a_streaming_workspace`
+- `test_bootstrap_overwrite_and_allocate_day_start`
 
 ### `tests/test_config_schemas.py`
 
@@ -8392,6 +8414,7 @@ Drives every CLI command through a complete train → adapt → shadow → promo
 - `test_registry_rules`
 - `test_learner_persists_state`
 - `test_holdout_split_is_chronological_and_disjoint`
+- `test_failed_and_replaced_candidates_are_pruned_without_a_promotion`
 
 ### `tests/test_data.py`
 
@@ -8498,6 +8521,12 @@ Hardware profiles: one code path from laptop CPU to large GPU.
 - `test_batched_timescales_match_per_timescale_encoding` — The shared core encodes all timescales in one call; this must equal separate calls.
 - `test_ssm_causal_masked_and_padding_invariant`
 
+### `tests/test_packaging.py`
+
+Packaging metadata: every file pattern shipped with a wheel matches real files.
+
+- `test_package_data_and_yaml_presets_match_files`
+
 ### `tests/test_pretrain_regimes_drift.py`
 
 - `test_nt_xent_prefers_aligned_views`
@@ -8550,6 +8579,8 @@ Solana module: protocol maths, causal market state, wallet intelligence, feature
 - `test_normalise_finds_columns_and_converts_units`
 - `test_trains_itself_from_a_partitioned_parquet_archive_and_only_adds_new_trades`
 - `test_reads_the_sqlite_write_buffer_with_an_explicit_mapping`
+- `test_a_corrupt_parquet_file_is_skipped_counted_and_given_up_on`
+- `test_learn_trades_learns_an_already_read_table_once_with_a_single_refit`
 
 ### `tests/test_solana_brain.py`
 
@@ -8559,6 +8590,12 @@ End-to-end Solana brain: bootstrap from history → stream live events → asses
 - `test_live_loop_assess_resolve_learn`
 - `test_flags_surface_red_flags`
 - `test_solana_cli_cycle`
+- `test_maintenance_survives_a_learner_that_cannot_adapt_and_still_saves`
+- `test_state_file_is_strict_json_and_old_infinity_still_loads`
+- `test_edge_model_without_its_research_report_still_loads`
+- `test_bootstrap_refuses_an_existing_workspace_unless_told_to_overwrite`
+- `test_allocator_book_is_remembered_across_calls_and_restarts`
+- `test_pending_assessments_survive_a_restart_and_are_still_labelled`
 
 ### `tests/test_solana_capital.py`
 
@@ -8595,6 +8632,7 @@ Edge engine: executable triple-barrier labels, backtester, meta-labeling model, 
 Forward-test ledger: tickets open on live signals, alarms arm, settlement is executable.
 
 - `test_ledger_opens_alarms_settles_and_roundtrips`
+- `test_ledger_save_is_atomic`
 
 ### `tests/test_solana_hawkes.py`
 
@@ -8619,6 +8657,11 @@ Real-chain ingestion: base58, pump.fun event codec, transaction decoding, read-o
 - `test_simulated_market_roundtrips_through_transactions`
 - `test_rpc_is_read_only_and_retries`
 - `test_streamer_cursor_dedupe_and_order`
+- `test_streamer_retries_a_batch_whose_fetch_failed`
+- `test_streamer_skips_a_transaction_that_never_fetches`
+- `test_streamer_skips_only_the_transaction_the_decoder_rejects`
+- `test_run_live_saves_and_commits_on_interrupt`
+- `test_backfill_decodes_without_mint_lookups`
 - `test_run_live_loop_mechanics`
 - `test_chain_to_brain_integration` — History → bootstrap; later chain activity → decoded → streamed live → assessments.
 - `test_decode_cli`
@@ -8638,6 +8681,10 @@ Real-chain ingestion: base58, pump.fun event codec, transaction decoding, read-o
 - `test_learns_which_proposals_win_and_vetoes_losing_patterns`
 - `test_noise_features_do_not_get_deployed`
 - `test_brain_advises_and_learns_from_trades`
+- `test_a_settled_trade_id_is_never_learned_twice`
+- `test_pending_proposals_are_bounded_by_count_whatever_the_clock`
+- `test_cold_start_chase_stays_at_break_even_until_targets_are_proven`
+- `test_meta_save_is_crash_safe_and_reads_the_old_layout`
 
 ### `tests/test_solana_moonshot.py`
 
@@ -8659,6 +8706,14 @@ Moonshot engine: executable peak-multiple labels with censoring, the censored po
 - `test_copycats_and_recent_runner_names`
 - `test_market_feeds_narratives_from_named_launches`
 
+### `tests/test_solana_rpc_proxy.py`
+
+Read-only RPC client behind a proxy: credentials and ``NO_PROXY`` domain matching (no network).
+
+- `test_proxy_credentials_go_into_the_connect_request`
+- `test_no_proxy_matches_domains_and_suffixes`
+- `test_client_stays_read_only`
+
 ### `tests/test_solana_runners.py`
 
 - `test_censored_rows_that_already_hit_are_known_positives`
@@ -8673,6 +8728,16 @@ Moonshot engine: executable peak-multiple labels with censoring, the censored po
 - `test_stream_thread_feeds_the_brain`
 - `test_sidecar_keeps_training_on_the_archive`
 - `test_moonshots_and_alerts`
+- `test_every_request_gets_an_answer`
+- `test_an_oversized_body_gets_its_413`
+- `test_pushed_transactions_are_deduplicated`
+- `test_an_undecodable_push_is_not_remembered`
+- `test_moonshots_negative_limit_and_health_models`
+- `test_upkeep_runs_without_the_stream`
+- `test_a_frozen_market_is_not_assessed_again`
+- `test_checkpoints_commit_the_cursor_the_brain_covers`
+- `test_checkpoint_waits_for_the_poll_in_progress`
+- `test_allocate_passes_the_day_start_equity`
 
 ### `tests/test_solana_signals.py`
 
@@ -8706,6 +8771,7 @@ Streaming training: forward history walker over an archival RPC, bounded-memory 
 - `test_clean_history_keeps_only_tokens_created_in_the_window`
 - `test_fetch_history_resumes_and_saves_a_clean_store`
 - `test_follow_graduates_adds_only_post_graduation_trades`
+- `test_follow_graduates_extends_a_segment_cut_short_by_an_earlier_run`
 
 ### `tests/test_solana_suite.py`
 

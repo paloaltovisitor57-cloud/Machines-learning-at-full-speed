@@ -154,3 +154,268 @@ def test_moonshots_and_alerts(served) -> None:  # type: ignore[no-untyped-def]
         assert service.alert_stats["errors"] == 1
     finally:
         service.brain.moonshot_ranking = real
+
+
+def test_every_request_gets_an_answer(served, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import http.client
+
+    service, port = served
+    status, body = _call(port, "POST", "/ingest", {"transactions": [1, "x"]})
+    assert status == 400 and "JSON object" in body["error"]
+    null_meta = {
+        "slot": 5,
+        "meta": None,
+        "transaction": {"message": {"accountKeys": []}, "signatures": ["n"]},
+    }
+    status, body = _call(port, "POST", "/ingest", {"transactions": [null_meta]})
+    assert status == 200 and body["undecodable_transactions"] == 1
+
+    def broken(*a: Any, **k: Any) -> Any:
+        raise RuntimeError("internal failure deep in a model")
+
+    monkeypatch.setattr(service.brain, "assess", broken)
+    mint = next(iter(service.brain.market.tokens))
+    status, body = _call(port, "GET", f"/assess?mint={mint}")
+    assert status == 500 and "internal failure" in body["error"], "an internal RuntimeError is not a 409"
+    monkeypatch.setattr(service.brain, "assess", lambda *a, **k: 1 / 0)
+    assert _call(port, "GET", f"/assess?mint={mint}")[0] == 500
+    assert _call(port, "GET", "/health")[0] == 200, "the server keeps running"
+    assert _call(port, "GET", "/ranking")[0] == 409  # a missing tail model is still the documented 409
+
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    conn.putrequest("POST", "/ingest")
+    conn.putheader("Content-Length", str(64 * 1024 * 1024 + 1))  # over MAX_DRAIN_BYTES: not read
+    conn.endheaders()
+    resp = conn.getresponse()
+    assert resp.status == 413 and "error" in json.loads(resp.read())
+    conn.close()
+
+
+def test_an_oversized_body_gets_its_413(served, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from nardis_neural.solana import service as svc
+
+    _, port = served
+    monkeypatch.setattr(svc, "MAX_BODY_BYTES", 1024)
+    monkeypatch.setattr(svc, "MAX_DRAIN_BYTES", 4 * 1024 * 1024)
+    status, body = _call(port, "POST", "/ingest", {"transactions": [], "pad": "x" * 3 * 1024 * 1024})
+    assert status == 413 and "1024" in body["error"], "an ordinary client reads the 413, not a reset"
+    assert _call(port, "GET", "/health")[0] == 200
+
+
+def test_pushed_transactions_are_deduplicated(served) -> None:  # type: ignore[no-untyped-def]
+    from nardis_neural.solana.ingest.encode import events_to_transactions
+
+    _, port = served
+    later, _ = simulate_launches(
+        LaunchSimSpec(
+            n_tokens=1, seed=9, n_retail=10, duration_seconds=120, mint_prefix="Dup", start_time=1_760_000_000
+        )
+    )
+    txs = events_to_transactions(later.events)[:5]
+    status, first = _call(port, "POST", "/ingest", {"transactions": txs})
+    assert status == 200 and first["events"] > 0 and first["duplicates"] == 0
+    status, again = _call(port, "POST", "/ingest", {"transactions": [*txs, txs[0]]})
+    assert status == 200 and again["events"] == 0 and again["duplicates"] == len(txs) + 1
+    assert _call(port, "GET", "/health")[1]["ingest"]["duplicates"] >= len(txs) + 1
+
+
+def test_an_undecodable_push_is_not_remembered(served) -> None:  # type: ignore[no-untyped-def]
+    from nardis_neural.solana.ingest.encode import events_to_transactions
+
+    _, port = served
+    later, _ = simulate_launches(
+        LaunchSimSpec(
+            n_tokens=1,
+            seed=11,
+            n_retail=10,
+            duration_seconds=120,
+            mint_prefix="Late",
+            start_time=1_760_100_000,
+        )
+    )
+    txs = events_to_transactions(later.events)[:3]
+    for i, tx in enumerate(txs):
+        tx["transaction"]["signatures"] = [f"late{i}"]  # the encoder numbers from 0 on every call
+    early = [tx | {"meta": None} for tx in txs]  # pushed before the full transaction was available
+    status, first = _call(port, "POST", "/ingest", {"transactions": early})
+    assert status == 200 and first["events"] == 0 and first["duplicates"] == 0
+    status, full = _call(port, "POST", "/ingest", {"transactions": txs})
+    assert status == 200 and full["duplicates"] == 0 and full["events"] > 0
+
+
+def test_moonshots_negative_limit_and_health_models(served, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    service, port = served
+
+    class A:
+        def __init__(self, mint: str) -> None:
+            self.mint = mint
+            self.flags: list[str] = []
+            self.tape: dict[str, float] = {}
+            self.moonshot = {"p_ge_10x": 0.2, "edge_10x": 6.0, "chase_score": 1.0}
+
+    mint = next(iter(service.brain.market.tokens))
+    monkeypatch.setattr(service.brain, "moonshot_ranking", lambda *a, **k: [A(mint), A(mint)])
+    assert _call(port, "GET", "/moonshots?target=10&limit=-1")[1]["candidates"] == []
+    assert len(_call(port, "GET", "/moonshots?target=10&limit=1")[1]["candidates"]) == 1
+    models = _call(port, "GET", "/health")[1]["models"]
+    assert models["risk"] is True and models["runners"] is False
+
+
+class _Streamer:
+    """A streamer that advances its cursor on every poll and records commits."""
+
+    def __init__(self) -> None:
+        self.cursor: dict[str, str] = {"prog": "s0"}
+        self.commits: list[dict[str, str]] = []
+        self.gaps = 2
+        self.decoder = _Decoder()
+        self.n = 0
+
+    def poll(self) -> list[Any]:
+        self.n += 1
+        self.cursor = {"prog": f"s{self.n}"}
+        return []
+
+    def commit(self, cursor: dict[str, str] | None = None) -> None:
+        self.commits.append(dict(cursor or self.cursor))
+
+
+class _Decoder:
+    def __init__(self) -> None:
+        self.forgotten: list[str] = []
+
+    def forget(self, mints: list[str]) -> None:
+        self.forgotten += mints
+
+
+def _run_upkeep(service: Any, streamer: Any, until: Any, **kw: Any) -> None:
+    service._stop.clear()
+    thread = service.stream(streamer, poll_interval=0.01, **kw)
+    deadline = time.time() + 10
+    while not until() and time.time() < deadline:
+        time.sleep(0.02)
+    service._stop.set()
+    thread.join(10)
+
+
+def test_upkeep_runs_without_the_stream(served, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    service, _ = served
+    calls = {"assess": 0, "maintenance": 0, "save": 0}
+    brain = service.brain
+
+    def count(key: str, value: Any) -> Any:
+        def fn(*a: Any, **k: Any) -> Any:
+            calls[key] += 1
+            return value
+
+        return fn
+
+    monkeypatch.setattr(brain, "assess_active", count("assess", [1, 2]))
+    monkeypatch.setattr(brain, "maintenance", count("maintenance", {}))
+    monkeypatch.setattr(brain, "save", count("save", None))
+    monkeypatch.setattr(brain, "evict", lambda: ["gone1"])
+    monkeypatch.setattr(service, "decoder", _Decoder())
+    _run_upkeep(
+        service,
+        None,
+        lambda: calls["maintenance"] >= 2 and calls["save"] >= 3,
+        assess_every=0.01,
+        maintenance_every=0.05,
+        save_every=0.02,
+    )
+    stats = service.stream_stats
+    assert brain.streaming, "bounded-memory mode without the stream too"
+    assert calls["assess"] == 1 and stats["assessments"] == 2, "one round while the market clock is frozen"
+    assert calls["maintenance"] >= 2 and stats["evicted"] >= 2 and calls["save"] >= 3
+    assert "gone1" in service.decoder.forgotten, "evicted tokens leave the /ingest decoder too"
+    assert stats["polls"] == 0 and stats["errors"] == 0
+
+    monkeypatch.setattr(brain.market, "now", brain.market.now)
+    ticking = count("assess", [1])
+
+    def assess_and_tick(*a: Any, **k: Any) -> Any:
+        brain.market.now += 1.0  # events keep arriving through POST /ingest
+        return ticking()
+
+    monkeypatch.setattr(brain, "assess_active", assess_and_tick)
+    _run_upkeep(service, None, lambda: calls["assess"] >= 4, assess_every=0.01)
+    assert calls["assess"] >= 4, "assessment rounds without Nardis polling"
+
+
+def test_a_frozen_market_is_not_assessed_again(served, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    service, _ = served
+    brain = service.brain
+    monkeypatch.setattr(brain, "maintenance", lambda: {})
+    monkeypatch.setattr(brain, "save", lambda: None)
+    monkeypatch.setattr(brain, "resolve", lambda: 0)
+    monkeypatch.setattr(brain, "pending", [])
+    rounds: list[int] = []
+    real = brain.assess_active
+
+    def counted(*a: Any, **k: Any) -> Any:
+        rounds.append(1)
+        return real(*a, **k)
+
+    monkeypatch.setattr(brain, "assess_active", counted)
+    service._stop.clear()
+    thread = service.stream(None, poll_interval=0.01, assess_every=0.01)
+    time.sleep(0.4)
+    service._stop.set()
+    thread.join(10)
+    assert rounds == [1], "no Nardis push, no RPC: the same observations are not queued again"
+    assert len({p.mint for p in brain.pending}) == len(brain.pending), "one observation per token"
+
+
+def test_checkpoints_commit_the_cursor_the_brain_covers(served, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    service, port = served
+    monkeypatch.setattr(service.brain, "save", lambda: None)
+    monkeypatch.setattr(service.brain, "maintenance", lambda: {})
+    monkeypatch.setattr(service.brain, "evict", lambda: ["gone2"])
+    streamer = _Streamer()
+    _run_upkeep(
+        service, streamer, lambda: streamer.n >= 3 and streamer.decoder.forgotten, maintenance_every=0.01
+    )
+    assert streamer.commits and streamer.commits[-1] == {"prog": f"s{streamer.n}"}
+    assert "gone2" in streamer.decoder.forgotten, "evicted tokens leave the stream decoder"
+    health = _call(port, "GET", "/health")[1]
+    assert health["stream"]["gaps"] == 2, "skipped backlog is reported"
+    before = len(streamer.commits)
+    assert _call(port, "POST", "/save", {})[0] == 200
+    service.stop()
+    assert len(streamer.commits) == before + 2 and streamer.commits[-1] == {"prog": f"s{streamer.n}"}
+
+
+def test_checkpoint_waits_for_the_poll_in_progress(served, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    service, _ = served
+    monkeypatch.setattr(service.brain, "save", lambda: None)
+    streamer = _Streamer()
+    monkeypatch.setattr(service, "_streamer", streamer)
+    monkeypatch.setattr(service, "_consumed", {"prog": "old"})
+    with service.lock:
+        service._mid_poll = True  # the stream thread is between the chunks of a poll
+    saver = threading.Thread(target=service.save)
+    saver.start()
+    time.sleep(0.2)
+    assert saver.is_alive() and streamer.commits == [], "no checkpoint holds part of a poll"
+    with service.lock:
+        service._mid_poll = False
+        service._consumed = {"prog": "new"}
+        service._poll_done.notify_all()
+    saver.join(5)
+    assert streamer.commits == [{"prog": "new"}]
+
+
+def test_allocate_passes_the_day_start_equity(served, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    service, port = served
+    seen: list[Any] = []
+
+    def allocate(*a: Any, **k: Any) -> list[Any]:
+        seen.append((a, k))
+        return []
+
+    monkeypatch.setattr(service.brain, "allocate", allocate)
+    body = {"equity_sol": 10, "open_stakes": {"m": 1}, "day_start_equity_sol": 12}
+    assert _call(port, "POST", "/allocate", body) == (200, {"allocations": []})
+    assert seen[-1] == ((10.0, {"m": 1.0}, None), {"day_start_equity_sol": 12.0})
+    assert _call(port, "POST", "/allocate", {"equity_sol": 10})[0] == 200
+    assert seen[-1][1] == {"day_start_equity_sol": None}, "calls without it stay compatible"

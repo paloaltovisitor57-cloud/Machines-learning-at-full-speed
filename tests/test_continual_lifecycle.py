@@ -375,3 +375,21 @@ def test_holdout_split_is_chronological_and_disjoint() -> None:
     assert ts[fit].max() <= ts[hold].min()
     small_fit, small_hold = split_holdout(idx[:8], ts)
     assert np.array_equal(small_fit, small_hold)
+
+
+def test_failed_and_replaced_candidates_are_pruned_without_a_promotion(workspace: Path) -> None:
+    import time
+
+    learner = ContinualLearner(workspace, device="cpu")
+    champ = {"return.rmse": 1.0, "upside.log_loss": 0.5, "downside.log_loss": 0.5}
+    worse = {k: v * 2 for k, v in champ.items()}
+    bad = learner._register_candidate(
+        "adapt", _perturbed(learner.champion, "bad-v"), champ, worse, 1, 1, time.time()
+    )
+    assert bad.status == "failed" and learner.registry.entry("bad-v").deleted
+    assert not (workspace / "models" / "bad-v").exists()
+    for v in ("ch-1", "ch-2"):
+        learner._register_candidate("adapt", _perturbed(learner.champion, v), champ, champ, 1, 1, time.time())
+    assert learner.registry.challenger_version == "ch-2" and (workspace / "models" / "ch-2").exists()
+    assert learner.registry.entry("ch-1").deleted, "the replaced challenger was never champion"
+    assert (learner.registry.champion_path()).exists() and learner.registry.champion_version is not None

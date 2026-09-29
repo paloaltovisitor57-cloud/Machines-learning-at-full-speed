@@ -53,8 +53,47 @@ class ArchiveMapping:
     """Set when the ``return`` column is in percent (50 = +50 %) rather than a fraction."""
 
 
-def read_table(path: str | Path, table: str | None = None) -> pl.DataFrame:
-    """Read a Parquet file or directory (recursively, partitions included) or an SQLite table."""
+MAX_READ_FAILURES = 3
+"""Scans in which one Parquet file may fail to read before it is no longer retried."""
+
+_read_failures: dict[tuple[str, int, int], int] = {}
+"""Failed reads per (file, mtime, size) in this process; a rewritten file starts again from 0."""
+
+
+def _read_parquet_dir(p: Path, unreadable: list[str] | None) -> pl.DataFrame:
+    """Every readable Parquet file under ``p``; a file that fails is skipped (and listed in
+    ``unreadable``) so it cannot block the others.  A file that failed ``MAX_READ_FAILURES``
+    times is not read again until it changes (a half-written file is retried meanwhile)."""
+    files = sorted(p.rglob("*.parquet"))
+    if not files:
+        raise ValueError(f"no .parquet files under {p}")
+    frames = []
+    for f in files:
+        try:
+            st = f.stat()
+        except OSError:  # removed since the listing
+            continue
+        key = (str(f.resolve()), st.st_mtime_ns, st.st_size)
+        if _read_failures.get(key, 0) < MAX_READ_FAILURES:
+            try:
+                frames.append(pl.read_parquet(f))
+                _read_failures.pop(key, None)
+                continue
+            except (OSError, ValueError, pl.exceptions.PolarsError):
+                _read_failures[key] = _read_failures.get(key, 0) + 1
+        if unreadable is not None:
+            unreadable.append(str(f))
+    if not frames:
+        raise ValueError(f"no readable .parquet files under {p}")
+    return pl.concat(frames, how="diagonal_relaxed")
+
+
+def read_table(
+    path: str | Path, table: str | None = None, unreadable: list[str] | None = None
+) -> pl.DataFrame:
+    """Read a Parquet file or directory (recursively, partitions included) or an SQLite table.
+
+    In a directory, unreadable Parquet files are skipped and appended to ``unreadable``."""
     p = Path(path)
     if p.suffix.lower() in (".db", ".sqlite", ".sqlite3"):
         with sqlite3.connect(f"file:{p}?mode=ro", uri=True) as con:
@@ -66,10 +105,7 @@ def read_table(path: str | Path, table: str | None = None) -> pl.DataFrame:
             cols = [d[0] for d in cur.description]
             return pl.DataFrame(cur.fetchall(), schema=cols, orient="row", infer_schema_length=None)
     if p.is_dir():
-        files = sorted(p.rglob("*.parquet"))
-        if not files:
-            raise ValueError(f"no .parquet files under {p}")
-        return pl.concat([pl.read_parquet(f) for f in files], how="diagonal_relaxed")
+        return _read_parquet_dir(p, unreadable)
     return pl.read_parquet(p)
 
 
@@ -156,9 +192,28 @@ def train_from_archive(
     table: str | None = None,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """Replay every settled trade the learner has not seen, in exit-time order, then refit."""
+    """Replay every settled trade the learner has not seen, in exit-time order, then refit.
+
+    ``unreadable_files`` counts Parquet files skipped because they could not be read (see
+    :func:`read_table`); their trades are learned on a later scan once the file reads."""
     say = log or (lambda _m: None)
-    trades = normalise_trades(read_table(path, table), mapping)
+    unreadable: list[str] = []
+    trades = normalise_trades(read_table(path, table, unreadable), mapping)
+    out = learn_trades(learner, trades, log=say)
+    if unreadable:
+        say(f"archive: skipped {len(unreadable)} unreadable file(s): {', '.join(unreadable[:5])}")
+    return {**out, "unreadable_files": len(unreadable)}
+
+
+def learn_trades(
+    learner: MetaLearner, trades: pl.DataFrame, log: Callable[[str], None] | None = None
+) -> dict[str, Any]:
+    """Learn the trades of a normalised archive (see :func:`normalise_trades`) the learner has not
+    seen, in exit-time order, then refit once.
+
+    Returns ``added``, ``already_known``, ``total``, ``features`` and the ``refit`` report ({} when
+    nothing was refitted)."""
+    say = log or (lambda _m: None)
     feat_cols = [c for c in trades.columns if c.startswith("f::")]
     added = skipped = 0
     every, learner.refit_every = learner.refit_every, 1 << 62  # one refit at the end, not per batch

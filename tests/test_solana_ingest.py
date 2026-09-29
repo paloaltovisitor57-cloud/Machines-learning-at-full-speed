@@ -353,11 +353,163 @@ def test_streamer_cursor_dedupe_and_order(tmp_path: Path) -> None:
     assert len(swaps) == sum(isinstance(e, Swap) for e in store.events), (
         "every swap exactly once across programs"
     )
+    assert not (tmp_path / "cursor.json").exists(), "the cursor is persisted by commit(), not by poll()"
+    streamer.commit()
     assert json.loads((tmp_path / "cursor.json").read_text())["cursor"]
     resumed = ChainStreamer(
         SolanaRpc(transport=chain), state_file=tmp_path / "cursor.json", programs=[PUMP_FUN_PROGRAM]
     )
     assert resumed.poll() == [], "a restarted streamer resumes from its cursor"
+
+
+def _flaky_chain(n_tokens: int = 2, seed: int = 5) -> tuple[FakeChain, dict[str, bool], Any]:
+    """A FakeChain whose getTransaction fails while ``down["tx"]`` is set, and its source store."""
+    from nardis_neural.solana.ingest.rpc import RpcError
+
+    store, _ = simulate_launches(
+        LaunchSimSpec(n_tokens=n_tokens, seed=seed, n_retail=40, duration_seconds=600)
+    )
+    chain = FakeChain(events_to_transactions(store.events), per_poll=10)
+    down = {"tx": False}
+
+    def transport(method: str, params: list[Any]) -> Any:
+        if method == "getTransaction" and down["tx"]:
+            raise RpcError("node unavailable")
+        return chain(method, params)
+
+    return chain, down, (store, transport)
+
+
+def test_streamer_retries_a_batch_whose_fetch_failed(tmp_path: Path) -> None:
+    chain, down, (store, transport) = _flaky_chain()
+    streamer = ChainStreamer(
+        SolanaRpc(transport=transport, retries=0), state_file=tmp_path / "c.json", workers=1
+    )
+    seen = list(streamer.poll())
+    cursor = dict(streamer.cursor)
+    down["tx"] = True
+    with pytest.raises(Exception, match="node unavailable"):
+        streamer.poll()
+    assert streamer.cursor == cursor, "a failed poll leaves the cursor where it was"
+    down["tx"] = False
+    while chain.visible < len(chain.txs):
+        seen += streamer.poll()
+    swaps = [e for e in seen if isinstance(e, Swap)]
+    assert len(swaps) == sum(isinstance(e, Swap) for e in store.events), "the failed batch is fetched again"
+
+
+def test_streamer_skips_a_transaction_that_never_fetches() -> None:
+    from nardis_neural.solana.ingest.rpc import RpcError
+
+    sigs = [{"signature": f"s{i}", "slot": i, "blockTime": i, "err": None} for i in range(2500)]
+    visible = {"n": 1}
+
+    def transport(method: str, params: list[Any]) -> Any:
+        if method == "getSignaturesForAddress":
+            opts = params[1]
+            newest_first = list(reversed(sigs[: visible["n"]]))
+            names = [s["signature"] for s in newest_first]
+            if opts.get("until"):
+                newest_first = newest_first[: names.index(opts["until"])]
+            if opts.get("before"):
+                newest_first = newest_first[
+                    [s["signature"] for s in newest_first].index(opts["before"]) + 1 :
+                ]
+            return newest_first[: opts["limit"]]
+        if method == "getTransaction":
+            if params[0] == "s2400":
+                raise RpcError("transaction data unavailable")  # an error object: never retried
+            return None
+        raise AssertionError(method)
+
+    streamer = ChainStreamer(
+        SolanaRpc(transport=transport, retries=0),
+        decoder=TransactionDecoder(),
+        programs=["p"],
+        max_backlog=1000,
+        max_failed_polls=2,
+        workers=1,
+    )
+    streamer.poll()
+    assert streamer.cursor == {"p": "s0"}
+    visible["n"] = len(sigs)
+    for _ in range(2):
+        with pytest.raises(RpcError):
+            streamer.poll()
+        assert streamer.cursor == {"p": "s0"} and streamer.gaps == 0, "a failed poll counts no gap"
+    assert streamer.poll() == [] and streamer.cursor == {"p": "s2499"}, "the stream moves on"
+    assert streamer.fetch_errors == 1 and streamer.gaps == 1, "the skipped backlog is counted once"
+    assert streamer._failed_polls == 0
+
+
+def test_streamer_skips_only_the_transaction_the_decoder_rejects() -> None:
+    from collections.abc import Mapping
+
+    clean_chain, _, (_, clean_transport) = _flaky_chain()
+    clean_chain.per_poll = len(clean_chain.txs)
+    clean = ChainStreamer(SolanaRpc(transport=clean_transport), workers=1).poll()
+    chain, _, (_, transport) = _flaky_chain()
+    chain.per_poll = len(chain.txs)
+    bad = chain.txs[-1]["transaction"]["signatures"][0]
+
+    class Picky(TransactionDecoder):
+        def decode(self, tx: Mapping[str, Any]) -> list[Any]:
+            if tx["transaction"]["signatures"][0] == bad:
+                raise AttributeError("'NoneType' object has no attribute 'get'")
+            return super().decode(tx)
+
+    streamer = ChainStreamer(SolanaRpc(transport=transport), decoder=Picky(), workers=1)
+    events = streamer.poll()
+    assert streamer.decode_errors == 1 and streamer.cursor, "one bad transaction, the batch is kept"
+    assert 0 < len(events) < len(clean)
+    assert streamer.poll() == [], "the cursor moved past the batch"
+
+
+def test_run_live_saves_and_commits_on_interrupt(tmp_path: Path) -> None:
+    class Interrupted:
+        def __init__(self) -> None:
+            self.ingested = 0
+            self.saved = 0
+
+        def ingest(self, e: Any) -> None:
+            self.ingested += 1
+            if self.ingested == 5:
+                raise KeyboardInterrupt
+
+        def save(self) -> None:
+            self.saved += 1
+
+    chain, _, (_, transport) = _flaky_chain()
+    chain.per_poll = len(chain.txs)
+    streamer = ChainStreamer(SolanaRpc(transport=transport), state_file=tmp_path / "c.json", workers=1)
+    brain = Interrupted()
+    with pytest.raises(KeyboardInterrupt):
+        run_live(brain, streamer, sleep=lambda s: None)
+    assert brain.saved == 1, "Ctrl-C still saves the brain"
+    ref_chain, _, (_, ref_transport) = _flaky_chain()
+    ref_chain.per_poll = len(ref_chain.txs)
+    whole_poll = ChainStreamer(SolanaRpc(transport=ref_transport), workers=1).poll()
+    assert brain.ingested == len(whole_poll), "the rest of the poll in hand is ingested before the save"
+    assert json.loads((tmp_path / "c.json").read_text())["cursor"] == streamer.cursor
+
+
+def test_backfill_decodes_without_mint_lookups(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from nardis_neural.solana import ingest
+
+    chain, _, (_, transport) = _flaky_chain()
+    chain.per_poll = len(chain.txs)
+    made: list[ChainStreamer] = []
+
+    class Spy(ChainStreamer):
+        def __init__(self, *a: Any, **k: Any) -> None:
+            super().__init__(*a, **k)
+            made.append(self)
+
+    monkeypatch.setattr(ingest, "SolanaRpc", lambda url: SolanaRpc(transport=transport))
+    monkeypatch.setattr(ingest, "ChainStreamer", Spy)
+    res = CliRunner().invoke(app, ["solana", "backfill", "--out", str(tmp_path / "ev"), "--rpc", "http://x"])
+    assert res.exit_code == 0, res.output
+    assert made and made[0].decoder.mint_info is None, "history must not see today's mint authorities"
 
 
 def test_run_live_loop_mechanics() -> None:

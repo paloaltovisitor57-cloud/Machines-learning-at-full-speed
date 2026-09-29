@@ -262,3 +262,44 @@ def test_follow_graduates_adds_only_post_graduation_trades(tmp_path) -> None:  #
         assert calls == []  # resumed: every segment already saved
     finally:
         hist.HistoryWalker = real  # type: ignore[misc]
+
+
+def test_follow_graduates_extends_a_segment_cut_short_by_an_earlier_run(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from nardis_neural.solana.events import Event, Migration, TokenLaunch
+    from nardis_neural.solana.ingest import history as hist
+
+    base: list[Event] = [TokenLaunch("g", 0.0, "dev"), Migration("g", 100.0, "pumpswap", 85.0, 2e8)]
+    fetched: list[tuple[float, float]] = []
+
+    class FakeWalker:
+        def __init__(self, rpc, lo, hi, programs, **kw) -> None:  # type: ignore[no-untyped-def]
+            self.stats = {"transactions": 0, "events": 0}
+            fetched.append((lo, hi))
+
+        def events(self):  # type: ignore[no-untyped-def]
+            return []
+
+    real = hist.HistoryWalker
+    hist.HistoryWalker = FakeWalker  # type: ignore[misc,assignment]
+    try:
+        rpc = SolanaRpc(transport=lambda m, p: None)
+        hist.follow_graduates(rpc, tmp_path, base, 100.0 + 5000.0)
+        assert fetched == [(100.0, 3700.0), (3700.0, 5100.0)]
+        (tmp_path / "graduates" / "seg_0000" / "done").write_text("1")  # a marker from an older version
+        fetched.clear()
+        hist.follow_graduates(rpc, tmp_path, base, 100.0 + 7200.0)
+        assert fetched == [(3700.0, 7300.0)], "the short segment is fetched again to the new end"
+        fetched.clear()
+        hist.follow_graduates(rpc, tmp_path, base, 100.0 + 7200.0)
+        assert fetched == []
+        for seg in ("seg_0000", "seg_0001"):  # a workspace fetched entirely by an older version
+            (tmp_path / "graduates" / seg / "done").write_text("1")
+        hist.follow_graduates(rpc, tmp_path, base, 100.0 + 9000.0)
+        assert fetched == [(3700.0, 7300.0), (7300.0, 9100.0)], (
+            "its last (possibly short) segment is extended"
+        )
+        fetched.clear()
+        hist.follow_graduates(rpc, tmp_path, base, 100.0 + 9000.0)
+        assert fetched == [], "each legacy segment is fetched again at most once"
+    finally:
+        hist.HistoryWalker = real  # type: ignore[misc]

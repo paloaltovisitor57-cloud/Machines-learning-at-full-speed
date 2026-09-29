@@ -38,7 +38,12 @@ nardis-neural = "nardis_neural.cli:app"
 where = ["src"]
 
 [tool.setuptools.package-data]
-nardis_neural = ["py.typed", "configs/*.yaml"]
+nardis_neural = ["py.typed"]
+
+# The YAML presets live in the repository's top-level configs/ (outside the package), so they are
+# installed as data files: <environment prefix>/share/nardis-neural/configs/*.yaml.
+[tool.setuptools.data-files]
+"share/nardis-neural/configs" = ["configs/*.yaml"]
 
 [tool.ruff]
 line-length = 110

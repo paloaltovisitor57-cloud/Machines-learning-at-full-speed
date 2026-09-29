@@ -124,7 +124,7 @@ class HistoryWalker:
         rather than aborting the whole segment."""
         try:
             return list(self.decoder.decode(tx))
-        except (ArithmeticError, ValueError, KeyError, IndexError, TypeError):
+        except (ArithmeticError, AttributeError, ValueError, KeyError, IndexError, TypeError):
             self.stats["decode_errors"] += 1
             return []
 
@@ -278,6 +278,22 @@ def fetch_history(
     return stats | {"segments": n}
 
 
+def _segment_done(d: Any, hi: float, later_done: bool = True) -> bool:
+    """True when segment ``d`` is saved up to ``hi``.  Its ``done`` marker holds the end it was
+    fetched to.  An old marker without one (``"1"``) counts as complete when a later segment is
+    done (``later_done``): only the last segment of an earlier run can have been cut short."""
+    from pathlib import Path
+
+    marker = Path(d) / "done"
+    if not marker.exists():
+        return False
+    text = marker.read_text().strip()
+    try:
+        return later_done if text == "1" else float(text) >= hi
+    except ValueError:
+        return True
+
+
 def follow_graduates(
     rpc: SolanaRpc,
     out: Any,
@@ -296,7 +312,8 @@ def follow_graduates(
     invisible to the labels.  Every token with a :class:`Migration` in ``events`` is followed
     by its mint address from its first graduation to ``end_time``, in resumable segments saved
     under ``out/graduates``; only its trades *after* graduation are kept, de-duplicated against
-    ``events``.  Returns the merged events (time-sorted) and counts.
+    ``events``.  A saved segment that stopped short of where a rerun with a later ``end_time``
+    ends it is fetched again.  Returns the merged events (time-sorted) and counts.
     """
     from pathlib import Path
 
@@ -315,11 +332,12 @@ def follow_graduates(
     start = min(grad_t.values())
     n = max(1, int(-(-(end_time - start) // segment_seconds)))
     mints = sorted(grad_t)
+    last_done = max((int(m.parent.name[4:]) for m in root.glob("seg_*/done")), default=-1)
     for k in range(n):
         d = root / f"seg_{k:04d}"
-        if (d / "done").exists():
-            continue
         lo, hi = start + k * segment_seconds, min(start + (k + 1) * segment_seconds, end_time)
+        if _segment_done(d, hi, later_done=k < last_done):
+            continue
         active = [m for m in mints if grad_t[m] < hi]
         for attempt in range(retries):
             try:
@@ -327,7 +345,7 @@ def follow_graduates(
                     rpc, lo, hi, programs=active, segment_seconds=segment_seconds, workers=workers
                 )
                 EventStore(list(w.events())).save(d)
-                (d / "done").write_text("1")
+                (d / "done").write_text(repr(hi))  # how far it reaches: a later end_time extends it
                 say(f"graduates {k + 1}/{n}: {len(active)} tokens, {w.stats['transactions']} transactions")
                 break
             except Exception as exc:

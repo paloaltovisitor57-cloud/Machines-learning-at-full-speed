@@ -6,11 +6,16 @@ these features, but a model fitted on past data can still be walked into a trap 
 rare in its training set.  The guard therefore sits *on top* of the model and only ever
 lowers its optimism:
 
-* **trust** ∈ [0, 1] multiplies the predicted tail probabilities above 1x.  It combines the
-  launch-risk model's P(rug), live authorities, unburned LP, wash trading, bundled and
-  creator-cluster supply, rug-linked wallets, concentration, dev selling, how far the input
-  lies outside the training data and how much the ensemble disagrees;
-* **vetoes** are hard, human-readable reasons after which the token gets no chase score.
+* **trust** ∈ [0, 1] multiplies the sizing and ranking outputs: the lottery-Kelly fraction and
+  the chase score (trust × expected multiple).  The predicted tail probabilities (``p_ge_*x``),
+  the expected and median multiples and the chase profile computed from them (``chase_target``,
+  ``edge_*x``, ``tail_ev``) are the model's own and are *not* scaled by trust, so read them
+  together with ``trust``.  Trust combines the launch-risk model's P(rug), live authorities,
+  unburned LP, wash trading, bundled and creator-cluster supply, rug-linked wallets,
+  concentration, dev selling, how far the input lies outside the training data and how much
+  the ensemble disagrees;
+* **vetoes** are hard, human-readable reasons after which the token gets no chase score, a zero
+  lottery-Kelly fraction and a zero ``chase_target`` / ``chase_edge``.
 
 The factors are hand-set, conservative and monotone (more red flags never raise trust).
 They are documented in docs/MOONSHOT.md and can be tightened in ``GuardConfig``.

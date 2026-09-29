@@ -1,8 +1,10 @@
 """Local HTTP/JSON service: the addon as a sidecar the trading system calls from any language.
 
-The service owns one :class:`~nardis_neural.solana.brain.SolanaBrain`.  Optionally a background
-thread streams the chain into it (read-only RPC), so every answer reflects the live market.
-All calls are advice; nothing here can sign or send a transaction.
+The service owns one :class:`~nardis_neural.solana.brain.SolanaBrain`.  A background thread
+either streams the chain into it (read-only RPC) or, when the trading system pushes transactions
+through ``POST /ingest``, only runs the upkeep; either way it assesses the active tokens, resolves
+outcomes, maintains, evicts idle tokens and checkpoints on a schedule, so every answer reflects
+the live market.  All calls are advice; nothing here can sign or send a transaction.
 
 Endpoints (JSON in, JSON out):
 
@@ -16,14 +18,24 @@ Endpoints (JSON in, JSON out):
 ``POST /advise_trade``     ``{trade_id, mint, t?, features{}}`` → P(win / 10x / 100x), size, veto
 ``POST /settle_trade``     ``{trade_id, t_exit, multiple, peak_multiple?}`` → learner updates
 ``POST /hold_advice``      ``{mint, t_signal}`` → sell-now vs continuation value, crash risk
-``POST /allocate``         ``{equity_sol, open_stakes{}, peak_equity_sol?}`` → recommended stakes
+``POST /allocate``         ``{equity_sol, open_stakes{}, peak_equity_sol?, day_start_equity_sol?}``
+                           → recommended stakes
 ``POST /ingest``           ``{transactions: [getTransaction JSON, …]}`` pushed by the trading
                            system (slot order), decoded and fed to the brain
 ``POST /save``             checkpoint the workspace now
 =========================  =====================================================================
 
-Requests are serialised with a lock (the brain is not thread-safe); each call takes
-milliseconds, so this is not a bottleneck for one trading system.
+Requests are serialised with a lock (the brain is not thread-safe); a request takes
+milliseconds, so this is not a bottleneck for one trading system.  Background work that touches
+the brain takes the same lock: the assessment round every ``assess_every`` seconds and, above
+all, maintenance (neural adaptation / retraining, risk and tail refits, every
+``maintenance_every`` seconds) and the archive refit delay requests while they run.  Reading and
+parsing the archive happens outside the lock.
+
+Errors: 400 for a bad request (with ``{"error": …}``), 404 for an unknown endpoint, 409 when a
+required model is not installed yet, 413 for a body over :data:`MAX_BODY_BYTES` (a body over
+:data:`MAX_DRAIN_BYTES` is not even read: the connection is closed after the answer, which the
+client may see as a reset), 500 for an unexpected failure (the server keeps running).
 """
 
 from __future__ import annotations
@@ -32,6 +44,8 @@ import json
 import math
 import threading
 import time
+from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -39,6 +53,16 @@ from urllib.parse import parse_qs, urlsplit
 
 from nardis_neural.solana.chase import CHASE_TARGETS
 from nardis_neural.solana.metalabel import TradeOutcome, TradeProposal
+
+MAX_BODY_BYTES = 16 * 1024 * 1024
+"""Largest request body accepted (413 above it)."""
+
+MAX_DRAIN_BYTES = 4 * MAX_BODY_BYTES
+"""Largest rejected body still read and discarded, so the client receives the 413."""
+
+
+class NotReadyError(RuntimeError):
+    """A required model is not installed yet (reported as 409)."""
 
 
 def _clean(obj: Any) -> Any:
@@ -55,12 +79,21 @@ def _clean(obj: Any) -> Any:
 class AddonService:
     """Routes requests to the brain under a lock; see the module docstring for the API."""
 
-    def __init__(self, brain: Any) -> None:
+    def __init__(self, brain: Any, seen_capacity: int = 200_000) -> None:
         self.brain = brain
         self.lock = threading.RLock()
         self.stream_stats: dict[str, int] = {}
+        self.ingest_stats: dict[str, int] = {"transactions": 0, "duplicates": 0, "undecodable": 0}
         self.decoder: Any = None
         """Decoder state for pushed transactions (``POST /ingest``)."""
+        self._seen: OrderedDict[str, None] = OrderedDict()
+        """Signatures of pushed transactions already decoded (bounded, oldest dropped first)."""
+        self._seen_capacity = seen_capacity
+        self._streamer: Any = None
+        self._consumed: dict[str, str] | None = None
+        """Stream cursor of the last poll fully ingested into the brain (what a checkpoint covers)."""
+        self._mid_poll = False
+        self._poll_done = threading.Condition(self.lock)
         self._stop = threading.Event()
 
     # ------------------------------------------------------------------ routing
@@ -92,8 +125,19 @@ class AddonService:
                 return 200, _clean(fn())
         except (KeyError, ValueError, TypeError) as exc:
             return 400, {"error": f"{type(exc).__name__}: {exc}"}
-        except RuntimeError as exc:
+        except NotReadyError as exc:
             return 409, {"error": str(exc)}
+        except Exception as exc:  # every request gets an answer; the server keeps running
+            return 500, {"error": f"internal error: {type(exc).__name__}: {exc}"[:500]}
+
+    def _needs_tail_model(self, fn: Callable[[], Any]) -> Any:
+        """Run ``fn``; its ``RuntimeError`` while no tail model is installed is :class:`NotReadyError`."""
+        try:
+            return fn()
+        except RuntimeError as exc:
+            if self.brain.moonshot is None:
+                raise NotReadyError(str(exc)) from exc
+            raise
 
     # ------------------------------------------------------------------ endpoints
     def health(self) -> dict[str, Any]:
@@ -107,6 +151,8 @@ class AddonService:
                 "tape": b.tape_model is not None,
                 "stopping": b.stopping is not None,
                 "edge": b.edge is not None,
+                "runners": b.runners is not None,
+                "risk": b.risk is not None,
             },
             "learner": {
                 "settled_trades": len(b.meta.multiple),
@@ -115,6 +161,7 @@ class AddonService:
                 "value_model": b.meta.value_model is not None,
             },
             "stream": self.stream_stats,
+            "ingest": self.ingest_stats,
             "archive": getattr(self, "archive_stats", {}),
             "alerts": getattr(self, "alert_stats", {}),
         }
@@ -154,7 +201,9 @@ class AddonService:
         return row
 
     def ranking(self, limit: int) -> dict[str, Any]:
-        rows = [self._candidate(a) for a in self.brain.moonshot_ranking()[: max(limit, 0)]]
+        rows = [
+            self._candidate(a) for a in self._needs_tail_model(self.brain.moonshot_ranking)[: max(limit, 0)]
+        ]
         return {"time": self.brain.market.now, "candidates": rows}
 
     def moonshots(self, target: float, limit: int = 20, min_edge: float = 1.0) -> dict[str, Any]:
@@ -164,7 +213,7 @@ class AddonService:
             raise ValueError(f"target must be one of {', '.join(f'{k:g}' for k in CHASE_TARGETS)}")
         tag = f"{target:g}x"
         rows = []
-        for a in self.brain.moonshot_ranking():
+        for a in self._needs_tail_model(self.brain.moonshot_ranking):
             edge = a.moonshot.get(f"edge_{tag}")
             if edge is not None and edge >= min_edge:
                 rows.append(self._candidate(a) | {"target": target, "edge": edge})
@@ -173,7 +222,7 @@ class AddonService:
             "time": self.brain.market.now,
             "target": target,
             "min_edge": min_edge,
-            "candidates": rows[:limit],
+            "candidates": rows[: max(limit, 0)],
         }
 
     def alerts(
@@ -263,15 +312,24 @@ class AddonService:
         return out
 
     def allocate(self, p: dict[str, Any]) -> dict[str, Any]:
-        allocs = self.brain.allocate(
-            float(p["equity_sol"]),
-            {str(k): float(v) for k, v in (p.get("open_stakes") or {}).items()},
-            float(p["peak_equity_sol"]) if p.get("peak_equity_sol") is not None else None,
+        equity = float(p["equity_sol"])
+        stakes = {str(k): float(v) for k, v in (p.get("open_stakes") or {}).items()}
+        peak = float(p["peak_equity_sol"]) if p.get("peak_equity_sol") is not None else None
+        day = p.get("day_start_equity_sol")
+        day_start = float(day) if day is not None else None
+        allocs = self._needs_tail_model(
+            lambda: self.brain.allocate(equity, stakes, peak, day_start_equity_sol=day_start)
         )
         return {"allocations": [asdict(a) for a in allocs]}
 
     def ingest(self, p: dict[str, Any]) -> dict[str, Any]:
-        """Decode pushed transactions (``getTransaction`` JSON, ``jsonParsed`` encoding) into the brain."""
+        """Decode pushed transactions (``getTransaction`` JSON, ``jsonParsed`` encoding) into the brain.
+
+        A transaction whose signature was already decoded (bounded memory of the latest
+        ``seen_capacity``) is counted under ``duplicates`` and not ingested again; one that was
+        undecodable or pushed without its ``meta`` is not remembered, so resending it complete
+        later is ingested.
+        """
         from nardis_neural.solana.ingest.decoder import TransactionDecoder
 
         if self.decoder is None:
@@ -279,26 +337,65 @@ class AddonService:
         txs = p["transactions"]
         if not isinstance(txs, list):
             raise ValueError("transactions must be a list")
-        accepted = rejected = undecodable = 0
-        for tx in sorted(txs, key=lambda x: int(x.get("slot", 0))):
-            try:
-                events = list(self.decoder.decode(tx))
-            except (ArithmeticError, KeyError, IndexError, TypeError, ValueError):
+        if not all(isinstance(tx, dict) for tx in txs):
+            raise ValueError("every transaction must be a JSON object")
+        accepted = rejected = undecodable = duplicates = 0
+        for tx in sorted(txs, key=lambda x: int(x.get("slot") or 0)):
+            sig = _signature(tx)
+            if sig is not None and sig in self._seen:
+                duplicates += 1
+                continue
+            if not isinstance(tx.get("meta"), dict):  # no execution result yet: nothing to decode
                 undecodable += 1
                 continue
+            try:
+                events = list(self.decoder.decode(tx))
+            except (ArithmeticError, AttributeError, KeyError, IndexError, TypeError, ValueError):
+                undecodable += 1
+                continue
+            if sig is not None:
+                self._seen[sig] = None
+                while len(self._seen) > self._seen_capacity:
+                    self._seen.popitem(last=False)
             for e in events:
                 try:
                     self.brain.ingest(e)
                     accepted += 1
                 except (KeyError, ValueError):
                     rejected += 1
-        return {"events": accepted, "rejected": rejected, "undecodable_transactions": undecodable}
+        stats = self.ingest_stats
+        stats["transactions"] += len(txs) - duplicates
+        stats["duplicates"] += duplicates
+        stats["undecodable"] += undecodable
+        return {
+            "events": accepted,
+            "rejected": rejected,
+            "undecodable_transactions": undecodable,
+            "duplicates": duplicates,
+        }
 
     def save(self) -> dict[str, Any]:
-        self.brain.save()
+        self._checkpoint()
         return {"saved": True}
 
-    # ------------------------------------------------------------------ live stream
+    def _checkpoint(self) -> None:
+        """Save the brain, then commit the stream cursor that the saved brain covers.
+
+        Waits while the stream thread is between the chunks of one poll, so a checkpoint never
+        holds part of a poll and a restart replays exactly what the saved brain has not seen.
+        """
+        with self.lock:
+            while self._mid_poll:
+                self._poll_done.wait()
+            self.brain.save()
+            self._commit_cursor()
+
+    def _commit_cursor(self) -> None:
+        commit = getattr(self._streamer, "commit", None)
+        if commit is not None and self._consumed is not None:
+            commit(self._consumed)
+
+    # ------------------------------------------------------------------ live stream and upkeep
     def stream(
         self,
         streamer: Any,
@@ -308,52 +405,68 @@ class AddonService:
         save_every: float = 300.0,
         chunk: int = 50,
         bounded_memory: bool = True,
+        assess_every: float = 10.0,
     ) -> threading.Thread:
-        """Feed the chain into the brain on a daemon thread until :meth:`stop`.
+        """Keep the brain up to date on a daemon thread until :meth:`stop`.
+
+        Every ``poll_interval`` seconds ``streamer`` is polled into the brain; with
+        ``streamer=None`` events arrive only through ``POST /ingest`` and the thread does the
+        upkeep alone.  On their own schedules (seconds): the active tokens are assessed
+        (``assess_every``, 0 = never; this feeds continual learning, the online tail model and
+        the forward ledger as ``solana stream`` does), matured outcomes resolve
+        (``resolve_every``), idle tokens are evicted and maintenance runs
+        (``maintenance_every``), and the workspace is checkpointed together with the stream
+        cursor (``save_every``).
 
         With ``bounded_memory`` (default) the brain switches to streaming mode: events are not
-        accumulated and tokens idle for two hours are forgotten at each maintenance, so a
-        sidecar can run for weeks at constant memory."""
+        accumulated and tokens idle for two hours are forgotten at each maintenance (with their
+        decoder state), so a sidecar can run for weeks at constant memory."""
         if bounded_memory and not self.brain.streaming:
             with self.lock:
                 self.brain.enable_streaming()
+        cursor = getattr(streamer, "cursor", None)
+        with self.lock:
+            self._streamer = streamer
+            self._consumed = dict(cursor) if isinstance(cursor, dict) else None
         stats = self.stream_stats
-        stats.update({"polls": 0, "events": 0, "rejected": 0, "errors": 0})
+        stats.update(
+            {
+                "polls": 0,
+                "events": 0,
+                "rejected": 0,
+                "errors": 0,
+                "assessments": 0,
+                "resolved": 0,
+                "maintenance": 0,
+                "evicted": 0,
+                "saves": 0,
+            }
+        )
+        if streamer is not None:
+            stats.update({"gaps": 0, "decode_errors": 0, "fetch_errors": 0})
 
         def loop() -> None:
+            start = time.time()
             nxt = {
-                "resolve": time.time(),
-                "maint": time.time() + maintenance_every,
-                "save": time.time() + save_every,
+                "resolve": start,
+                "assess": start + assess_every,
+                "maint": start + maintenance_every,
+                "save": start + save_every,
+                "assessed_at": -math.inf,
             }
             while not self._stop.is_set():
+                if streamer is not None:
+                    try:
+                        self._ingest_poll(streamer, chunk)
+                        stats["polls"] += 1
+                    except Exception:  # a network hiccup must never kill the sidecar
+                        stats["errors"] += 1
+                    stats["gaps"] = int(getattr(streamer, "gaps", 0))
+                    stats["decode_errors"] = int(getattr(streamer, "decode_errors", 0))
+                    stats["fetch_errors"] = int(getattr(streamer, "fetch_errors", 0))
                 try:
-                    events = list(streamer.poll())
-                    # small chunks, lock released in between: a request never waits behind a
-                    # whole poll's backlog
-                    for i in range(0, len(events), chunk):
-                        with self.lock:
-                            for e in events[i : i + chunk]:
-                                try:
-                                    self.brain.ingest(e)
-                                    stats["events"] += 1
-                                except (KeyError, ValueError):
-                                    stats["rejected"] += 1
-                    with self.lock:
-                        now = time.time()
-                        if now >= nxt["resolve"]:
-                            nxt["resolve"] = now + resolve_every
-                            self.brain.resolve()
-                        if now >= nxt["maint"]:
-                            nxt["maint"] = now + maintenance_every
-                            self.brain.maintenance()
-                            if self.brain.streaming:
-                                self.brain.evict()
-                        if now >= nxt["save"]:
-                            nxt["save"] = now + save_every
-                            self.brain.save()
-                    stats["polls"] += 1
-                except Exception:  # a network hiccup must never kill the sidecar
+                    self._upkeep(nxt, resolve_every, assess_every, maintenance_every, save_every)
+                except Exception:  # retried at the next round
                     stats["errors"] += 1
                 self._stop.wait(poll_interval)
 
@@ -361,22 +474,93 @@ class AddonService:
         thread.start()
         return thread
 
+    def _ingest_poll(self, streamer: Any, chunk: int) -> None:
+        """Poll ``streamer`` and ingest the events in small chunks, releasing the lock in between
+        so a request never waits behind a whole poll's backlog."""
+        stats = self.stream_stats
+        events = list(streamer.poll())
+        try:
+            for i in range(0, len(events), chunk):
+                with self.lock:
+                    self._mid_poll = True
+                    for e in events[i : i + chunk]:
+                        try:
+                            self.brain.ingest(e)
+                            stats["events"] += 1
+                        except (KeyError, ValueError):
+                            stats["rejected"] += 1
+        finally:
+            with self.lock:
+                cursor = getattr(streamer, "cursor", None)
+                if isinstance(cursor, dict):
+                    self._consumed = dict(cursor)
+                self._mid_poll = False
+                self._poll_done.notify_all()
+
+    def _upkeep(
+        self,
+        nxt: dict[str, float],
+        resolve_every: float,
+        assess_every: float,
+        maintenance_every: float,
+        save_every: float,
+    ) -> None:
+        """One round of the scheduled upkeep (see :meth:`stream`); ``nxt`` holds the due times.
+
+        An assessment round is skipped while the market clock has not moved since the previous one
+        (no events pushed, RPC outage): it would only queue the same observations again."""
+        stats = self.stream_stats
+        with self.lock:
+            now = time.time()
+            if assess_every > 0 and now >= nxt["assess"]:
+                nxt["assess"] = now + assess_every
+                market_now = float(self.brain.market.now)
+                if market_now > nxt.get("assessed_at", -math.inf):
+                    nxt["assessed_at"] = market_now
+                    stats["assessments"] += len(self.brain.assess_active())
+            if now >= nxt["resolve"]:
+                nxt["resolve"] = now + resolve_every
+                stats["resolved"] += int(self.brain.resolve())
+            if now >= nxt["maint"]:
+                nxt["maint"] = now + maintenance_every
+                if self.brain.streaming:
+                    gone = self.brain.evict()
+                    stats["evicted"] += len(gone)
+                    for decoder in (getattr(self._streamer, "decoder", None), self.decoder):
+                        if decoder is not None:
+                            decoder.forget(gone)
+                self.brain.maintenance()  # ends with a save
+                self._commit_cursor()
+                stats["maintenance"] += 1
+                stats["saves"] += 1
+                nxt["save"] = now + save_every
+            if now >= nxt["save"]:
+                nxt["save"] = now + save_every
+                self._checkpoint()
+                stats["saves"] += 1
+
     def train_on_archive(
         self, path: Any, mapping: Any = None, table: str | None = None, every: float = 600.0
     ) -> threading.Thread:
         """Keep training the meta-learner on the trade archive: rescan every ``every`` seconds
-        and learn only the trades it has not seen yet."""
-        from nardis_neural.solana.archive import train_from_archive
+        and learn only the trades it has not seen yet.
+
+        The archive is read and normalised outside the lock; only learning the new trades (and
+        the refit, when any were added) holds it."""
+        from nardis_neural.solana.archive import learn_trades, normalise_trades, read_table
 
         self.archive_stats: dict[str, Any] = {"scans": 0, "errors": 0, "last": {}}
 
         def loop() -> None:
             while not self._stop.is_set():
                 try:
+                    unreadable: list[str] = []
+                    trades = normalise_trades(read_table(path, table, unreadable), mapping)
                     with self.lock:
-                        out = train_from_archive(self.brain.meta, path, mapping, table)
+                        out = learn_trades(self.brain.meta, trades)
                         if out["added"]:
                             self.brain.meta.save(self.brain.root / "meta")
+                    out["unreadable_files"] = len(unreadable)
                     self.archive_stats["last"] = {k: v for k, v in out.items() if k != "refit"}
                     self.archive_stats["scans"] += 1
                 except Exception as exc:  # a half-written file must not kill the sidecar
@@ -389,10 +573,16 @@ class AddonService:
         return thread
 
     def stop(self) -> None:
-        """Stop the stream thread and checkpoint."""
+        """Stop the background threads and checkpoint (brain, then the stream cursor it covers)."""
         self._stop.set()
-        with self.lock:
-            self.brain.save()
+        self._checkpoint()
+
+
+def _signature(tx: dict[str, Any]) -> str | None:
+    """The transaction's first signature, if the JSON carries one."""
+    inner = tx.get("transaction")
+    sigs = inner.get("signatures") if isinstance(inner, dict) else None
+    return str(sigs[0]) if isinstance(sigs, list) and sigs else None
 
 
 def _post_json(url: str, body: dict[str, Any], timeout: float = 5.0) -> None:
@@ -409,11 +599,17 @@ def make_server(service: AddonService, host: str = "127.0.0.1", port: int = 8787
     """An HTTP server bound to ``host:port`` that routes to ``service``."""
 
     class Handler(BaseHTTPRequestHandler):
-        def _reply(self, status: int, body: dict[str, Any]) -> None:
-            data = json.dumps(body).encode()
+        def _reply(self, status: int, body: dict[str, Any], close: bool = False) -> None:
+            try:
+                data = json.dumps(body).encode()
+            except (TypeError, ValueError) as exc:  # a value JSON cannot hold
+                status, data = 500, json.dumps({"error": f"internal error: {exc}"}).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
+            if close:
+                self.send_header("Connection", "close")
+                self.close_connection = True
             self.end_headers()
             self.wfile.write(data)
 
@@ -421,10 +617,26 @@ def make_server(service: AddonService, host: str = "127.0.0.1", port: int = 8787
             self._reply(*service.handle("GET", self.path, {}))
 
         def do_POST(self) -> None:
-            n = int(self.headers.get("Content-Length") or 0)
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                n = -1
+            if n < 0:
+                self._reply(400, {"error": "invalid Content-Length"}, close=True)
+                return
+            if n > MAX_BODY_BYTES:
+                if n <= MAX_DRAIN_BYTES:  # read and discard, so the client is listening for the 413
+                    left = n
+                    while left > 0:
+                        got = self.rfile.read(min(left, 1 << 20))
+                        if not got:
+                            break
+                        left -= len(got)
+                self._reply(413, {"error": f"body over {MAX_BODY_BYTES} bytes"}, close=True)
+                return
             try:
                 payload = json.loads(self.rfile.read(n) or b"{}")
-            except json.JSONDecodeError as exc:
+            except (ValueError, RecursionError) as exc:  # bad JSON, bad UTF-8, absurd nesting
                 self._reply(400, {"error": f"invalid JSON: {exc}"})
                 return
             if not isinstance(payload, dict):

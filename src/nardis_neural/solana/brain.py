@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import math
 import pickle
+import shutil
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,10 +65,39 @@ from nardis_neural.solana.stopping import (
 from nardis_neural.solana.tape.features import TapeSpec, extract_tape, stack_tapes
 from nardis_neural.solana.tape.model import TapeModel, window_label
 from nardis_neural.solana.tape.research import run_tape_research, tape_markdown
-from nardis_neural.training.continual import ContinualLearner
+from nardis_neural.training.continual import CandidateReport, ContinualLearner
 from nardis_neural.training.pipeline import train_engine
 
 F32 = npt.NDArray[np.float32]
+
+WORKSPACE_ENTRIES = (
+    "solana.yaml",
+    "config.yaml",
+    "registry.json",
+    "registry.json.tmp",
+    "state.json",
+    "models",
+    "replay",
+    "shadow",
+    "reports",
+    "events",
+    "stream",
+    "stream_cursor.json",
+    "risk",
+    "risk_samples.npz",
+    "edge",
+    "moonshot",
+    "tape",
+    "runners",
+    "stopping",
+    "meta",
+    "forward",
+    "capital",
+    "pending.pkl",
+    "solana_state.json",
+)
+"""Everything a Solana workspace holds; :meth:`SolanaBrain.bootstrap` refuses a directory holding any
+of these unless asked to overwrite them."""
 
 
 class SolanaAssessment(BaseModel):
@@ -200,7 +230,8 @@ class SolanaBrain:
             with market_file.open("rb") as fh:  # our own checkpoint, written by save()
                 self.market = pickle.load(fh)
             self.streaming = True
-            self.evict_idle_seconds = float(state.get("evict_idle_seconds", self.evict_idle_seconds))
+            idle = state.get("evict_idle_seconds", self.evict_idle_seconds)
+            self.evict_idle_seconds = np.inf if idle is None else float(idle)  # null: never evict
         elif hist.exists():
             loaded = EventStore.load(hist)
             self.market.ingest_many(loaded.sorted())
@@ -214,7 +245,9 @@ class SolanaBrain:
         self.edge_meta: dict[str, Any] = {}
         if (self.root / "edge" / "edge.json").exists():
             self.edge = EdgeModel.load(self.root / "edge")
-            self.edge_meta = json.loads((self.root / "edge" / "research.json").read_text())
+            research_file = self.root / "edge" / "research.json"
+            # the report only supplies the threshold (0 without it); a lost report must not block loading
+            self.edge_meta = json.loads(research_file.read_text()) if research_file.exists() else {}
         self.moonshot: TailModel | None = None
         self.tape_model: TapeModel | None = (
             TapeModel.load(self.root / "tape") if (self.root / "tape" / "tape.json").exists() else None
@@ -249,8 +282,12 @@ class SolanaBrain:
             self._ledger_alarm(),
         )
         """Paper tickets opened and settled from the assessments (forward test)."""
-        self.moonshot_last_refit = float(state.get("moonshot_last_refit", -np.inf))
-        self.pending: list[_Pending] = []
+        last_refit = state.get("moonshot_last_refit")  # null (or -Infinity in old files): never refitted
+        self.moonshot_last_refit = -np.inf if last_refit is None else float(last_refit)
+        self.book: BookState | None = self._load_book()
+        """Allocator book remembered across :meth:`allocate` calls (day and its opening equity)."""
+        self.pending: list[_Pending] = self._load_pending()
+        """Assessments waiting for their horizons to be labelled (checkpointed by :meth:`save`)."""
         self._vetoes: dict[str, list[str]] = {}
         self.risk_x: list[F32] = []
         self.risk_y: list[F32] = []
@@ -268,10 +305,25 @@ class SolanaBrain:
         neural_cfg: NeuralConfig | None = None,
         device: torch.device | str | None = None,
         log: Callable[[str], None] | None = None,
+        overwrite: bool = False,
     ) -> SolanaBrain:
-        """Train the neural ensemble and the risk model from historical events."""
+        """Train the neural ensemble and the risk model from historical events.
+
+        An existing workspace is refused with ``FileExistsError``: rebuilding into it would mix a
+        new event history, configuration and risk model with the old champion and every model
+        derived from it.  ``overwrite=True`` replaces everything a workspace holds (see
+        :data:`WORKSPACE_ENTRIES`: models, replay, trade history, forward ledger, stream state …),
+        but only once the new ensemble and risk model have trained: a failed or interrupted rebuild
+        leaves the old workspace as it was.  ``history`` is read before anything is deleted, so it
+        may come from the workspace's own ``events/``.  Other files in the directory are left alone.
+        """
         root = Path(workspace)
-        root.mkdir(parents=True, exist_ok=True)
+        existing = [n for n in WORKSPACE_ENTRIES if (root / n).exists()]
+        if existing and not overwrite:
+            raise FileExistsError(
+                f"{root} already holds a workspace ({', '.join(existing)}); "
+                "choose a new directory or pass overwrite=True to rebuild it from scratch"
+            )
         cfg = cfg or SolanaConfig()
         ncfg = cfg.neural_config(neural_cfg)
         say = log or (lambda _: None)
@@ -284,11 +336,19 @@ class SolanaBrain:
             f"neural ensemble: return rank-corr {m.get('return.rank_corr', float('nan')):.3f}, "
             f"downside AUC {m.get('downside.auc', float('nan')):.3f}"
         )
+        embeddings = engine.predict_dataset(MarketDataset(ds.store(), ncfg))["embedding"]
+        risk = fit_risk_model(embeddings, ds)
+        # everything is trained: only now is the old workspace (if any) replaced
+        for name in WORKSPACE_ENTRIES:
+            target = root / name
+            if target.is_dir():
+                shutil.rmtree(target)
+            elif target.exists():
+                target.unlink()
+        root.mkdir(parents=True, exist_ok=True)
         cfg.save(root / "solana.yaml")
         ContinualLearner.initialize(root, engine, ncfg, device=engine.device)
         history.save(root / "events")
-        embeddings = engine.predict_dataset(MarketDataset(ds.store(), ncfg))["embedding"]
-        risk = fit_risk_model(embeddings, ds)
         risk.save(root / "risk")
         say(f"risk model: { {k: round(v['auc'], 3) for k, v in risk.report['metrics'].items()} }")
         return cls(root, device=device)
@@ -532,11 +592,17 @@ class SolanaBrain:
         peak_equity_sol: float | None = None,
         cfg: AllocatorConfig | None = None,
         max_idle_seconds: float = 120.0,
+        day_start_equity_sol: float | None = None,
     ) -> list[Allocation]:
         """Recommended stakes for the current moonshot opportunities (advice, never orders).
 
         Uses the manipulation-guarded ranking, the tail and tape views, the pool's real
         liquidity, the creator family, and the forward ledger's live track record.
+
+        The book is remembered across calls (and restarts, in ``capital/book.json``): the first
+        call of a UTC market day records ``equity_sol`` as the day's opening equity, so the daily
+        loss stop fires once equity falls far enough below it; ``day_start_equity_sol`` sets that
+        opening equity explicitly.  Open stakes count toward their creator family's cap.
         """
         signals = []
         for a in self.moonshot_ranking(max_idle_seconds):
@@ -555,12 +621,22 @@ class SolanaBrain:
                     bool(m["vetoed"]),
                 )
             )
-        state = BookState(
-            equity=equity_sol,
-            peak_equity=peak_equity_sol if peak_equity_sol is not None else equity_sol,
-            open_stakes=dict(open_stakes or {}),
-        )
-        return CapitalAllocator(cfg, track_record=self.forward.track_record()).allocate(signals, state)
+        stakes = dict(open_stakes or {})
+        day = int(self.market.now // 86400)
+        book = self.book
+        if book is None or book.day != day:
+            book = BookState(equity=equity_sol, peak_equity=equity_sol, day=day, day_start_equity=equity_sol)
+        if day_start_equity_sol is not None:
+            book.day_start_equity = float(day_start_equity_sol)
+        book.equity = equity_sol
+        book.peak_equity = peak_equity_sol if peak_equity_sol is not None else equity_sol
+        book.open_stakes = stakes
+        families = self.market.family_of
+        book.open_family = {m: str(families[m]) if m in families else m for m in stakes}  # as Signal.family
+        out = CapitalAllocator(cfg, track_record=self.forward.track_record()).allocate(signals, book)
+        self.book = book
+        self._save_book()
+        return out
 
     def resolve(self) -> int:
         """Label every assessment whose longest horizon has elapsed and learn from it."""
@@ -595,10 +671,23 @@ class SolanaBrain:
         then :meth:`save`; returns a status summary.
 
         The risk model is refitted once ``risk_refit_min_new`` new labelled samples have arrived and
-        every risk label has at least 3 positives.
+        every risk label has at least 3 positives.  When the learner cannot build a candidate from
+        the data it has (``ValueError``, e.g. fewer than 10 new experiences or none old enough to
+        train on), the step is skipped, its message returned under ``adapt_error`` /
+        ``full_retrain_error``, and the rest of the upkeep (including the save) still runs.
         """
-        adapted = self.learner.adapt_if_needed()
-        retrained = self.learner.full_retrain_if_needed()
+        adapted: CandidateReport | None = None
+        retrained: CandidateReport | None = None
+        adapt_error: str | None = None
+        retrain_error: str | None = None
+        try:
+            adapted = self.learner.adapt_if_needed()
+        except ValueError as exc:  # not enough usable experience yet: retried at the next maintenance
+            adapt_error = str(exc)
+        try:
+            retrained = self.learner.full_retrain_if_needed()
+        except ValueError as exc:
+            retrain_error = str(exc)
         decision = self.learner.promote_if_ready()
         refit = False
         if len(self.risk_y) - self.risk_fitted_n >= risk_refit_min_new:
@@ -615,7 +704,9 @@ class SolanaBrain:
         return {
             "moonshot_online": moon,
             "adapted": None if adapted is None else adapted.status,
+            "adapt_error": adapt_error,
             "full_retrain": None if retrained is None else retrained.status,
+            "full_retrain_error": retrain_error,
             "promoted": None if decision is None else decision.promote,
             "risk_refit": refit,
             "champion": self.learner.registry.champion_version,
@@ -925,6 +1016,21 @@ class SolanaBrain:
         return research.report
 
     # ------------------------------------------------------------------ persistence
+    def _load_book(self) -> BookState | None:
+        f = self.root / "capital" / "book.json"
+        if not f.exists():
+            return None
+        d = json.loads(f.read_text())
+        eq = float(d["day_start_equity"])
+        return BookState(equity=eq, peak_equity=eq, day=int(d["day"]), day_start_equity=eq)
+
+    def _save_book(self) -> None:
+        if self.book is None:
+            return
+        (self.root / "capital").mkdir(parents=True, exist_ok=True)
+        book = {"day": self.book.day, "day_start_equity": self.book.day_start_equity}
+        _write_atomic(self.root / "capital" / "book.json", json.dumps(book))
+
     def _load_risk_samples(self) -> None:
         f = self.root / "risk_samples.npz"
         if f.exists():
@@ -933,20 +1039,26 @@ class SolanaBrain:
                 self.risk_y = list(z["y"])
                 self.risk_t = list(z["t"])
 
+    def _load_pending(self) -> list[_Pending]:
+        f = self.root / "pending.pkl"
+        if not f.exists():
+            return []
+        try:
+            with f.open("rb") as fh:  # our own checkpoint, written by save()
+                return list(pickle.load(fh))
+        except Exception:  # an unreadable checkpoint only costs the labels of these assessments
+            return []
+
     def save(self) -> None:
         """Checkpoint the workspace: learner, event history (or the pickled market when streaming),
-        moonshot buffer, risk samples and ``solana_state.json``.
+        pending assessments, moonshot buffer, risk samples and ``solana_state.json``.
         """
         self.learner.save()
         if self.streaming:
-            target = self.root / "stream" / "market.pkl"
-            target.parent.mkdir(parents=True, exist_ok=True)
-            tmp = target.with_suffix(".tmp")
-            with tmp.open("wb") as fh:
-                pickle.dump(self.market, fh, protocol=pickle.HIGHEST_PROTOCOL)
-            tmp.replace(target)  # atomic: a crash never leaves a torn checkpoint
+            _pickle_atomic(self.root / "stream" / "market.pkl", self.market)
         else:
             self.history.save(self.root / "events")
+        _pickle_atomic(self.root / "pending.pkl", self.pending)
         (self.root / "moonshot").mkdir(exist_ok=True)
         self.tracker.save(self.root / "moonshot" / "online.npz")
         self.forward.save()
@@ -958,21 +1070,36 @@ class SolanaBrain:
                 y=np.stack(self.risk_y),
                 t=np.asarray(self.risk_t),
             )
-        (self.root / "solana_state.json").write_text(
-            json.dumps(
-                {
-                    "market_now": self.market.now,
-                    "events": len(self.history),
-                    "pending": len(self.pending),
-                    "streaming": self.streaming,
-                    "evict_idle_seconds": self.evict_idle_seconds,
-                    "moonshot_last_refit": self.moonshot_last_refit,
-                    "tokens_in_memory": len(self.market.tokens),
-                    "wallets": len(self.market.wallets),
-                    "evicted": self.market.evicted,
-                }
-            )
-        )
+        raw: dict[str, Any] = {
+            "market_now": self.market.now,
+            "events": len(self.history),
+            "pending": len(self.pending),
+            "streaming": self.streaming,
+            "evict_idle_seconds": self.evict_idle_seconds,
+            "moonshot_last_refit": self.moonshot_last_refit,
+            "tokens_in_memory": len(self.market.tokens),
+            "wallets": len(self.market.wallets),
+            "evicted": self.market.evicted,
+        }
+        # strict JSON: an infinite time or duration ("never refitted", "never evict") is written as null
+        state = {k: None if isinstance(v, float) and not math.isfinite(v) else v for k, v in raw.items()}
+        _write_atomic(self.root / "solana_state.json", json.dumps(state, allow_nan=False))
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Write ``text`` to a temporary file next to ``path``, then rename it over ``path`` (atomic)."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    tmp.replace(path)
+
+
+def _pickle_atomic(path: Path, obj: object) -> None:
+    """Pickle ``obj`` to ``path`` through a temporary file: a crash never leaves a torn checkpoint."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    with tmp.open("wb") as fh:
+        pickle.dump(obj, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    tmp.replace(path)
 
 
 def fit_risk_model(embeddings: npt.NDArray[Any], ds: SolanaDataset, members: int = 3) -> SolanaRiskModel:

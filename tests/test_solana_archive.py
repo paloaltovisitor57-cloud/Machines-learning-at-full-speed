@@ -1,5 +1,6 @@
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -76,3 +77,51 @@ def test_reads_the_sqlite_write_buffer_with_an_explicit_mapping(tmp_path: Path) 
     mapping = ArchiveMapping({"mint": "ca"}, features=["nardis_score"])
     out = train_from_archive(learner, db, mapping, table="trades")
     assert out["added"] == 20 and out["features"] == ["nardis_score"]
+
+
+def test_a_corrupt_parquet_file_is_skipped_counted_and_given_up_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nardis_neural.solana import archive
+
+    monkeypatch.setattr(archive, "_read_failures", {})
+    root = tmp_path / "archive"
+    root.mkdir()
+    _trades(30, 5).write_parquet(root / "good.parquet")
+    (root / "bad.parquet").write_bytes(b"not parquet at all" * 4)
+    learner = MetaLearner()
+    first = train_from_archive(learner, root)
+    assert first["added"] == 30 and first["unreadable_files"] == 1
+    for _ in range(archive.MAX_READ_FAILURES + 2):
+        assert train_from_archive(learner, root)["unreadable_files"] == 1
+    assert list(archive._read_failures.values()) == [archive.MAX_READ_FAILURES], "no longer retried"
+    _trades(5, 6, start=30).write_parquet(root / "bad.parquet")  # repaired: read again
+    fixed = train_from_archive(learner, root)
+    assert fixed["added"] == 5 and fixed["unreadable_files"] == 0
+    (root / "good.parquet").unlink()
+    (root / "bad.parquet").write_bytes(b"broken again")
+    with pytest.raises(ValueError, match="no readable"):
+        read_table(root)
+
+
+def test_learn_trades_learns_an_already_read_table_once_with_a_single_refit() -> None:
+    from nardis_neural.solana.archive import learn_trades
+
+    trades = normalise_trades(_trades(120, 7))
+    learner = MetaLearner(min_trades=50, refit_every=10)
+    refits: list[int] = []
+    original = learner.refit
+
+    def counted() -> dict[str, Any]:
+        refits.append(len(learner.multiple))
+        return original()
+
+    learner.refit = counted  # type: ignore[method-assign]
+    logged: list[str] = []
+    out = learn_trades(learner, trades, log=logged.append)
+    assert out["added"] == 120 and out["already_known"] == 0 and out["total"] == 120
+    assert out["features"] == ["nardis_score", "noise"] and out["refit"]
+    assert refits == [120], "one refit at the end, not one per refit_every trades"
+    assert learner.refit_every == 10 and logged
+    again = learn_trades(learner, trades)
+    assert again["added"] == 0 and again["already_known"] == 120 and again["refit"] == {}

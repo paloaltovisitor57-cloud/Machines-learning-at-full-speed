@@ -501,6 +501,8 @@ class ContinualLearner:
             self.registry.set_status(engine.version, "challenger", reason)
             if old is not None:
                 self.shadow.clear(old)
+        # a failed candidate (or a challenger it replaced) would otherwise stay on disk for good
+        self.registry.prune(self.config.lifecycle.keep_champions)
         rep = CandidateReport(
             kind=kind,
             candidate_version=engine.version,

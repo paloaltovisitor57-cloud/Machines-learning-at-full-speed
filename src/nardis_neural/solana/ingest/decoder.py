@@ -89,7 +89,7 @@ class DecodeStats:
 def _keys(tx: Mapping[str, Any]) -> list[str]:
     keys = tx["transaction"]["message"]["accountKeys"]
     out = [k["pubkey"] if isinstance(k, dict) else str(k) for k in keys]
-    loaded = tx.get("meta", {}).get("loadedAddresses") or {}
+    loaded = (tx.get("meta") or {}).get("loadedAddresses") or {}
     return out + list(loaded.get("writable", [])) + list(loaded.get("readonly", []))
 
 
@@ -97,7 +97,7 @@ def _instructions(tx: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     outer = list(tx["transaction"]["message"].get("instructions", []))
     inner = [
         ix
-        for grp in (tx.get("meta", {}).get("innerInstructions") or [])
+        for grp in ((tx.get("meta") or {}).get("innerInstructions") or [])
         for ix in grp.get("instructions", [])
     ]
     return outer + inner
