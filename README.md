@@ -101,7 +101,7 @@ flowchart TB
 | Continual learning | 3-pool replay (recent FIFO, historical reservoir, protected rare events), 5 sampling strategies, candidate cloning, distillation, EWC, full retraining with configurable weights |
 | Lifecycle | immutable checkpoints, champion/candidate/challenger/retired/failed registry with audit log, shadow mode, 10-gate promotion, manual and optional automatic rollback |
 | Representation | self-supervised pretraining (masked timestep, masked feature, contrastive), embedding export to Parquet/NumPy, KMeans / GMM / HDBSCAN regime discovery |
-| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 247 test functions |
+| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 248 test functions |
 
 ## Quick start
 
@@ -376,7 +376,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │                            edge/ (barriers · model · trees · backtest · research)
 │                            moonshot/ (labels · tail · guard · online · research)
 │                            tape/ (features · dataset · model · research · policy)
-└── tests/                   247 test functions incl. synthetic end-to-end pipeline
+└── tests/                   248 test functions incl. synthetic end-to-end pipeline
 ```
 
 ## Testing & quality gates
@@ -3486,6 +3486,7 @@ history keeps only tokens created inside the window, SOL-priced (see clean_histo
 | `--end` | str | null | end of the window: unix seconds or ISO date (default: 15 min ago) |
 | `--workers` | int | 6 | parallel getTransaction calls (6 suits most nodes) |
 | `--rpc` | str | null | read-only (archival) RPC endpoint URL (env `SOLANA_RPC_URL`) |
+| `--follow-graduates-hours` | float | 6.0 | follow graduated tokens through PumpSwap this many hours past the window (0 = off) |
 
 ### `nardis-neural solana meta-train`
 
@@ -4828,7 +4829,7 @@ The edge the addon always chases: 2x, 5x, 10x, 100x and 1000x.
 - `build_dataset(events: "Annotated[Path, typer.Option('--events', '-e', help='event directory (Parquet tables)')]", out: "Annotated[Path, typer.Option('--out', '-o', help='output .npy dataset directory')]", solana_config: 'SolCfg' = None, config: 'BaseCfg' = None) -> 'None'` — Causal replay + hindsight labelling → canonical neural dataset (+ risk labels).
 - `decode(input_file: "Annotated[Path, typer.Option('--input', '-i', help='JSONL of getTransaction results')]", out: "Annotated[Path, typer.Option('--out', '-o', help='event directory (Parquet tables)')]", min_transfer_sol: "Annotated[float, typer.Option('--min-transfer-sol', help='ignore SOL transfers below this amount, SOL')]" = 0.05) -> 'None'` — Decode raw Solana transactions (pump.fun, AMMs, SOL transfers) into market events.
 - `edge_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history + champion)')]", folds: "Annotated[int, typer.Option('--folds', help='walk-forward folds')]" = 4, take_profit: "Annotated[float, typer.Option('--take-profit', help='take-profit barrier, fractional return (0.25 = +25%)')]" = 0.25, stop_loss: "Annotated[float, typer.Option('--stop-loss', help='stop-loss barrier, fractional loss (0.15 = -15%)')]" = 0.15, max_hold: "Annotated[float, typer.Option('--max-hold', help='max holding time (time barrier), seconds')]" = 180.0, latency: "Annotated[float, typer.Option('--latency', help='entry/exit latency, seconds')]" = 1.0, max_positions: "Annotated[int, typer.Option('--max-positions', help='max concurrent open positions in the backtest')]" = 5, device: 'DeviceOpt' = None) -> 'None'` — Walk-forward edge research on the workspace history; installs the edge model.
-- `fetch_history_cmd(out: "Annotated[Path, typer.Option('--out', '-o', help='event directory to write (resumable)')]", hours: "Annotated[float, typer.Option('--hours', help='length of history to fetch, hours')]" = 12.0, end: "Annotated[str | None, typer.Option('--end', help='end of the window: unix seconds or ISO date (default: 15 min ago)')]" = None, workers: "Annotated[int, typer.Option('--workers', help='parallel getTransaction calls (6 suits most nodes)')]" = 6, rpc: "Annotated[str | None, typer.Option('--rpc', envvar='SOLANA_RPC_URL', help='read-only (archival) RPC endpoint URL')]" = None) -> 'None'` — Fetch pump.fun history into an event directory for `bootstrap` and the research commands.
+- `fetch_history_cmd(out: "Annotated[Path, typer.Option('--out', '-o', help='event directory to write (resumable)')]", hours: "Annotated[float, typer.Option('--hours', help='length of history to fetch, hours')]" = 12.0, end: "Annotated[str | None, typer.Option('--end', help='end of the window: unix seconds or ISO date (default: 15 min ago)')]" = None, workers: "Annotated[int, typer.Option('--workers', help='parallel getTransaction calls (6 suits most nodes)')]" = 6, rpc: "Annotated[str | None, typer.Option('--rpc', envvar='SOLANA_RPC_URL', help='read-only (archival) RPC endpoint URL')]" = None, follow_hours: "Annotated[float, typer.Option('--follow-graduates-hours', help='follow graduated tokens through PumpSwap this many hours past the window (0 = off)')]" = 6.0) -> 'None'` — Fetch pump.fun history into an event directory for `bootstrap` and the research commands.
 - `forward_report(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace')]") -> 'None'` — Paper-ticket scorecard of the ML signals (forward test recorded during stream / stream-train).
 - `init_config(out: "Annotated[Path, typer.Option('--out', '-o', help='YAML file to write')]" = PosixPath('configs/solana.yaml')) -> 'None'` — Write the default Solana configuration.
 - `meta_train(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace')]", archive: "Annotated[Path, typer.Option('--archive', '-a', help='trade archive: Parquet file/directory or SQLite .db')]", table: "Annotated[str | None, typer.Option('--table', help='SQLite table holding the trades')]" = None, maps: "Annotated[list[str] | None, typer.Option('--map', help='field=column, e.g. --map mint=token_ca (repeatable)')]" = None, features: "Annotated[str | None, typer.Option('--features', help='comma-separated feature columns (default: all numeric)')]" = None, return_percent: "Annotated[bool, typer.Option('--return-percent', help='the return column is in percent (50 = +50 %)')]" = False) -> 'None'` — Train the meta-learner on the trading system's own trade archive (only new trades are added).
@@ -5018,7 +5019,8 @@ Stream historical chain activity forward in time, storing nothing.
 
 - `chain(*sources: 'Iterable[Event]') -> 'Iterator[Event]'` — Concatenate event sources in order (e.g. a history replay followed by the live stream).
 - `clean_history(events: 'Iterable[Event]') -> 'tuple[list[Event], dict[str, int]]'` — Keep only tokens whose pump.fun creation is inside the history, SOL-priced throughout.
-- `fetch_history(rpc: 'SolanaRpc', out: 'Any', start_time: 'float', end_time: 'float', segment_seconds: 'float' = 600.0, workers: 'int' = 6, programs: 'list[str] | None' = None, log: 'Any' = None, retries: 'int' = 5, retry_wait: 'float' = 30.0) -> 'dict[str, int]'` — Replay ``[start_time, end_time)`` into ``out`` resumably, then write the cleaned history.
+- `fetch_history(rpc: 'SolanaRpc', out: 'Any', start_time: 'float', end_time: 'float', segment_seconds: 'float' = 600.0, workers: 'int' = 6, programs: 'list[str] | None' = None, log: 'Any' = None, retries: 'int' = 5, retry_wait: 'float' = 30.0, follow_until: 'float | None' = None) -> 'dict[str, int]'` — Replay ``[start_time, end_time)`` into ``out`` resumably, then write the cleaned history.
+- `follow_graduates(rpc: 'SolanaRpc', out: 'Any', events: 'list[Event]', end_time: 'float', segment_seconds: 'float' = 3600.0, workers: 'int' = 6, log: 'Any' = None, retries: 'int' = 5, retry_wait: 'float' = 30.0) -> 'tuple[list[Event], dict[str, int]]'` — Add what graduated tokens did after graduating, up to ``end_time``.
 - **class `HistoryWalker`** — Replays the watched programs' history from ``start_time`` to ``end_time`` (Unix seconds), oldest first, one ``segment_seconds`` segment at a time.
   - `events(self) -> 'Iterator[Event]'` — Yield decoded events in time order, segment by segment, updating :attr:`stats`.
 
@@ -5507,7 +5509,7 @@ Transparent PyTorch training engine.
 
 ## Test inventory
 
-247 test functions (some are parametrised over devices, experts or formats).
+248 test functions (some are parametrised over devices, experts or formats).
 
 ### `tests/test_cli.py`
 
@@ -5864,6 +5866,7 @@ Streaming training: forward history walker over an archival RPC, bounded-memory 
 - `test_tracker_labels_censors_and_roundtrips`
 - `test_clean_history_keeps_only_tokens_created_in_the_window`
 - `test_fetch_history_resumes_and_saves_a_clean_store`
+- `test_follow_graduates_adds_only_post_graduation_trades`
 
 ### `tests/test_solana_suite.py`
 

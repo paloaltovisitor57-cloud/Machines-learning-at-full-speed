@@ -206,8 +206,12 @@ def fetch_history(
     log: Any = None,
     retries: int = 5,
     retry_wait: float = 30.0,
+    follow_until: float | None = None,
 ) -> dict[str, int]:
     """Replay ``[start_time, end_time)`` into ``out`` resumably, then write the cleaned history.
+
+    With ``follow_until``, graduated tokens are also followed through PumpSwap up to that time
+    (see :func:`follow_graduates`), so labels can see peaks past graduation.
 
     Every segment is its own seeking :class:`HistoryWalker` saved under ``out/segments`` when
     complete, so an interrupted run resumes where it stopped and a network error costs at most
@@ -253,5 +257,82 @@ def fetch_history(
     for d in sorted(seg_root.glob("seg_*")):
         merged.extend(EventStore.load(d).sorted())
     kept, stats = clean_history(merged)
+    if follow_until is not None and follow_until > end_time:
+        kept, fstats = follow_graduates(rpc, root, kept, follow_until, workers=workers, log=log)
+        stats |= {f"graduates_{k}": v for k, v in fstats.items()}
     EventStore(kept).save(root)
     return stats | {"segments": n}
+
+
+def follow_graduates(
+    rpc: SolanaRpc,
+    out: Any,
+    events: list[Event],
+    end_time: float,
+    segment_seconds: float = 3600.0,
+    workers: int = 6,
+    log: Any = None,
+    retries: int = 5,
+    retry_wait: float = 30.0,
+) -> tuple[list[Event], dict[str, int]]:
+    """Add what graduated tokens did after graduating, up to ``end_time``.
+
+    The pump.fun history stops at a token's graduation: its PumpSwap trading is another
+    program, so every peak past graduation (where 100x and 1000x runs happen) would be
+    invisible to the labels.  Every token with a :class:`Migration` in ``events`` is followed
+    by its mint address from its first graduation to ``end_time``, in resumable segments saved
+    under ``out/graduates``; only its trades *after* graduation are kept, de-duplicated against
+    ``events``.  Returns the merged events (time-sorted) and counts.
+    """
+    from pathlib import Path
+
+    from nardis_neural.solana.events import LiquidityChange, Migration, Swap
+    from nardis_neural.solana.market import EventStore
+
+    say = log or (lambda _m: None)
+    grad_t: dict[str, float] = {}
+    for e in events:
+        if isinstance(e, Migration) and e.mint not in grad_t:
+            grad_t[e.mint] = e.t
+    if not grad_t:
+        return sorted(events, key=event_sort_key), {"graduates": 0, "added": 0}
+    root = Path(out) / "graduates"
+    root.mkdir(parents=True, exist_ok=True)
+    start = min(grad_t.values())
+    n = max(1, int(-(-(end_time - start) // segment_seconds)))
+    mints = sorted(grad_t)
+    for k in range(n):
+        d = root / f"seg_{k:04d}"
+        if (d / "done").exists():
+            continue
+        lo, hi = start + k * segment_seconds, min(start + (k + 1) * segment_seconds, end_time)
+        active = [m for m in mints if grad_t[m] < hi]
+        for attempt in range(retries):
+            try:
+                w = HistoryWalker(
+                    rpc, lo, hi, programs=active, segment_seconds=segment_seconds, workers=workers
+                )
+                EventStore(list(w.events())).save(d)
+                (d / "done").write_text("1")
+                say(f"graduates {k + 1}/{n}: {len(active)} tokens, {w.stats['transactions']} transactions")
+                break
+            except Exception as exc:
+                say(f"graduates {k + 1}/{n} attempt {attempt + 1} failed: {type(exc).__name__}")
+                if attempt + 1 == retries:
+                    raise
+                time.sleep(retry_wait)
+    seen = {(e.mint, e.t, e.wallet, e.sol_amount) for e in events if isinstance(e, Swap)}
+    added: list[Event] = []
+    for d in sorted(root.glob("seg_*")):
+        for e in EventStore.load(d).sorted():
+            if not isinstance(e, Swap | LiquidityChange) or e.mint not in grad_t or e.t <= grad_t[e.mint]:
+                continue
+            if isinstance(e, Swap):
+                key = (e.mint, e.t, e.wallet, e.sol_amount)
+                # pump.fun tokens have a 1B supply: a larger reserve is a mis-attributed pool
+                if key in seen or e.sol_reserve <= 0 or not 0 < e.token_reserve <= 1.1e9:
+                    continue
+                seen.add(key)
+            added.append(e)
+    merged = sorted([*events, *added], key=event_sort_key)
+    return merged, {"graduates": len(grad_t), "added": len(added)}

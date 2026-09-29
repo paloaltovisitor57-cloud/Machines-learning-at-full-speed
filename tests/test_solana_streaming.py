@@ -220,3 +220,45 @@ def test_fetch_history_resumes_and_saves_a_clean_store(tmp_path) -> None:  # typ
     from nardis_neural.solana.market import EventStore
 
     assert len(EventStore.load(tmp_path)) == 6
+
+
+def test_follow_graduates_adds_only_post_graduation_trades(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from nardis_neural.solana.events import Event, Migration, Swap, TokenLaunch
+    from nardis_neural.solana.ingest import history as hist
+
+    base: list[Event] = [
+        TokenLaunch("g", 0.0, "dev"),
+        Swap("g", 10.0, "w1", True, 1.0, 1e6, 40.0, 8e8),
+        Migration("g", 100.0, "pumpswap", 85.0, 2e8),
+        TokenLaunch("dud", 5.0, "dev2"),
+    ]
+    calls: list[list[str]] = []
+
+    class FakeWalker:
+        def __init__(self, rpc, lo, hi, programs, **kw) -> None:  # type: ignore[no-untyped-def]
+            self.stats = {"transactions": 3, "events": 3}
+            calls.append(list(programs))
+            self.lo = lo
+
+        def events(self):  # type: ignore[no-untyped-def]
+            return [
+                Swap("g", 10.0, "w1", True, 1.0, 1e6, 40.0, 8e8),  # before graduation: dropped
+                Swap("g", self.lo + 50, "w2", True, 2.0, 1e6, 90.0, 1.9e8),  # after: kept
+                Swap("g", self.lo + 60, "bot", True, 2.0, 1e6, 5000.0, 5e10),  # not a pump pool: dropped
+            ]
+
+    real = hist.HistoryWalker
+    hist.HistoryWalker = FakeWalker  # type: ignore[misc,assignment]
+    try:
+        merged, stats = hist.follow_graduates(
+            SolanaRpc(transport=lambda m, p: None), tmp_path, base, 100.0 + 7200.0
+        )
+        assert calls and all(p == ["g"] for p in calls) and stats["graduates"] == 1
+        post = [e for e in merged if isinstance(e, Swap) and e.t > 100.0]
+        assert len(post) == 2 and {e.wallet for e in post} == {"w2"}
+        assert [e.t for e in merged] == sorted(e.t for e in merged)
+        calls.clear()
+        hist.follow_graduates(SolanaRpc(transport=lambda m, p: None), tmp_path, base, 100.0 + 7200.0)
+        assert calls == []  # resumed: every segment already saved
+    finally:
+        hist.HistoryWalker = real  # type: ignore[misc]

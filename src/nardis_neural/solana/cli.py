@@ -581,6 +581,13 @@ def fetch_history_cmd(
         str | None,
         typer.Option("--rpc", envvar="SOLANA_RPC_URL", help="read-only (archival) RPC endpoint URL"),
     ] = None,
+    follow_hours: Annotated[
+        float,
+        typer.Option(
+            "--follow-graduates-hours",
+            help="follow graduated tokens through PumpSwap this many hours past the window (0 = off)",
+        ),
+    ] = 6.0,
 ) -> None:
     """Fetch pump.fun history into an event directory for `bootstrap` and the research commands.
 
@@ -601,6 +608,7 @@ def fetch_history_cmd(
         start_t = end_t - hours * 3600
         out.mkdir(parents=True, exist_ok=True)
         window.write_text(json.dumps({"start": start_t, "end": end_t}))
+    follow_until = min(end_t + follow_hours * 3600, _time.time() - 600) if follow_hours > 0 else None
     stats = fetch_history(
         SolanaRpc(rpc, retries=8, backoff=1.0, timeout=30.0),
         out,
@@ -608,6 +616,7 @@ def fetch_history_cmd(
         end_t,
         workers=workers,
         log=typer.echo,
+        follow_until=follow_until,
     )
     _echo(stats)
 
