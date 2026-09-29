@@ -45,10 +45,11 @@ champion → challenger lifecycle.
 - [Criticality engine](#criticality-engine)
 - [Capital engine](#capital-engine)
 - [Optimal-stopping exits](#optimal-stopping-exits)
+- [Real-data results](#real-data-results)
 - [Optional / not included](#optional--not-included)
 - **[Part II — In depth](#part-ii--in-depth)**: architecture, continual learning, integration,
   Solana layer, edge engine, moonshot engine, Tape Transformer, criticality engine, capital
-  engine, optimal-stopping exits (the full contents of `docs/`)
+  engine, optimal-stopping exits, real-data results (the full contents of `docs/`)
 - **[Part III — Generated reference](#part-iii--generated-reference)**: every CLI command and
   option, every configuration field and default, every feature, every output field, the
   public Python API and the test inventory
@@ -345,7 +346,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 ├── README.md                generated: python -m nardis_neural.docgen (a test keeps it in sync)
 ├── docs/                    OVERVIEW.md · ARCHITECTURE.md · CONTINUAL_LEARNING.md · INTEGRATION.md ·
 │                            SOLANA.md · EDGE.md · MOONSHOT.md · TAPE.md · CRITICALITY.md · CAPITAL.md ·
-│                            STOPPING.md (README sources)
+│                            STOPPING.md · REAL_DATA.md (README sources)
 ├── examples/                nardis_integration.py (runnable, tested)
 ├── src/nardis_neural/
 │   ├── config.py            Pydantic config tree
@@ -585,6 +586,20 @@ executable liquidation value and solves for the exit. See [docs/STOPPING.md](STO
   once on later tokens against hold, timers, the take-profit ladder and the hindsight-best
   exit (`solana stopping-research`; `brain.hold_advice` gives sell-vs-hold values, never
   orders).
+
+## Real-data results
+
+First mainnet measurement: 1.5 hours of pump.fun history (500 192 events, 1 985 SOL-priced
+launches). See [docs/REAL_DATA.md](REAL_DATA.md).
+
+- **Entry: no demonstrated edge yet.** On a window this short most outcome labels are
+  censored, so the entry model cannot be scored; buying every launch lost about 3 % per
+  ticket (−8.3 SOL on 659 tickets).
+- **Exit: transfers.** The log-utility stopping rule lost 39 % less than the ladder and 76 %
+  less than holding, out of sample; its median hold on real launches is 10 seconds.
+- **Crash model: transfers.** Collapse AUC 0.962 / 0.965 / 0.969 within 1 / 5 / 15 minutes,
+  well calibrated.
+- The capital allocator broke even where a flat stake lost 7.8 %.
 
 ## Optional / not included
 
