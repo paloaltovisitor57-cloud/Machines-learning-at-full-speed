@@ -110,3 +110,28 @@ censoring problem as section 2.
   not lose.
 * **Next measurement:** a window of 8 to 12 hours so that entry labels resolve, then the same
   report. The ingest can now do that at 0.63x real time.
+
+## 7. Following graduates through PumpSwap
+
+Of the 1 985 tokens, 22 graduated to PumpSwap. All 22 were followed from creation through their
+PumpSwap trading, about 9 hours after the window, with prices from PumpSwap's own
+`BuyEvent` / `SellEvent` reserves. Multiples are measured from an entry 20 seconds after launch;
+21 tokens had an entry price.
+
+| | tokens |
+|---|---|
+| peak ≥ 2x | 10 |
+| peak ≥ 10x | **2** (31.3x after 1 minute, 28.4x after 17 minutes) |
+| peak ≥ 50x / ≥ 100x | **0** / **0** |
+| worth under 0.1x at their last trade | 15 |
+
+* **Every peak came within 17 minutes of launch, at or before graduation.** After graduating,
+  almost every token lost nearly all of its value within hours, and most stopped trading
+  within 2 hours.
+* On this window, runner mode (holding for the tail) would have been harmful after
+  graduation. Nardis should treat graduation as a *decision point*, not a reason to hold.
+* The first decoding pass mixed other pools into these prices (reserves above the 1 billion
+  supply). They are now decoded from PumpSwap's own events, and the remaining 313 implausible
+  swaps from the fallback heuristic were dropped.
+* One 90-minute window of launches is a small sample for a 1-in-thousands event. 100x runners
+  exist but did not occur here; measuring their frequency needs days of launches.
