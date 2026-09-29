@@ -3,6 +3,48 @@
 The trading system only needs four calls and three schemas. It never needs to know about
 experts, ensembles, normalisation or checkpoints.
 
+## Quickstart: the Solana addon as a sidecar (any language)
+
+Nardis does not need to be written in Python. Run the addon next to it as a local HTTP/JSON
+service and call it from anything:
+
+```bash
+export SOLANA_RPC_URL=https://…                       # read-only RPC; never a wallet key
+nardis-neural solana serve --workspace ws --port 8787   # streams the chain in the background
+```
+
+| call | when Nardis makes it | returns |
+|---|---|---|
+| `GET /health` | at start-up, then periodically | market clock, tracked tokens, installed models, learner status |
+| `GET /ranking?limit=20` | to look for entries | moonshot candidates with `chase_score`, expected multiple, P(≥10x / ≥100x), trust, crash risk, flags |
+| `GET /assess?mint=…` | for one token | the full assessment (risk, tail, tape, edge, guard) |
+| `POST /advise_trade` | **before every trade** | P(win / 10x / 100x) learned from Nardis's own trades, expected multiple, size multiplier 0–2, veto + reason |
+| `POST /settle_trade` | **after every trade closes** | the learner updates (and refits when due) |
+| `POST /hold_advice` | while a position is open | sell-now vs continuation value, P(collapse within 1 / 5 / 15 min) |
+| `POST /allocate` | when sizing | recommended stakes under the capital engine's limits |
+| `POST /save` | on shutdown (also automatic every 5 minutes) | checkpoints the workspace |
+
+```bash
+curl -s localhost:8787/advise_trade -d '{"trade_id": "t-123", "mint": "<mint>",
+     "features": {"nardis_score": 0.82, "signal_strength": 3.1}}'
+# example response: {"p_win": 0.41, "p_10x": 0.05, "p_100x": 0.004, "expected_multiple": 1.12,
+#  "size_multiplier": 1.3, "veto": false, "reason": "learned", "evidence": 212, "source": "learned"}
+
+curl -s localhost:8787/settle_trade -d '{"trade_id": "t-123", "multiple": 1.8, "peak_multiple": 3.1}'
+curl -s localhost:8787/hold_advice -d '{"mint": "<mint>", "t_signal": 1790650000}'
+```
+
+* `features` is any set of named numbers Nardis has for the trade. Keep the names stable
+  between trades; new names are picked up automatically.
+* `multiple` is SOL returned per SOL staked, fees included. `peak_multiple` (optional) is the
+  best the position reached, which sharpens the 10x / 100x learning.
+* Every answer is advice. The service cannot sign or send transactions.
+* Latency on a 4-core CPU: `advise_trade` 1.3 ms median (Nardis's features only,
+  `"with_market": false`), about 20 ms with the addon's full market assessment of the token (the
+  default). Requests are serialised with a lock, since the brain is not thread-safe.
+* Bind to `127.0.0.1` (the default). The API has no authentication, so never expose it to a
+  network without a firewall.
+
 ## 1. Install
 
 ```bash

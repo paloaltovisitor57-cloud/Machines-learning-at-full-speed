@@ -566,6 +566,49 @@ def stopping_research(
     typer.echo(f"stopping model installed in {workspace / 'stopping'}")
 
 
+@app.command("serve")
+def serve(
+    workspace: Annotated[Path, typer.Option("--workspace", "-w", help="Solana workspace")],
+    host: Annotated[str, typer.Option("--host", help="bind address (keep 127.0.0.1 unless firewalled)")] = (
+        "127.0.0.1"
+    ),
+    port: Annotated[int, typer.Option("--port", help="HTTP port")] = 8787,
+    rpc: Annotated[
+        str | None, typer.Option("--rpc", envvar="SOLANA_RPC_URL", help="read-only RPC endpoint URL")
+    ] = None,
+    stream: Annotated[
+        bool,
+        typer.Option("--stream/--no-stream", help="feed the live chain into the brain in the background"),
+    ] = True,
+    poll_interval: Annotated[float, typer.Option("--poll-interval", help="seconds between RPC polls")] = 2.0,
+    device: DeviceOpt = None,
+) -> None:
+    """Run the addon as a local HTTP/JSON sidecar for the trading system (advice only).
+
+    Endpoints: GET /health /ranking /assess; POST /advise_trade /settle_trade /hold_advice
+    /allocate /save.  See docs/INTEGRATION.md."""
+    from nardis_neural.solana.brain import SolanaBrain
+    from nardis_neural.solana.ingest import ChainStreamer, SolanaRpc
+    from nardis_neural.solana.service import AddonService, make_server
+
+    brain = SolanaBrain(workspace, device=device)
+    service = AddonService(brain)
+    if stream:
+        if rpc is None:
+            raise typer.BadParameter("pass --rpc or set SOLANA_RPC_URL, or use --no-stream")
+        streamer = ChainStreamer(SolanaRpc(rpc), state_file=workspace / "stream_cursor.json")
+        service.stream(streamer, poll_interval=poll_interval)
+    server = make_server(service, host, port)
+    typer.echo(f"addon listening on http://{host}:{port} (stream {'on' if stream else 'off'})")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        service.stop()
+
+
 @app.command("forward-report")
 def forward_report(
     workspace: Annotated[Path, typer.Option("--workspace", "-w", help="Solana workspace")],
