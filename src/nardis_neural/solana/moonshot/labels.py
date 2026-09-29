@@ -66,7 +66,8 @@ class MoonshotSpec(BaseModel):
     stop_loss: float = Field(default=0.5, gt=0, lt=1)
     """Before trail activation, the remainder exits when value falls by this fraction of stake."""
     levels: list[float] = Field(default_factory=lambda: [2.0, 5.0, 10.0, 100.0, 1000.0])
-    """Multiples reported as P(M ≥ k)."""
+    """Multiples reported as P(M ≥ k).  Always contains every chase target (2x, 5x, 10x, 100x,
+    1000x): targets left out of a configuration are added back."""
     collapse_drop: float = Field(default=0.5, gt=0, lt=1)
     """A collapse is the ticket's value falling this fraction below its value at entry."""
 
@@ -78,6 +79,10 @@ class MoonshotSpec(BaseModel):
             raise ValueError("ladder levels must be strictly increasing")
         if any(f < 0 for f in self.ladder_fractions) or sum(self.ladder_fractions) > 1 + 1e-9:
             raise ValueError("ladder fractions must be non-negative and sum to at most 1")
+        from nardis_neural.solana.chase import CHASE_TARGETS
+
+        if not set(CHASE_TARGETS) <= set(self.levels):  # the chase is not optional
+            self.levels = sorted(set(self.levels) | set(CHASE_TARGETS))
         return self
 
 

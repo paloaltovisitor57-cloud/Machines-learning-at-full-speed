@@ -72,7 +72,10 @@ nardis-neural solana serve --workspace ws --port 8787 --archive /data/nardis/par
 curl -s localhost:8787/advise_trade -d '{"trade_id": "t-123", "mint": "<mint>",
      "features": {"nardis_score": 0.82, "signal_strength": 3.1}}'
 # example response: {"p_win": 0.41, "p_10x": 0.05, "p_100x": 0.004, "expected_multiple": 1.12,
-#  "size_multiplier": 1.3, "veto": false, "reason": "learned", "evidence": 212, "source": "learned"}
+#  "size_multiplier": 1.3, "veto": false, "reason": "learned; chase 10x (edge 1.6x break-even)",
+#  "evidence": 212, "source": "learned",
+#  "chase": {"p_2x": 0.31, "edge_2x": 1.3, "p_5x": 0.11, "edge_5x": 1.6, "p_10x": 0.05, "edge_10x": 1.6,
+#            "p_100x": 0.004, "edge_100x": 1.3, "chase_target": 10.0, "chase_edge": 1.6, "proven_100x": 0.0, …}}
 
 curl -s localhost:8787/settle_trade -d '{"trade_id": "t-123", "multiple": 1.8, "peak_multiple": 3.1}'
 curl -s localhost:8787/hold_advice -d '{"mint": "<mint>", "t_signal": 1790650000}'

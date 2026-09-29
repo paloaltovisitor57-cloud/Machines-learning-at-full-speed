@@ -39,6 +39,7 @@ PARTS = (
     ("CRITICALITY", "Criticality engine"),
     ("CAPITAL", "Capital engine"),
     ("STOPPING", "Optimal-stopping exits"),
+    ("CHASE", "The chase: 2x to 1000x"),
     ("REAL_DATA", "Real-data results"),
 )
 _ADDR = re.compile(r" at 0x[0-9a-fA-F]+")

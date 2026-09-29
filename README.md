@@ -47,6 +47,7 @@ champion → challenger lifecycle.
 - [Criticality engine](#criticality-engine)
 - [Capital engine](#capital-engine)
 - [Optimal-stopping exits](#optimal-stopping-exits)
+- [The chase](#the-chase)
 - [Real-data results](#real-data-results)
 - [Optional / not included](#optional--not-included)
 - **[Part II — In depth](#part-ii--in-depth)**: architecture, continual learning, integration,
@@ -100,7 +101,7 @@ flowchart TB
 | Continual learning | 3-pool replay (recent FIFO, historical reservoir, protected rare events), 5 sampling strategies, candidate cloning, distillation, EWC, full retraining with configurable weights |
 | Lifecycle | immutable checkpoints, champion/candidate/challenger/retired/failed registry with audit log, shadow mode, 10-gate promotion, manual and optional automatic rollback |
 | Representation | self-supervised pretraining (masked timestep, masked feature, contrastive), embedding export to Parquet/NumPy, KMeans / GMM / HDBSCAN regime discovery |
-| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 233 test functions |
+| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 237 test functions |
 
 ## Quick start
 
@@ -348,7 +349,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 ├── README.md                generated: python -m nardis_neural.docgen (a test keeps it in sync)
 ├── docs/                    OVERVIEW.md · ARCHITECTURE.md · CONTINUAL_LEARNING.md · INTEGRATION.md ·
 │                            SOLANA.md · EDGE.md · MOONSHOT.md · TAPE.md · CRITICALITY.md · CAPITAL.md ·
-│                            STOPPING.md · REAL_DATA.md (README sources)
+│                            STOPPING.md · CHASE.md · REAL_DATA.md (README sources)
 ├── examples/                nardis_integration.py (runnable, tested)
 ├── src/nardis_neural/
 │   ├── config.py            Pydantic config tree
@@ -369,13 +370,13 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │   ├── monitoring/          drift
 │   └── solana/              amm · events · market · wallets · features · labels · dataset ·
 │                            risk · simulator · brain · config · cli · streaming · hawkes ·
-│                            forward · suite · stopping · metalabel · service
+│                            forward · suite · stopping · metalabel · service · chase · archive
 │                            capital/ (allocator · bankroll · overfit · research)
 │                            ingest/ (decoder · rpc · stream · history · encode · pumpfun · base58)
 │                            edge/ (barriers · model · trees · backtest · research)
 │                            moonshot/ (labels · tail · guard · online · research)
 │                            tape/ (features · dataset · model · research · policy)
-└── tests/                   233 test functions incl. synthetic end-to-end pipeline
+└── tests/                   237 test functions incl. synthetic end-to-end pipeline
 ```
 
 ## Testing & quality gates
@@ -588,6 +589,13 @@ executable liquidation value and solves for the exit. See [docs/STOPPING.md](doc
   once on later tokens against hold, timers, the take-profit ladder and the hindsight-best
   exit (`solana stopping-research`; `brain.hold_advice` gives sell-vs-hold values, never
   orders).
+
+## The chase
+
+The addon always chases 2x, 5x, 10x, 100x and 1000x; the targets are a constant, not a setting.
+Every assessment, ranking and trade advice reports each target's probability, its break-even
+probability and the edge ratio, plus the **`chase_target`**: the most ambitious multiple
+that is proven (at least 3 real hits) and +EV. See [docs/CHASE.md](docs/CHASE.md).
 
 ## Real-data results
 
@@ -1200,7 +1208,10 @@ nardis-neural solana serve --workspace ws --port 8787 --archive /data/nardis/par
 curl -s localhost:8787/advise_trade -d '{"trade_id": "t-123", "mint": "<mint>",
      "features": {"nardis_score": 0.82, "signal_strength": 3.1}}'
 # example response: {"p_win": 0.41, "p_10x": 0.05, "p_100x": 0.004, "expected_multiple": 1.12,
-#  "size_multiplier": 1.3, "veto": false, "reason": "learned", "evidence": 212, "source": "learned"}
+#  "size_multiplier": 1.3, "veto": false, "reason": "learned; chase 10x (edge 1.6x break-even)",
+#  "evidence": 212, "source": "learned",
+#  "chase": {"p_2x": 0.31, "edge_2x": 1.3, "p_5x": 0.11, "edge_5x": 1.6, "p_10x": 0.05, "edge_10x": 1.6,
+#            "p_100x": 0.004, "edge_100x": 1.3, "chase_target": 10.0, "chase_edge": 1.6, "proven_100x": 0.0, …}}
 
 curl -s localhost:8787/settle_trade -d '{"trade_id": "t-123", "multiple": 1.8, "peak_multiple": 3.1}'
 curl -s localhost:8787/hold_advice -d '{"mint": "<mint>", "t_signal": 1790650000}'
@@ -2748,6 +2759,69 @@ It is advice for the trading system, not an order. The workspace keeps
 `stopping/REPORT.md`. Fitting takes seconds; the research on a 150-token market takes
 about 10 minutes on a CPU, most of it building the feature snapshots.
 
+## The chase: 2x, 5x, 10x, 100x, 1000x (`nardis_neural.solana.chase`)
+
+The addon always chases the same five multiples. `CHASE_TARGETS = (2, 5, 10, 100, 1000)` is a
+constant, not a setting. Every token assessment, every ranking and every piece of trade
+advice is scored against all five, and a configuration cannot remove them: `MoonshotSpec`
+adds back any target left out of its levels. Tests lock both.
+
+### 1. When is a chase worth it?
+
+A position that misses its target is assumed to end at `L`, a cut loser (0.7x measured on
+real pump.fun data; the learning layer uses the average loser of Nardis's own history once
+it has 20 of them). Chasing `k` has positive expectancy when
+
+```
+p · k + (1 − p) · L > 1   ⇔   p > p* = (1 − L) / (k − L)
+```
+
+| target | 2x | 5x | 10x | 100x | 1000x |
+|---|---|---|---|---|---|
+| break-even P(reach), L = 0.7 | 23 % | 7.0 % | 3.2 % | 0.30 % | 0.030 % |
+
+`edge_{k}x = p / p*`. Above 1 the chase pays on average; 3 means three times the odds needed.
+
+### 2. What every answer carries
+
+For each target: `p_{k}x`, `break_even_{k}x`, `edge_{k}x`, `lift_{k}x` (against the average
+trade, in trade advice) and `proven_{k}x`. Then:
+
+* **`chase_target`**: the most ambitious multiple that is +EV (edge > 1) *and proven*, or 0.
+  This is the number Nardis should aim for on this trade.
+* `chase_edge`: its edge ratio.
+* `tail_ev`: expected multiple of a position that banks each rung it reaches.
+* `crazy_shot`: the edge of the 100x / 1000x chase.
+
+Probabilities are made monotone (reaching 10x implies reaching 5x, and so on).
+
+**Proven means real hits.** A Bayesian prior on a few hundred trades still gives 1000x a
+probability above its 0.03 % break-even. So in trade advice a target can only become the
+`chase_target` once Nardis's history holds at least 3 real hits at that level; until then
+its edge is reported but marked unproven. A token the manipulation guard vetoes is never a
+chase, whatever its tail looks like.
+
+### 3. Where it shows up
+
+| where | fields |
+|---|---|
+| `SolanaAssessment.moonshot` (every assessment) | `chase_target`, `chase_edge`, `tail_ev`, `crazy_shot`, `edge_2x` … `edge_1000x` |
+| `GET /ranking` | the same, per candidate |
+| `TradeAdvice.chase` / `POST /advise_trade` | the full profile for Nardis's proposal, learned from its own trades |
+| `TradeAdvice.size_multiplier` | tilted up (at most 1.5x, within the overall cap of 2) for a proven chase: `1 + 0.25·log2(edge)` |
+| `TradeAdvice.reason` | e.g. `learned; chase 10x (edge 2.4x break-even)` |
+
+The learning layer trains a classifier for every target (win, 2x, 5x, 10x, 100x, 1000x) from
+the peak multiples Nardis reports. Each one needs at least 8 hits and 8 misses before it is
+tried, and it is only deployed if it beats the base rate on Nardis's newest trades.
+
+### 4. What it does not do
+
+It chases returns without betting the account. The size caps, the drawdown governor and the
+daily loss stop stay in force. With 10x hit rates in the low single digits, a strategy
+that stakes everything on each shot is ruined long before the hits compound. Staying in the
+game is what lets a proven 10x edge compound.
+
 ## Real-data results (mainnet pump.fun)
 
 Everything before this page was measured on the simulator. This is the first run on real
@@ -3666,7 +3740,7 @@ Every field, its type, its default and its description. Nested keys use dots, as
 | `trail_activation` | float | 2.0 | Multiple the ticket must reach before the trailing stop on the remainder activates. |
 | `trail_drop` | float | 0.6 | Once active, the remainder exits when value falls this fraction below its running peak. |
 | `stop_loss` | float | 0.5 | Before trail activation, the remainder exits when value falls by this fraction of stake. |
-| `levels` | list[float] | [2.0, 5.0, 10.0, 100.0, 1000.0] | Multiples reported as P(M ≥ k). |
+| `levels` | list[float] | [2.0, 5.0, 10.0, 100.0, 1000.0] | Multiples reported as P(M ≥ k). Always contains every chase target (2x, 5x, 10x, 100x, 1000x): targets left out of a configuration are added back. |
 | `collapse_drop` | float | 0.5 | A collapse is the ticket's value falling this fraction below its value at entry. |
 
 ### Manipulation guard — `GuardConfig`
@@ -4627,6 +4701,13 @@ Capital research: turn a research test period into bankroll and overfitting evid
 - `capital_report(tickets: 'list[TicketRecord]', config_returns: 'dict[str, F64]', chosen: 'str', flat_stake: 'float', initial_equity: 'float' = 100.0, allocator: 'AllocatorConfig | None' = None, draws: 'int' = 300, pbo_blocks: 'int' = 8, haircuts: 'tuple[float, ...]' = (0.6, 0.35), aggressive_fraction: 'float' = 0.05) -> 'dict[str, Any]'` — Flat vs allocator bankroll, bootstrap risk, DSR of ``chosen`` and PBO across configs.
 - `ticket_records(t_entry: 'F64', mints: 'npt.NDArray[np.str_]', t_exit: 'F64', multiple: 'F64', expected: 'F64', kelly: 'F64', epistemic: 'F64', liquidity: 'F64', family: 'list[str]', trust: 'F64 | None' = None) -> 'list[TicketRecord]'` — Pack per-ticket arrays into :class:`TicketRecord` objects.
 
+### `nardis_neural.solana.chase`
+
+The edge the addon always chases: 2x, 5x, 10x, 100x and 1000x.
+
+- `break_even(target: 'float', loss_multiple: 'float' = 0.7) -> 'float'` — Probability of reaching ``target`` above which chasing it has positive expectancy.
+- `chase_profile(p_reach: 'dict[float, float]', loss_multiple: 'float' = 0.7, base_rates: 'dict[float, float] | None' = None, hits: 'dict[float, int] | None' = None, min_hits: 'int' = 3) -> 'dict[str, float]'` — Flat dict of the chase for one opportunity.
+
 ### `nardis_neural.solana.cli`
 
 ``nardis-neural solana …`` commands.
@@ -5289,7 +5370,7 @@ Transparent PyTorch training engine.
 
 ## Test inventory
 
-233 test functions (some are parametrised over devices, experts or formats).
+237 test functions (some are parametrised over devices, experts or formats).
 
 ### `tests/test_cli.py`
 
@@ -5511,6 +5592,13 @@ Capital engine: overfitting statistics, allocator limits and bankroll arithmetic
 - `test_allocator_enforces_every_limit`
 - `test_uncertainty_trust_track_record_and_governors_shrink_stakes`
 - `test_bankroll_locks_capital_and_compounds_exactly`
+
+### `tests/test_solana_chase.py`
+
+- `test_the_chase_targets_are_fixed`
+- `test_break_even_probabilities`
+- `test_chase_target_is_the_craziest_proven_positive_ev_multiple`
+- `test_every_trade_advice_carries_the_chase`
 
 ### `tests/test_solana_edge.py`
 

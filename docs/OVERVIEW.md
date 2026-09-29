@@ -45,6 +45,7 @@ champion → challenger lifecycle.
 - [Criticality engine](#criticality-engine)
 - [Capital engine](#capital-engine)
 - [Optimal-stopping exits](#optimal-stopping-exits)
+- [The chase](#the-chase)
 - [Real-data results](#real-data-results)
 - [Optional / not included](#optional--not-included)
 - **[Part II — In depth](#part-ii--in-depth)**: architecture, continual learning, integration,
@@ -346,7 +347,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 ├── README.md                generated: python -m nardis_neural.docgen (a test keeps it in sync)
 ├── docs/                    OVERVIEW.md · ARCHITECTURE.md · CONTINUAL_LEARNING.md · INTEGRATION.md ·
 │                            SOLANA.md · EDGE.md · MOONSHOT.md · TAPE.md · CRITICALITY.md · CAPITAL.md ·
-│                            STOPPING.md · REAL_DATA.md (README sources)
+│                            STOPPING.md · CHASE.md · REAL_DATA.md (README sources)
 ├── examples/                nardis_integration.py (runnable, tested)
 ├── src/nardis_neural/
 │   ├── config.py            Pydantic config tree
@@ -367,7 +368,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │   ├── monitoring/          drift
 │   └── solana/              amm · events · market · wallets · features · labels · dataset ·
 │                            risk · simulator · brain · config · cli · streaming · hawkes ·
-│                            forward · suite · stopping · metalabel · service
+│                            forward · suite · stopping · metalabel · service · chase · archive
 │                            capital/ (allocator · bankroll · overfit · research)
 │                            ingest/ (decoder · rpc · stream · history · encode · pumpfun · base58)
 │                            edge/ (barriers · model · trees · backtest · research)
@@ -586,6 +587,13 @@ executable liquidation value and solves for the exit. See [docs/STOPPING.md](STO
   once on later tokens against hold, timers, the take-profit ladder and the hindsight-best
   exit (`solana stopping-research`; `brain.hold_advice` gives sell-vs-hold values, never
   orders).
+
+## The chase
+
+The addon always chases 2x, 5x, 10x, 100x and 1000x; the targets are a constant, not a setting.
+Every assessment, ranking and trade advice reports each target's probability, its break-even
+probability and the edge ratio, plus the **`chase_target`**: the most ambitious multiple
+that is proven (at least 3 real hits) and +EV. See [docs/CHASE.md](CHASE.md).
 
 ## Real-data results
 

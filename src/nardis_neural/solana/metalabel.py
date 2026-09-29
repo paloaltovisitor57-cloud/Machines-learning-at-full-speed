@@ -5,11 +5,17 @@ its own past trades, *how good each new proposal is likely to be*, and answers i
 milliseconds before the trade:
 
 * ``p_win``: probability that the trade returns more than it cost;
-* ``p_10x`` / ``p_100x``: probability that it reaches 10x / 100x (from the peak multiple when
-  the trading system reports it, else from the realised multiple);
+* ``chase``: for every fixed chase target (2x, 5x, 10x, 100x, 1000x, see
+  :mod:`nardis_neural.solana.chase`) the probability of reaching it, its break-even probability,
+  the edge ratio, the lift over the trading system's average trade, and the ``chase_target``:
+  the most ambitious multiple that is proven (≥ 3 real hits) and +EV for this proposal.
+  Reaching a target is judged on the peak multiple when the trading system reports it, else
+  on the realised multiple;
+* ``p_10x`` / ``p_100x``: shortcuts for two of the chase probabilities;
 * ``expected_multiple``;
 * ``size_multiplier``: scale for the trading system's own stake, above 1 for proposals that
-  look better than its average trade and below 1 for worse ones, capped at 2;
+  look better than its average trade and below 1 for worse ones, tilted up (at most 1.5x) for
+  a proven tail edge, capped at 2;
 * ``veto`` with a reason, when the proposal matches a pattern that has been losing.
 
 Inputs are whatever named numbers the trading system sends with each proposal, optionally
@@ -38,11 +44,12 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
+from nardis_neural.solana.chase import CHASE_TARGETS, DEFAULT_LOSS_MULTIPLE, chase_profile
 from nardis_neural.solana.edge.trees import TreeEnsemble
 
 F64 = npt.NDArray[np.float64]
-LEVELS = (1.0, 10.0, 100.0)
-"""Outcome thresholds learned: win (> 1x), 10x, 100x."""
+LEVELS = (1.0, *CHASE_TARGETS)
+"""Outcome thresholds learned: win (> 1x) and every chase target (2x, 5x, 10x, 100x, 1000x)."""
 
 
 @dataclass
@@ -84,6 +91,8 @@ class TradeAdvice:
     """Settled trades the answer rests on."""
     source: str
     """``prior`` (base rates) or ``learned`` (deployed model)."""
+    chase: dict[str, float] = field(default_factory=dict)
+    """The chase of 2x / 5x / 10x / 100x / 1000x for this proposal (see :func:`chase_profile`)."""
 
 
 def _sigmoid(z: F64) -> F64:
@@ -172,12 +181,23 @@ class MetaLearner:
                 # E[1 + m] = exp(E[log(1 + m)]) · E[exp(residual)] (Duan's smearing estimator)
                 exp_mult = float(np.exp(self.value_model.predict(x))[0] * self.smear) - 1.0
                 source = "learned"
-        # tails can never be more likely than winning at all
-        p[10.0] = min(p[10.0], p[1.0])
-        p[100.0] = min(p[100.0], p[10.0])
+        # a higher target can never be more likely than a lower one, or than winning at all
+        prev = p[1.0]
+        for lv in CHASE_TARGETS:
+            p[lv] = min(p[lv], prev)
+            prev = p[lv]
+        losers = [m for m in self.multiple if m <= 1.0]
+        loss = float(np.clip(np.mean(losers), 0.0, 0.99)) if len(losers) >= 20 else DEFAULT_LOSS_MULTIPLE
+        hits = {lv: int(self._labels(lv).sum()) if n else 0 for lv in CHASE_TARGETS}
+        chase = chase_profile({lv: p[lv] for lv in CHASE_TARGETS}, loss, base, hits)
         ratio_p = p[1.0] / max(base[1.0], 1e-6)
         ratio_m = exp_mult / max(base_mean, 1e-6) if base_mean > 0 else 1.0
-        size = float(np.clip(ratio_p * ratio_m, 0.0, self.max_size)) if source == "learned" else 1.0
+        size = 1.0
+        if source == "learned":
+            size = ratio_p * ratio_m
+            if chase["chase_target"] > 0:  # a proven, +EV shot at a big multiple earns a tilt
+                size *= min(1.0 + 0.25 * math.log2(max(chase["chase_edge"], 1.0)), 1.5)
+            size = float(np.clip(size, 0.0, self.max_size))
         veto, reason = False, "no settled history" if n == 0 else "base rates only"
         if source == "learned":
             reason = "learned"
@@ -187,6 +207,8 @@ class MetaLearner:
                     f"similar trades have been losing: P(win) {p[1.0]:.0%} against {base[1.0]:.0%} "
                     f"on average, expected {exp_mult:.2f}x"
                 )
+        if chase["chase_target"] > 0 and not veto:
+            reason += f"; chase {chase['chase_target']:g}x (edge {chase['chase_edge']:.1f}x break-even)"
         return TradeAdvice(
             proposal.trade_id,
             p[1.0],
@@ -198,6 +220,7 @@ class MetaLearner:
             reason,
             n,
             source,
+            chase,
         )
 
     # ------------------------------------------------------------------ learning

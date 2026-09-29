@@ -36,6 +36,7 @@ from nardis_neural.solana.capital.allocator import (
     CapitalAllocator,
     Signal,
 )
+from nardis_neural.solana.chase import CHASE_TARGETS, chase_profile
 from nardis_neural.solana.config import CURRENT_FEATURES, RISK_LABELS, SolanaConfig
 from nardis_neural.solana.dataset import SolanaDataset, build_solana_dataset
 from nardis_neural.solana.edge.barriers import BarrierSpec
@@ -452,6 +453,16 @@ class SolanaBrain:
                 "chase_score": 0.0 if vetoed else verdict.trust * float(tp.expected_multiple[i]),
             }
             v |= {f"guard.{name}": value for name, value in verdict.factors.items()}
+            chase = chase_profile({k: v.get(f"p_ge_{k:g}x", 0.0) for k in CHASE_TARGETS})
+            if vetoed:  # a manipulated token is never a chase, whatever its tail looks like
+                chase |= {"chase_target": 0.0, "chase_edge": 0.0}
+            v |= {
+                "chase_target": chase["chase_target"],
+                "chase_edge": chase["chase_edge"],
+                "tail_ev": chase["tail_ev"],
+                "crazy_shot": chase["crazy_shot"],
+            }
+            v |= {f"edge_{k:g}x": chase[f"edge_{k:g}x"] for k in CHASE_TARGETS}
             views.append(v)
             self._vetoes[mint] = verdict.vetoes
         order = sorted(range(len(views)), key=lambda j: -views[j]["chase_score"])
