@@ -612,6 +612,51 @@ def fetch_history_cmd(
     _echo(stats)
 
 
+def _archive_mapping(maps: list[str] | None, features: str | None, percent: bool) -> Any:
+    from nardis_neural.solana.archive import ALIASES, ArchiveMapping
+
+    columns = {}
+    for m in maps or []:
+        if "=" not in m:
+            raise typer.BadParameter(f"--map expects field=column, got {m!r}")
+        fld, col = m.split("=", 1)
+        if fld not in ALIASES:
+            raise typer.BadParameter(f"unknown field {fld!r}; one of {', '.join(ALIASES)}")
+        columns[fld] = col
+    feats = [f.strip() for f in features.split(",") if f.strip()] if features else None
+    return ArchiveMapping(columns, feats, percent)
+
+
+@app.command("meta-train")
+def meta_train(
+    workspace: Annotated[Path, typer.Option("--workspace", "-w", help="Solana workspace")],
+    archive: Annotated[
+        Path, typer.Option("--archive", "-a", help="trade archive: Parquet file/directory or SQLite .db")
+    ],
+    table: Annotated[str | None, typer.Option("--table", help="SQLite table holding the trades")] = None,
+    maps: Annotated[
+        list[str] | None, typer.Option("--map", help="field=column, e.g. --map mint=token_ca (repeatable)")
+    ] = None,
+    features: Annotated[
+        str | None, typer.Option("--features", help="comma-separated feature columns (default: all numeric)")
+    ] = None,
+    return_percent: Annotated[
+        bool, typer.Option("--return-percent", help="the return column is in percent (50 = +50 %)")
+    ] = False,
+) -> None:
+    """Train the meta-learner on the trading system's own trade archive (only new trades are added)."""
+    from nardis_neural.solana.archive import train_from_archive
+    from nardis_neural.solana.metalabel import MetaLearner
+
+    meta_dir = workspace / "meta"
+    learner = MetaLearner.load(meta_dir) if (meta_dir / "meta.json").exists() else MetaLearner()
+    stats = train_from_archive(
+        learner, archive, _archive_mapping(maps, features, return_percent), table=table, log=typer.echo
+    )
+    learner.save(meta_dir)
+    _echo({k: v for k, v in stats.items() if k != "refit"} | {"levels": stats["refit"].get("levels", {})})
+
+
 @app.command("serve")
 def serve(
     workspace: Annotated[Path, typer.Option("--workspace", "-w", help="Solana workspace")],
@@ -631,6 +676,21 @@ def serve(
     pumpswap: Annotated[
         bool,
         typer.Option("--pumpswap/--no-pumpswap", help="also poll PumpSwap (heavy: hundreds of tx/s)"),
+    ] = False,
+    archive: Annotated[
+        Path | None,
+        typer.Option("--archive", "-a", help="trade archive to keep training on (Parquet or SQLite)"),
+    ] = None,
+    table: Annotated[str | None, typer.Option("--table", help="SQLite table holding the trades")] = None,
+    archive_every: Annotated[
+        float, typer.Option("--archive-every", help="seconds between archive rescans")
+    ] = 600.0,
+    maps: Annotated[list[str] | None, typer.Option("--map", help="field=column (repeatable)")] = None,
+    features: Annotated[
+        str | None, typer.Option("--features", help="comma-separated feature columns")
+    ] = None,
+    return_percent: Annotated[
+        bool, typer.Option("--return-percent", help="return column in percent")
     ] = False,
     device: DeviceOpt = None,
 ) -> None:
@@ -657,6 +717,10 @@ def serve(
             workers=workers,
         )
         service.stream(streamer, poll_interval=poll_interval)
+    if archive is not None:
+        service.train_on_archive(
+            archive, _archive_mapping(maps, features, return_percent), table, archive_every
+        )
     server = make_server(service, host, port)
     typer.echo(f"addon listening on http://{host}:{port} (stream {'on' if stream else 'off'})")
     try:

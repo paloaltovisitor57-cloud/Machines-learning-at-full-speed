@@ -109,6 +109,7 @@ class AddonService:
                 "value_model": b.meta.value_model is not None,
             },
             "stream": self.stream_stats,
+            "archive": getattr(self, "archive_stats", {}),
         }
 
     def tokens(self, active_seconds: float) -> dict[str, Any]:
@@ -274,6 +275,33 @@ class AddonService:
                 self._stop.wait(poll_interval)
 
         thread = threading.Thread(target=loop, name="addon-stream", daemon=True)
+        thread.start()
+        return thread
+
+    def train_on_archive(
+        self, path: Any, mapping: Any = None, table: str | None = None, every: float = 600.0
+    ) -> threading.Thread:
+        """Keep training the meta-learner on the trade archive: rescan every ``every`` seconds
+        and learn only the trades it has not seen yet."""
+        from nardis_neural.solana.archive import train_from_archive
+
+        self.archive_stats: dict[str, Any] = {"scans": 0, "errors": 0, "last": {}}
+
+        def loop() -> None:
+            while not self._stop.is_set():
+                try:
+                    with self.lock:
+                        out = train_from_archive(self.brain.meta, path, mapping, table)
+                        if out["added"]:
+                            self.brain.meta.save(self.brain.root / "meta")
+                    self.archive_stats["last"] = {k: v for k, v in out.items() if k != "refit"}
+                    self.archive_stats["scans"] += 1
+                except Exception as exc:  # a half-written file must not kill the sidecar
+                    self.archive_stats["errors"] += 1
+                    self.archive_stats["last_error"] = f"{type(exc).__name__}: {exc}"[:300]
+                self._stop.wait(every)
+
+        thread = threading.Thread(target=loop, name="addon-archive", daemon=True)
         thread.start()
         return thread
 

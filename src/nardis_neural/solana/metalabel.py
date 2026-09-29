@@ -115,6 +115,8 @@ class MetaLearner:
         self.t: list[float] = []
         self.multiple: list[float] = []
         self.peak: list[float] = []
+        self.trade_ids: list[str] = []
+        self._known: set[str] = set()
         self.models: dict[float, TreeEnsemble] = {}
         self.value_model: TreeEnsemble | None = None
         self.smear = 1.0
@@ -199,6 +201,10 @@ class MetaLearner:
         )
 
     # ------------------------------------------------------------------ learning
+    def knows(self, trade_id: str) -> bool:
+        """True when this trade has already been settled into the history."""
+        return trade_id in self._known
+
     def settle(self, outcome: TradeOutcome) -> bool:
         """Record a settled trade; refits when due.  Returns False for unknown trade ids."""
         entry = self.pending.pop(outcome.trade_id, None)
@@ -211,6 +217,8 @@ class MetaLearner:
         self.x.append(feats)
         self.t.append(t)
         self.multiple.append(max(float(outcome.multiple), 0.0))
+        self.trade_ids.append(outcome.trade_id)
+        self._known.add(outcome.trade_id)
         self.peak.append(float(outcome.peak_multiple) if outcome.peak_multiple is not None else 0.0)
         self._since_fit += 1
         if len(self.multiple) >= self.min_trades and self._since_fit >= self.refit_every:
@@ -293,7 +301,13 @@ class MetaLearner:
                 "seed": self.seed,
             },
             "feature_names": self.feature_names,
-            "history": {"x": self.x, "t": self.t, "multiple": self.multiple, "peak": self.peak},
+            "history": {
+                "x": self.x,
+                "t": self.t,
+                "multiple": self.multiple,
+                "peak": self.peak,
+                "trade_ids": self.trade_ids,
+            },
             "pending": {k: [t, f] for k, (t, f) in self.pending.items()},
             "levels": list(self.models),
             "smear": self.smear,
@@ -311,6 +325,8 @@ class MetaLearner:
         m.feature_names = list(meta["feature_names"])
         h = meta["history"]
         m.x, m.t, m.multiple, m.peak = list(h["x"]), list(h["t"]), list(h["multiple"]), list(h["peak"])
+        m.trade_ids = [str(i) for i in h.get("trade_ids", [])]
+        m._known = set(m.trade_ids)
         m.pending = {k: (float(v[0]), dict(v[1])) for k, v in meta["pending"].items()}
         m.models = {float(lv): TreeEnsemble.load(d / f"level_{float(lv):g}.npz") for lv in meta["levels"]}
         if (d / "value.npz").exists():

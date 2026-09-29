@@ -99,3 +99,19 @@ def test_stream_thread_feeds_the_brain(served) -> None:  # type: ignore[no-untyp
         time.sleep(0.02)
     service._stop.set()
     assert service.stream_stats["polls"] >= 3 and service.stream_stats["errors"] >= 1
+
+
+def test_sidecar_keeps_training_on_the_archive(served, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from tests.test_solana_archive import _trades
+
+    service, port = served
+    _trades(30, 7, start=10_000).write_parquet(tmp_path / "trades.parquet")
+    service._stop.clear()  # an earlier test stopped the service threads
+    before = len(service.brain.meta.multiple)
+    service.train_on_archive(tmp_path / "trades.parquet", every=1e9)
+    deadline = time.time() + 30
+    while service.archive_stats["scans"] < 1 and time.time() < deadline:
+        time.sleep(0.05)
+    status, health = _call(port, "GET", "/health")
+    assert status == 200
+    assert health["archive"]["last"]["added"] == 30 and len(service.brain.meta.multiple) == before + 30

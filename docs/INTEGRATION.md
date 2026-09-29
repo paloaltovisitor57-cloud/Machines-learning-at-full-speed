@@ -25,11 +25,35 @@ nardis-neural solana stopping-research --workspace ws      # exit model (--utili
 * For long windows on a 16 GB machine, set `sample_interval_seconds: 60` in `ws/solana.yaml`
   before `tape-research`. 10-second snapshots of a busy day exceed 16 GB.
 
-**Run** (every day):
+**Train on Nardis's trade archive** (SQLite write buffer + Parquet archive):
 
 ```bash
-nardis-neural solana serve --workspace ws --port 8787    # streams the chain in the background
+nardis-neural solana meta-train --workspace ws --archive /data/nardis/parquet          # all history
+nardis-neural solana meta-train --workspace ws --archive /data/nardis/buffer.db --table trades
 ```
+
+**Run** (every day), training itself on the archive as it grows:
+
+```bash
+nardis-neural solana serve --workspace ws --port 8787 --archive /data/nardis/parquet
+```
+
+* The archive is a Parquet file or a directory (read recursively, so date-partitioned layouts
+  work), or an SQLite `.db` with `--table`. The live service rescans it every 10 minutes
+  (`--archive-every`) and learns **only trades it has not seen yet**, by trade id. It is
+  crash-safe: a half-written file is retried at the next scan.
+* Columns are found by common names:
+  `trade_id|id|signature`, `mint|token|token_address`, `entry_time|open_time|…`,
+  `exit_time|close_time|…`, and the result as `multiple`, or `entry_sol` + `exit_sol`, or `return`
+  (fraction; `--return-percent` for percent), plus optional `peak_multiple|max_multiple`.
+  Map anything else with `--map field=column` (repeatable). Timestamps can be Unix seconds,
+  milliseconds or datetimes. Open trades (no result yet) are skipped until they close.
+* **Every other numeric column becomes a feature** (Nardis's signals at entry), or choose them
+  with `--features a,b,c`. Only use values Nardis knew *at entry*; an exit-time column used as
+  a feature would leak the answer.
+* A replay retrains once at the end (not every 25 trades), and the champion / challenger rule
+  applies. The model is deployed only if it beats the base rate on the newest 20 % of the
+  archive.
 
 | call | when Nardis makes it | returns |
 |---|---|---|
