@@ -135,3 +135,35 @@ PumpSwap trading, about 9 hours after the window, with prices from PumpSwap's ow
   swaps from the fallback heuristic were dropped.
 * One 90-minute window of launches is a small sample for a 1-in-thousands event. 100x runners
   exist but did not occur here; measuring their frequency needs days of launches.
+
+## 8. Does the model find the 2x and 10x tokens? (2 h 20 min window, 30-minute horizon)
+
+A second real window: 2 hours 20 minutes of pump.fun (740 050 events, **2 969 SOL-priced
+launches**). Here the outcome is measured over **30 minutes after entry**, so most test
+tokens' outcomes resolve, unlike the 1-hour horizon of section 2. The tail model was trained on
+the earlier 65 % of tokens (34 % of labels censored at the cutoff) and scored once on the 351
+later tokens whose 30-minute outcome is known. It has one entry per token, 20 s to 10 min
+after launch.
+
+| out of sample | tokens | reached 2x | reached 10x | ladder mean / median multiple |
+|---|---|---|---|---|
+| every launch | 351 | 11.4 % (95 % CI 8.5–15.1 %) | 1.1 % (4 tokens) | 0.97x / 0.97x |
+| model's top 25 % by P(≥10x) | 88 | 18.2 % | 2.3 % (2) | 1.08x / 0.95x |
+| model's top 10 % | 35 | 25.7 % (14–42 %) | 2.9 % (1) | 1.00x / 0.97x |
+| **model's top 5 %** | **18** | **44.4 % (25–66 %)** | 5.6 % (1) | **1.17x / 1.09x** |
+| break-even (L = 0.7) | | 23 % | 3.2 % | 1.00x |
+
+Ranking skill, out of sample: **AUC 0.87 for reaching 2x** and **0.78 for reaching 10x**.
+
+* **The ranking is real.** The model's top 5 % reached 2x **3.9 times** as often as an
+  average launch. The 95 % interval (25–66 %) sits above the 23 % break-even for a 2x chase.
+  On a window this short, that is the first real evidence of a +EV chase target (2x), and
+  those tickets returned 1.17x on average against 0.97x for buying everything.
+* **10x is not measurable yet.** Only 4 of 351 test tokens reached 10x within 30 minutes, so
+  the top-5 % rate (1 of 18) could be anywhere from 1 % to 26 %. Judging a 3.2 % break-even
+  needs hundreds more resolved launches, i.e. days of history, not hours.
+* **The ladder captured 1 of the 4 10x tokens** at 10x or more. Selling tranches on the way
+  up banks part of a run, not all of it. Holding the rest for 10x is a decision for the exit
+  model and Nardis.
+* Small samples: 18 tokens in the top 5 %. Treat this as a direction, confirmed or refuted
+  by the forward ledger and the learning layer as Nardis trades.
