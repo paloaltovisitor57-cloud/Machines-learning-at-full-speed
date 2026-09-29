@@ -123,7 +123,7 @@ PumpSwap trading, about 9 hours after the window, with prices from PumpSwap's ow
 | peak ≥ 2x | 10 |
 | peak ≥ 10x | **2** (31.3x after 1 minute, 28.4x after 17 minutes) |
 | peak ≥ 50x / ≥ 100x | **0** / **0** |
-| worth under 0.1x at their last trade | 15 |
+| worth under 0.1x at their last trade | 16 |
 
 * **Every peak came within 17 minutes of launch, at or before graduation.** After graduating,
   almost every token lost nearly all of its value within hours, and most stopped trading
