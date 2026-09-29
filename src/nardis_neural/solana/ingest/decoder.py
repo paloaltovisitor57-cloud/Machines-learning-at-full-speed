@@ -358,7 +358,10 @@ class TransactionDecoder:
         if mint not in self.venue:
             if not self.implicit_launches:
                 return
-            self._launch(out, mint, t, payer, pool.venue, max(s0, 1e-9), max(k0, 1e-9), 0.0, slot)
+            # a pool whose vaults already held funds existed before we saw it: its launch is
+            # inferred (creator unknown), not a creation by this transaction's payer
+            creator = payer if s0 <= 0 and k0 <= 0 else "unknown"
+            self._launch(out, mint, t, creator, pool.venue, max(s0, 1e-9), max(k0, 1e-9), 0.0, slot)
         elif self.venue[mint] == "pump_fun":  # graduation seen through the new pool first
             self.venue[mint] = pool.venue
             out.append(

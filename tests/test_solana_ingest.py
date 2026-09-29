@@ -552,3 +552,19 @@ def test_decoder_skips_non_sol_quoted_curves() -> None:
     later = PumpTrade(MINT, 2_000_000_000, 60_000_000, True, USER, T, 32_000_000_000, 10**15)
     evs = [e for ev in (v2, later) for e in dec.decode(_tx([f"Program data: {encode_event(ev)}"], [PUMP_IX]))]
     assert not any(isinstance(e, Swap) for e in evs) and MINT in dec.non_sol_quoted
+
+
+def test_first_sight_of_an_existing_pool_is_not_a_creation() -> None:
+    dec = TransactionDecoder()
+    pool = pubkey_from_seed("pool")
+    keys = [pubkey_from_seed("vs"), pubkey_from_seed("vt")]
+    ray = {"programId": "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8", "accounts": [], "data": ""}
+    swap = _tx(
+        [],
+        [ray],
+        pre=_vault_rows(pool, 50 * 10**9, 10**15),
+        post=_vault_rows(pool, 51 * 10**9, 98 * 10**13),
+        keys=keys,
+    )
+    launch = next(e for e in dec.decode(swap) if isinstance(e, TokenLaunch))
+    assert launch.creator == "unknown"
