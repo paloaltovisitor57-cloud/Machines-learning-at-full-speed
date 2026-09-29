@@ -58,7 +58,7 @@ nardis-neural solana serve --workspace ws --archive /data/nardis/parquet \
 | `--features` | none | comma-separated feature columns of the archive |
 | `--return-percent` | off | the archive's return column is in percent |
 | `--alert-url` | none | POST each new moonshot candidate as JSON to this URL; without it no alert thread runs |
-| `--alert-target` | `10.0` | chase target of the alerts; must be 2, 5, 10, 100 or 1000 (anything else exits with code 2) |
+| `--alert-target` | `10.0` | chase target of the alerts; with `--alert-url` it must be 2, 5, 10, 100 or 1000 (anything else exits with code 2); without `--alert-url` it is ignored |
 | `--alert-min-edge` | `2.0` | alert when `edge_{target}x` is at least this |
 | `--alert-every` | `5.0` | seconds between alert scans |
 | `--assess-every` | `10.0` | seconds between assessment rounds of the active tokens; `0` turns them off |
@@ -102,8 +102,9 @@ not free of state. The background thread runs the same bookkeeping on its own ev
 ## Conventions
 
 * **Transport.** HTTP/1.0 (the `BaseHTTPRequestHandler` default), one connection per request,
-  one thread per connection (`ThreadingHTTPServer`). Responses are
-  `Content-Type: application/json` with a `Content-Length`.
+  one thread per connection (`ThreadingHTTPServer`). Responses to GET and POST are
+  `Content-Type: application/json` with a `Content-Length`. Other methods get the standard
+  library's HTML 501 (see [Errors](#errors)).
 * **Request bodies.** POST bodies are read by `Content-Length` and parsed as JSON. An empty body
   is `{}`. The request `Content-Type` is not checked. Chunked bodies are not supported: no
   `Content-Length` means an empty body. A negative or non-numeric `Content-Length` is a 400. The
@@ -125,19 +126,21 @@ not free of state. The background thread runs the same bookkeeping on its own ev
 
 ## Errors
 
-Every failed request gets an HTTP status and a JSON body `{"error": …}`, and the server keeps
-running after any of them.
+Every failed GET or POST request gets an HTTP status and a JSON body `{"error": …}`, and the
+server keeps running after any of them. Other methods get the standard library's HTML 501.
 
 | status | when | body |
 |---|---|---|
 | 400 | `Content-Length` negative or not a number (the connection is then closed) | `{"error": "invalid Content-Length"}` |
 | 400 | body is not valid JSON, including invalid UTF-8 and absurdly deep nesting | `{"error": "invalid JSON: <parser message>"}` |
 | 400 | body is valid JSON but not an object | `{"error": "the body must be a JSON object"}` |
-| 400 | the handler raised `KeyError`, `ValueError` or `TypeError` (missing field, bad number, unknown mint, a non-object element in `/ingest`) | `{"error": "<ExceptionType>: <message>"}` |
+| 400 | the handler raised `KeyError`, `ValueError` or `TypeError` (missing field, bad number, unknown mint, a non-object element in `/ingest`, a `features` or `open_stakes` value that is not a JSON object) | `{"error": "<ExceptionType>: <message>"}` |
 | 404 | no route for this method and path (including a wrong method, e.g. `GET /advise_trade`) | `{"error": "unknown endpoint GET /advise_trade"}` |
 | 409 | `/ranking`, `/moonshots` or `/allocate` while no tail model is installed | `{"error": "no tail model installed: run fit_moonshot / solana moonshot-research"}` |
 | 413 | `Content-Length` above 16 MiB (the connection is then closed) | `{"error": "body over 16777216 bytes"}` |
-| 500 | any other exception inside a handler, including a `RuntimeError` while the tail model is installed, or an answer JSON cannot hold | `{"error": "internal error: <ExceptionType>: <message>"}` (cut to 500 characters) |
+| 500 | any other exception inside a handler, including a `RuntimeError` while the tail model is installed | `{"error": "internal error: <ExceptionType>: <message>"}` (cut to 500 characters) |
+| 500 | an answer JSON cannot hold (a value that is not a JSON type) | `{"error": "internal error: <ExceptionType>: <message>"}`, e.g. `internal error: TypeError: Object of type float32 is not JSON serializable` (cut to 500 characters) |
+| 501 | any method other than GET or POST (PUT, DELETE, PATCH, OPTIONS, HEAD) | the standard library's HTML error page (`text/html`), not JSON; HEAD gets an empty body |
 
 Recorded examples:
 
@@ -447,6 +450,7 @@ and `5m`, with upside thresholds 0.05 / 0.12 / 0.25 and downside thresholds 0.05
 
 | key | meaning |
 |---|---|
+| `observation_id`, `model_version`, `timestamp`, `horizons` | `<mint>@<time with 3 decimals>`, the neural model version (same as the top-level `model_version`), the market time of the forecast, and the horizon names that key every per-horizon object |
 | `expected_returns` | expected log return per horizon |
 | `return_std`, `return_quantiles` (`q10`, `q50`, `q90`) | spread and quantiles of the return per horizon |
 | `upside_probabilities` | calibrated P(log return > upside threshold) per horizon |
@@ -613,7 +617,8 @@ Learning rules ([metalabel.py](../src/nardis_neural/solana/metalabel.py)): base 
 trades have settled; then a refit every 25 new trades; a level's classifier needs at least 8
 positives; a model is deployed only if it beats the base rate on the newest 20 % of trades.
 
-**Errors:** 400 without `trade_id` or `mint`, or with a non-numeric feature value.
+**Errors:** 400 without `trade_id` or `mint`, with a non-numeric feature value, or when
+`features` is not a JSON object.
 
 **Side effects:** the proposal (with its features, frozen now) is stored as pending under
 `trade_id`, replacing any earlier pending proposal with the same id. It is persisted by the next
@@ -753,7 +758,7 @@ expected edge first.
 | `mint` | string | candidate |
 | `stake_sol` | float | recommended stake in SOL; 0 when cut |
 | `fraction` | float | `stake_sol / equity_sol` |
-| `reason` | string | binding limit: `sized`, `position cap`, `liquidity cap`, `family cap`, `exposure cap`, `position count cap`, any of these plus ` (below minimum)` when the stake fell under 0.02 SOL, `already open`, `no edge`, `drawdown governor`, `daily loss stop` |
+| `reason` | string | binding limit: `sized`, `position cap`, `liquidity cap`, `family cap`, `exposure cap`, `position count cap`, a stake that falls under 0.02 SOL is returned as 0 with ` (below minimum)` added to its binding reason (for example `sized (below minimum)`), a cap that leaves nothing keeps its plain reason (for example `position count cap`), `already open`, `no edge`, `drawdown governor`, `daily loss stop` |
 
 ```bash
 curl -s localhost:8787/allocate -d '{"equity_sol": 10.0}'
@@ -781,15 +786,19 @@ Notes:
 * The book is remembered across calls and restarts in `capital/book.json` (written atomically).
   The first call of a market day records `equity_sol` as the day's opening equity; a call with
   `day_start_equity_sol` overrides it. The day is the UTC day of the **market clock**
-  (`market_time // 86400`), not of the wall clock. Once equity is more than 15 % below the
-  opening, every candidate gets `daily loss stop` for the rest of that day.
+  (`market_time // 86400`), not of the wall clock. Once `equity_sol` is more than 15 % below
+  the opening, every candidate gets `daily loss stop`. The check runs again on every call with
+  the equity passed, so the stop lifts if a later call reports equity within 15 % of the
+  opening (recorded: 10 opening, 8 → `daily loss stop`, then 9.5 → `sized`). It is not
+  latched for the rest of the day.
 * The HTTP endpoint and `solana allocate` share the same file, so a CLI call changes the book the
   sidecar sees. `solana allocate --day-start-equity` sets the same value.
 * `open_stakes` count toward their creator family's 8 % cap: each open mint is mapped to its
   creator family when the market knows it.
 * Pass `peak_equity_sol` on every call. Without it the drawdown governor sees no drawdown.
 * The CLI `solana allocate` prints the track-record scale; this endpoint does not.
-* Errors: 409 without a tail model; 400 without `equity_sol`.
+* Errors: 409 without a tail model; 400 without `equity_sol` or when `open_stakes` is not a JSON
+  object.
 * Cost: as `/ranking` (27 to 46 ms on the toy workspace).
 
 ## POST /ingest
@@ -821,7 +830,8 @@ curl -s localhost:8787/ingest -d @batch.json      # {"transactions": [ … ]}
 ```
 
 That call carried 1956 synthetic transactions for 3 simulated tokens and took 128 ms. Recorded
-edge cases, in order:
+edge cases (the first nine rows in the order they were sent; the /health example's `ingest`
+counters include all of them):
 
 | request | status and response |
 |---|---|
@@ -830,9 +840,10 @@ edge cases, in order:
 | 3 new transactions with `"meta": null` (and a `transaction` object with signatures) | 200 `{"events": 0, "rejected": 0, "undecodable_transactions": 3, "duplicates": 0}` |
 | the same 3 resent complete | 200 `{"events": 3, "rejected": 0, "undecodable_transactions": 0, "duplicates": 0}`: ingested, not duplicates |
 | `{"transactions": [{"slot": 1, "meta": null}]}` | 200 `{"events": 0, "rejected": 0, "undecodable_transactions": 1, "duplicates": 0}` |
-| a `meta` object but no `transaction.message` | 200 `{"events": 0, "rejected": 0, "undecodable_transactions": 1, "duplicates": 0}` |
 | a failed transaction (`meta.err` not null) | 200 `{"events": 0, "rejected": 0, "undecodable_transactions": 0, "duplicates": 0}` (ignored, not counted) |
 | `{"transactions": [{"slot": "abc"}]}` | 400 `ValueError: invalid literal for int() with base 10: 'abc'` |
+| a `transaction` object with `"meta": null` (a single push) | 200 `{"events": 0, "rejected": 0, "undecodable_transactions": 1, "duplicates": 0}` |
+| a `meta` object but no `transaction.message` | 200 `{"events": 0, "rejected": 0, "undecodable_transactions": 1, "duplicates": 0}` |
 | `{"transactions": "nope"}` | 400 `ValueError: transactions must be a list` |
 | `{"transactions": ["x"]}` | 400 `ValueError: every transaction must be a JSON object` (nothing in the batch is ingested) |
 | `{}` | 400 `KeyError: 'transactions'` |
@@ -889,7 +900,7 @@ nardis-neural solana serve --workspace ws --port 8787 \
 | option | default | meaning |
 |---|---|---|
 | `--alert-url` | none | receiver URL; without it no alert thread runs |
-| `--alert-target` | `10.0` | chase target; 2, 5, 10, 100 or 1000. Any other value exits with code 2 and `Invalid value: --alert-target must be one of 2, 5, 10, 100, 1000` |
+| `--alert-target` | `10.0` | chase target; 2, 5, 10, 100 or 1000. With `--alert-url`, any other value exits with code 2 and `Invalid value: --alert-target must be one of 2, 5, 10, 100, 1000`; without `--alert-url` the option is ignored |
 | `--alert-min-edge` | `2.0` | send a candidate when `edge_{target}x` is at least this |
 | `--alert-every` | `5.0` | seconds between scans |
 
@@ -953,7 +964,7 @@ Behaviour:
 with a local receiver on 127.0.0.1 that answered 204:
 
 * in-process, `alerts(url, target=2.0, min_edge=0.0, every=0.2)`: three scans produced one POST
-  for the one qualifying mint (`scans: 3, sent: 1, errors: 0`), and 55 scans later still one;
+  for the one qualifying mint (`scans: 3, sent: 1, errors: 0`), and 12 s later, after 55 scans in total, still one;
 * the real command, `solana serve --no-stream --alert-url … --alert-target 2 --alert-min-edge 1
   --alert-every 1`: the receiver got one POST with `Content-Type: application/json` and the
   payload above; `/health` showed `"alerts": {"scans": 4, "sent": 1, "errors": 0, …}` after 4 s.

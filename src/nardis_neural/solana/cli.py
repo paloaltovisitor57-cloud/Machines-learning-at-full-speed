@@ -300,6 +300,13 @@ def stream(
     maintenance_every: Annotated[
         float, typer.Option("--maintenance-every", help="seconds between maintenance runs")
     ] = 600.0,
+    bounded_memory: Annotated[
+        bool,
+        typer.Option(
+            "--bounded-memory/--keep-history",
+            help="keep no event history and forget tokens idle for 2 h (constant memory)",
+        ),
+    ] = True,
     device: DeviceOpt = None,
 ) -> None:
     """Stream live chain activity into a Solana workspace (read-only) and emit assessments."""
@@ -309,6 +316,8 @@ def stream(
     if rpc is None:
         raise typer.BadParameter("pass --rpc or set SOLANA_RPC_URL")
     brain = SolanaBrain(workspace, device=device)
+    if bounded_memory and not brain.streaming:
+        brain.enable_streaming()
     streamer = ChainStreamer(SolanaRpc(rpc), state_file=workspace / "stream_cursor.json")
     fh = out.open("a") if out is not None else None
     try:

@@ -250,8 +250,10 @@ flowchart LR
   the event: SOL in + tokens out is a buy, the reverse a sell, both in a liquidity add,
   both out a removal. Post-transaction vault balances are the reserves. For
   concentrated-liquidity venues the reserves are re-expressed so that price equals the
-  execution price. Tokens first seen on an AMM get an implicit launch, with mint and
-  freeze authority looked up via `getAccountInfo`.
+  execution price. Tokens first seen on an AMM get an implicit launch. In the live stream
+  (`serve`, `stream`) their mint and freeze authority are looked up once via
+  `getAccountInfo`. `backfill`, history replays (`fetch-history`, `stream-train`) and
+  `POST /ingest` make no lookup and assume both are revoked.
 * **SOL transfers** of at least `min_transfer_sol` become funding edges.
   **Jito tips** (transfers to the eight tip accounts) and **priority fees**
   (`fee − 5000 × signatures`) are attached to the transaction's first swap.
@@ -262,12 +264,20 @@ flowchart LR
 * `SolanaRpc` is a standard-library JSON-RPC client that only allows query methods
   (`sendTransaction`, airdrops and so on raise `PermissionError`). It retries 429 and
   5xx responses with exponential backoff.
-* `ChainStreamer` keeps a persisted per-program cursor and pages back to it on every
-  poll, so bursts are never dropped. A backlog above `max_backlog` is counted in `gaps`.
-  It de-duplicates signatures seen by several programs and decodes in slot order.
+* `ChainStreamer` keeps a per-program cursor and pages back to it on every poll, so bursts
+  are never dropped. A backlog above `max_backlog` is counted in `gaps`. It de-duplicates
+  signatures seen by several programs and decodes in slot order.
+* The cursor advances only after a whole poll has been fetched and decoded; a failed poll is
+  retried in full. After `max_failed_polls` (3) failed polls in a row, a transaction whose
+  fetch still fails is skipped and counted in `fetch_errors`. A transaction the decoder
+  rejects is skipped alone and counted in `decode_errors`.
+* `poll()` does not write the cursor file. The consumer calls `commit()` right after it has
+  checkpointed what it ingested, so a restart replays from the checkpoint instead of skipping
+  past it. `run_live` and the sidecar do this.
 * `run_live` ingests, assesses every `assess_every` seconds (writing JSONL), resolves
   matured outcomes and runs maintenance periodically. Malformed or out-of-order events are
-  counted and skipped, never crashing the loop.
+  counted and skipped, never crashing the loop. On Ctrl-C or an error it ingests the rest of
+  the poll in hand, saves the brain and commits the cursor.
 
 **Verification.** `encode.py` renders market events back into realistic transaction JSON.
 The test suite round-trips a whole simulated market through transactions and gets

@@ -549,7 +549,53 @@ def test_run_live_loop_mechanics() -> None:
         clock=lambda: float(next(ticks)),
     )
     assert stats["polls"] == 5 and stats["events"] == brain.ingested > 0 and brain.saved
-    assert stats["maintenance"] >= 1
+    assert stats["maintenance"] >= 1 and stats["evicted"] == 0  # not in streaming mode
+
+
+def test_run_live_evicts_idle_tokens_in_streaming_mode() -> None:
+    class StreamingBrain:
+        streaming = True
+
+        def __init__(self) -> None:
+            self.evictions = 0
+
+        def ingest(self, e: Any) -> None:
+            pass
+
+        def assess_active(self) -> list[Any]:
+            return []
+
+        def resolve(self) -> int:
+            return 0
+
+        def evict(self) -> list[str]:
+            self.evictions += 1
+            return ["gone-mint"]
+
+        def maintenance(self) -> dict[str, Any]:
+            return {}
+
+        def save(self) -> None:
+            pass
+
+    store, _ = simulate_launches(LaunchSimSpec(n_tokens=2, seed=1, n_retail=50, duration_seconds=900))
+    chain = FakeChain(events_to_transactions(store.events), per_poll=500)
+    streamer = ChainStreamer(SolanaRpc(transport=chain))
+    forgotten: list[str] = []
+    streamer.decoder.forget = forgotten.extend  # type: ignore[method-assign,assignment]
+    ticks = iter(range(0, 10_000, 7))
+    brain = StreamingBrain()
+    stats = run_live(
+        brain,
+        streamer,
+        assess_every=10,
+        maintenance_every=20,
+        max_polls=5,
+        sleep=lambda s: None,
+        clock=lambda: float(next(ticks)),
+    )
+    assert brain.evictions == stats["maintenance"] >= 1
+    assert stats["evicted"] == len(forgotten) == brain.evictions and set(forgotten) == {"gone-mint"}
 
 
 def test_chain_to_brain_integration(tmp_path: Path) -> None:

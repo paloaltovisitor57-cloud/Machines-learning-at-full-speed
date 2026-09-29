@@ -161,7 +161,7 @@ class CapitalAllocator:
             if n_open >= cfg.max_positions:
                 stake, reason = 0.0, "position count cap"
             if stake < cfg.min_stake_sol:
-                out.append(Allocation(s.mint, 0.0, 0.0, reason if stake > 0 else reason + " (below minimum)"))
+                out.append(Allocation(s.mint, 0.0, 0.0, reason + " (below minimum)" if stake > 0 else reason))
                 continue
             exposure += stake
             n_open += 1

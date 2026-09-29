@@ -34,8 +34,9 @@ fraction = lottery Kelly × kelly_scale × trust × exp(−epistemic / uncertain
   tickets, clipped to [0.25, 1.25]. When live results fall short of what the model
   promised, every stake shrinks in proportion.
 * The **drawdown governor** scales stakes linearly from 1 at the equity peak to 0 at
-  `max_drawdown` (35 %). The **daily loss stop** allows no new positions after losing 15 %
-  of the day's opening equity.
+  `max_drawdown` (35 %). The **daily loss stop** allows no new positions while the equity
+  passed in is more than 15 % below the day's opening equity; it is checked on every call, not
+  latched.
 
 Then the limits, each reported as the binding `reason`:
 
@@ -51,6 +52,12 @@ for a in brain.allocate(equity_sol=100.0, open_stakes={"Mint…": 1.2}, peak_equ
 ```
 
 The command-line equivalent is `nardis-neural solana allocate --workspace ws --equity 100`.
+
+`brain.allocate` remembers its book across calls and restarts in `ws/capital/book.json`: the
+first call of a UTC day of the market clock records `equity_sol` as that day's opening equity,
+which the daily loss stop compares against; `day_start_equity_sol=` (CLI `--day-start-equity`,
+HTTP `day_start_equity_sol`) sets it explicitly. Open stakes count toward their creator family's
+cap. The peak for the drawdown governor is not remembered: pass `peak_equity_sol` on every call.
 
 ## 2. Bankroll simulator (`bankroll.py`)
 

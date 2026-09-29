@@ -113,3 +113,9 @@ def test_bankroll_locks_capital_and_compounds_exactly() -> None:
     assert sized["tickets_taken"] == 3 and sized["final_equity"] > 100.0
     risk = bootstrap_book(tickets, None, initial_equity=10.0, flat_stake=1.0, draws=50)
     assert 0 <= risk["prob_ruin"] <= risk["prob_loss"] <= 1
+
+
+def test_a_stake_cut_below_the_minimum_says_so() -> None:
+    book = BookState(equity=10.0, peak_equity=10.0)
+    small = CapitalAllocator().allocate([Signal("m", 0.0, 2.0, 0.001)], book)
+    assert small[0].stake_sol == 0.0 and small[0].reason.endswith("(below minimum)")

@@ -36,9 +36,16 @@ Probabilities are made monotone (reaching 10x implies reaching 5x, and so on).
 
 **Proven means real hits.** A Bayesian prior on a few hundred trades still gives 1000x a
 probability above its 0.03 % break-even. So in trade advice a target can only become the
-`chase_target` once Nardis's history holds at least 3 real hits at that level; until then
-its edge is reported but marked unproven. A token the manipulation guard vetoes is never a
-chase, whatever its tail looks like.
+`chase_target` once Nardis's history holds at least 3 real hits at that level. Until then its
+probability is capped at its break-even (`edge_{k}x` at most 1, `proven_{k}x` 0), and
+`tail_ev` counts only proven rungs: with no trades at all every edge is 1.0 and `tail_ev` is
+0.7. A token the manipulation guard vetoes is never a chase, whatever its tail looks like.
+
+**The market view is not hit-gated.** Token assessments, `GET /ranking`, `GET /moonshots` and
+the push alerts score the tail model's probabilities with no hit counts, so every target counts
+as proven there and a market-side `chase_target` can be 100 or 1000 on model probabilities
+alone. The far tail has never been observed in real data. Read that view as a ranking, not as
+odds; the hit-gated target is the one in trade advice.
 
 ## 3. Where it shows up
 

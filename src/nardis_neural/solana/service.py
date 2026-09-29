@@ -287,7 +287,7 @@ class AddonService:
             str(p["trade_id"]),
             str(p["mint"]),
             float(p.get("t", self.brain.market.now)),
-            {str(k): float(v) for k, v in (p.get("features") or {}).items()},
+            {str(k): float(v) for k, v in _object(p, "features").items()},
         )
         with_market = bool(p.get("with_market", True))
         return asdict(self.brain.advise_trade(proposal, with_market=with_market))
@@ -313,7 +313,7 @@ class AddonService:
 
     def allocate(self, p: dict[str, Any]) -> dict[str, Any]:
         equity = float(p["equity_sol"])
-        stakes = {str(k): float(v) for k, v in (p.get("open_stakes") or {}).items()}
+        stakes = {str(k): float(v) for k, v in _object(p, "open_stakes").items()}
         peak = float(p["peak_equity_sol"]) if p.get("peak_equity_sol") is not None else None
         day = p.get("day_start_equity_sol")
         day_start = float(day) if day is not None else None
@@ -578,6 +578,14 @@ class AddonService:
         self._checkpoint()
 
 
+def _object(p: dict[str, Any], key: str) -> dict[str, Any]:
+    """``p[key]`` as a JSON object ({} when absent); anything else is a bad request."""
+    value = p.get(key) or {}
+    if not isinstance(value, dict):
+        raise ValueError(f"{key} must be a JSON object of name: number")
+    return value
+
+
 def _signature(tx: dict[str, Any]) -> str | None:
     """The transaction's first signature, if the JSON carries one."""
     inner = tx.get("transaction")
@@ -603,7 +611,8 @@ def make_server(service: AddonService, host: str = "127.0.0.1", port: int = 8787
             try:
                 data = json.dumps(body).encode()
             except (TypeError, ValueError) as exc:  # a value JSON cannot hold
-                status, data = 500, json.dumps({"error": f"internal error: {exc}"}).encode()
+                error = f"internal error: {type(exc).__name__}: {exc}"[:500]
+                status, data = 500, json.dumps({"error": error}).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))

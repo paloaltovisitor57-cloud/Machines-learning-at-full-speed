@@ -2,11 +2,13 @@
 
 This is the first document to read when a coding session opens both repositories, this one
 (`nardis-neural`) and Nardis, to merge them. It says what this repository is, how it plugs into
-Nardis, how to merge and run it, what is proven, what is broken and what is left to do. The
+Nardis, how to merge and run it, what is proven, what is still open and what is left to do. The
 per-endpoint HTTP contract is in [API.md](API.md). Everything else links to the in-depth docs in
 this folder.
 
-State as of 29 September 2026, branch `solana-neural-ml-addon`, head `c40edaa`.
+State as of 29 September 2026, branch `solana-neural-ml-addon`. The code is at `d8785d4` plus
+one small follow-up, "Fix four defects found in the docs review" (defects D1 to D4 below); every
+other later commit changes only `docs/` and `README.md`.
 
 ## What this repository is, and is not
 
@@ -49,7 +51,7 @@ There are two ways for Nardis to call the addon.
 | per-call cost | JSON over loopback; `advise_trade` 1.3 ms median without the market view, about 20 ms with it (4-core CPU, [INTEGRATION.md](INTEGRATION.md)) | no serialisation; on the tiny test workspace `assess` about 20 ms and `advise_trade(..., with_market=False)` about 0.07 ms |
 | dependencies in Nardis's environment | none | PyTorch, NumPy, Polars, scikit-learn, SciPy, Pydantic; `import nardis_neural.solana` took 2.7 s |
 | locking | done by `AddonService` (one lock) | Nardis must serialise every call itself |
-| upkeep (`resolve`, `maintenance`, `save`, eviction) | done by the stream thread (only with the stream on) | Nardis must schedule it, or reuse `AddonService.stream` |
+| upkeep (assessment rounds, `resolve`, `maintenance`, `save`, eviction) | done by the sidecar's background thread, with or without the RPC stream | Nardis must schedule it, or reuse `AddonService.stream` |
 | crash isolation | separate process | a crash in the addon is a crash in Nardis |
 
 **Recommendation: run the sidecar and call it over HTTP on `127.0.0.1`.** Reasons:
@@ -77,9 +79,10 @@ sequenceDiagram
     participant A as nardis-neural sidecar
     participant C as Solana RPC (read-only)
     participant R as Nardis alert receiver
-    loop every 2 s (stream thread)
+    loop every 2 s (background thread)
         A->>C: getSignaturesForAddress, getTransaction
         C-->>A: pump.fun transactions
+        Note over A: every 10 s assess active tokens and resolve outcomes
     end
     N->>A: GET /health
     A-->>N: models installed, learner and stream status
@@ -87,7 +90,7 @@ sequenceDiagram
         N->>A: GET /moonshots?target=2&min_edge=1 or GET /ranking
         A-->>N: candidates with p_ge_kx, edge_kx, trust, flags, p_collapse
     end
-    opt push alerts (Python only today, no serve flag)
+    opt push alerts (serve --alert-url)
         A-)R: POST moonshot candidate
     end
     N->>A: POST /advise_trade (trade_id, mint, features)
@@ -109,23 +112,24 @@ sequenceDiagram
 
 | # | call | when | why |
 |---|---|---|---|
-| 1 | `GET /health` | at start-up and on a timer | check `ok`, which `models` are installed, stream counters, learner status |
-| 2 | `GET /moonshots?target=K&min_edge=E` or `GET /ranking` | on a timer | candidates at entry; polling also feeds continual learning and the forward-test ledger, because `serve` has no assessment timer of its own |
+| 1 | `GET /health` | at start-up and on a timer | check `ok`, which `models` are installed, stream and ingest counters, learner status |
+| 2 | `GET /moonshots?target=K&min_edge=E` or `GET /ranking`, or receive `--alert-url` pushes | on a timer, or as pushed | candidates at entry; the sidecar's own assessment round (every 10 s) already feeds continual learning and the forward-test ledger |
 | 3 | `POST /advise_trade` | before **every** trade, with a unique `trade_id` and Nardis's own signals as `features` | scores the proposal and records it as pending; a trade that was never advised cannot be learned |
 | 4 | `POST /hold_advice` | while a position is open | sell-now versus hold, and crash odds |
 | 5 | `POST /settle_trade` | after **every** close, with `multiple` net of fees and `peak_multiple` when known | this is where learning from Nardis happens |
 
-With `serve --no-stream` (Nardis pushes transactions to `POST /ingest`), add `POST /save` on a
-timer and before shutdown. Error handling: 400 is a client bug, 409 is "model not installed", a
-closed connection or a timeout is "no advice". Never block trading on the sidecar being up.
-Full contract: [API.md](API.md).
+With `serve --no-stream`, Nardis pushes transactions to `POST /ingest` once each, in slot order;
+repeats are skipped by signature. The sidecar saves every 5 minutes in both modes and on Ctrl-C or
+SIGTERM. Error handling: 400 is a client bug, 409 is "model not installed", 413 is a body over
+16 MiB, 500 or a timeout is "no advice". Never block trading on the sidecar being up. Full
+contract: [API.md](API.md).
 
 ## Merging the repositories
 
 The source is branch `solana-neural-ml-addon` of
 `https://github.com/paloaltovisitor57-cloud/Machines-learning-at-full-speed` (the `origin`
-remote). Its history is 55 commits from a single root commit (`3708a1e`), 167 tracked files, and
-`.git` is about 10 MB.
+remote). At `d8785d4` its history is 57 commits from a single root commit (`3708a1e`), 171
+tracked files, and `.git` is about 11 MB.
 
 There are three options. They differ in where the code lives and how Nardis calls it, and they
 combine: the recommendation uses (a1) for the code and (c) for the runtime.
@@ -166,7 +170,8 @@ git subtree add --prefix=nardis-neural \
     https://github.com/paloaltovisitor57-cloud/Machines-learning-at-full-speed solana-neural-ml-addon
 ```
 
-Both were tried on a scratch repository. Each brought in all 167 tracked files, including the
+Both were tried on a scratch repository, at a time when the branch had 167 tracked files. Each
+brought in all of them, including the
 14 files of `src/nardis_neural/models` and the 7 of `src/nardis_neural/data`. After (a2),
 `git log -- nardis-neural/<file>` shows only the subtree merge commit, because the old commits
 use the old paths. After (a1), `git log --follow -- nardis-neural/<file>` shows the original
@@ -239,9 +244,9 @@ environment still works from the same subdirectory.
 2. **Branch.** In Nardis: `git switch -c merge-nardis-neural`.
 3. **Merge with history** (option a1): move everything into `nardis-neural/` in a throwaway
    clone, then `git merge --allow-unrelated-histories` into Nardis.
-4. **Check the files arrived.** `git ls-files nardis-neural | wc -l` prints 167 plus any files
-   added since this document (this document and [API.md](API.md) make 169);
-   `git ls-files nardis-neural/src/nardis_neural/models | wc -l` prints 14 and
+4. **Check the files arrived.** `git ls-files nardis-neural | wc -l` prints 171 at `d8785d4`,
+   plus any files added since; `git ls-files nardis-neural/src/nardis_neural/models | wc -l`
+   prints 14 and
    `git ls-files nardis-neural/src/nardis_neural/data | wc -l` prints 7.
 5. **Check `.gitignore`.** No Nardis rule may hide `nardis-neural/src/nardis_neural/data` or
    `…/models`: `git check-ignore -v nardis-neural/src/nardis_neural/models/new.py` must print
@@ -264,9 +269,8 @@ environment still works from the same subdirectory.
     same run as Nardis's own `tests` package): `pytest -m "not slow"`, then `pytest`.
 11. **Docs.** If anything in `docs/` changed, run `python -m nardis_neural.docgen`, commit the
     README, then `python -m nardis_neural.docgen --check` must exit 0. This document and
-    [API.md](API.md) are not in the README until they are added to `PARTS` in
-    [docgen.py](../src/nardis_neural/docgen.py); adding them is optional and needs a README
-    regeneration.
+    [API.md](API.md) are the first two entries of `PARTS` in
+    [docgen.py](../src/nardis_neural/docgen.py), so they are part of the README.
 12. **Workspace.** Point the sidecar at an existing workspace, or build one (see the
     [Setup runbook](#setup-runbook)). Keep workspaces out of git (`/workspaces/` is ignored in the
     addon's tree only).
@@ -277,7 +281,8 @@ environment still works from the same subdirectory.
     ```
     Use `--rpc` or `SOLANA_RPC_URL` and drop `--no-stream` for the live feed. A workspace with no
     research models installed is enough for a smoke test: `/health` then answers `"ok": true`
-    with all four `models` flags false (checked on a tiny simulated workspace).
+    with `"risk": true` and the other five `models` flags false (checked on a tiny simulated
+    workspace).
 14. **Done when:** tests pass, `docgen --check` passes, and the sidecar's `/health` answers with
     `"ok": true`.
 
@@ -317,14 +322,19 @@ pytest                                                      # everything; CUDA /
 ruff check . && ruff format --check src tests examples && mypy
 ```
 
-* The two test files above pass on a 4-core CPU box (8 tests, about 20 s, of which 13.7 s is the
-  service fixture training a tiny workspace).
+* The two test files above hold 19 tests at `d8785d4` (9 at `cecfa9c`). Before the hand-off
+  guide (at `c40edaa`) they held 8 and took about 20 s on a 4-core CPU box, of which 13.7 s was the service fixture training a
+  tiny workspace; the larger set was not timed. `test_readme_is_generated_and_up_to_date` fails
+  until the README is regenerated after a docs change (`python -m nardis_neural.docgen`).
 * `nardis-neural hardware` on a 4-core CPU box prints `"recommended_profile": "cpu-lite"`. Eight
   or more cores give `cpu`; CUDA gives `gpu` (or `gpu-frontier` with ≥ 16 GB VRAM); Apple MPS
   gives `gpu`.
-* `ruff format --check .` (without paths) currently fails: it also formats Python blocks inside
-  Markdown and reports `README.md`, `docs/INTEGRATION.md` and `docs/STOPPING.md`. Use the paths
-  above.
+* `ruff format --check .` (without paths) also formats Python blocks inside Markdown. The
+  `docs/` files pass (`ruff format --check docs`); `README.md` passes once it is regenerated from
+  them. The paths above are the code gate.
+* A regular (non-editable) install ships the YAML presets `default.yaml` and `small.yaml` as data
+  files under `<environment prefix>/share/nardis-neural/configs/`. They are not importable package
+  resources. An editable install uses the repository's `configs/`.
 
 Reference venv versions: Python 3.12.3, torch 2.14.0+cu130, numpy 2.5.3, polars 1.44.2, pyarrow
 25.0.1, scikit-learn 1.9.1, scipy 1.18.1, pydantic 2.13.5, typer 0.27.2, pyyaml 6.0.3. The numpy
@@ -353,12 +363,14 @@ serving it.
 Measured numbers come from [INTEGRATION.md](INTEGRATION.md) (fetch speed),
 [REAL_DATA.md](REAL_DATA.md) §4 (tape memory) and [STOPPING.md](STOPPING.md) §5 (stopping time).
 
-**Run steps 5 to 8 before the first `serve` on a workspace.** When `serve` streams, it switches
-the brain to bounded-memory mode and its first autosave writes `ws/stream/market.pkl`. From then
-on the workspace loads that compact market state and **no event history**, so every research
-command on it fails with `ValueError: no labelled snapshots could be built from this history`
-(reproduced). The research commands have no `--events` option. See
-[Retraining the research models](#retraining-the-research-models).
+**Run steps 5 to 8 before the first `serve` on a workspace.** `serve` (with or without
+`--no-stream`) switches the brain to bounded-memory mode, and its first checkpoint writes
+`ws/stream/market.pkl`. From then on the workspace loads that compact market state and **no event
+history**. A research command on it without `--events` stops with `Invalid value: the workspace
+keeps no event history (a streaming checkpoint, stream/market.pkl, replaces it); pass --events
+<event directory>, e.g. one written by fetch-history` (checked). With `--events data/hist` the
+five research commands (`edge-`, `moonshot-`, `tape-`, `stopping-`, `runner-research`) fit on that
+directory instead. See [Retraining the research models](#retraining-the-research-models).
 
 ### Step 0: check the machine
 
@@ -387,7 +399,7 @@ nardis-neural solana fetch-history --out data/hist --hours 12
 |---|---|
 | reads | the RPC endpoint: pump.fun program signatures, then each transaction |
 | window | `--hours` (default 12) ending at `--end` (default: 15 minutes ago) |
-| writes | `data/hist/window.json` (the fixed window), `data/hist/segments/seg_NNNN/` (one 10-minute segment each, `done` marker when complete), `data/hist/graduates/seg_NNNN/` (1-hour segments following graduated tokens through PumpSwap), and the merged, cleaned history as one Parquet file per event type in `data/hist/` (`launches`, `swaps`, `liquidity`, `migrations`, `transfers`) |
+| writes | `data/hist/window.json` (the fixed window), `data/hist/segments/seg_NNNN/` (one 10-minute segment each, `done` marker when complete), `data/hist/graduates/seg_NNNN/` (1-hour segments following graduated tokens through PumpSwap; their `done` marker records the end time reached), and the merged, cleaned history as one Parquet file per event type in `data/hist/` (`launches`, `swaps`, `liquidity`, `migrations`, `transfers`) |
 | keeps | only tokens created inside the window on pump.fun with a known creator, SOL-priced ([history.py](../src/nardis_neural/solana/ingest/history.py) `clean_history`) |
 | graduates | followed through PumpSwap for `--follow-graduates-hours` (default 6, `0` = off) past the window, capped at 10 minutes before now |
 | time | 0.63x real time with 6 workers on a hosted node, so 12 hours of history takes about 7 to 8 hours ([INTEGRATION.md](INTEGRATION.md)); graduate following adds unmeasured time |
@@ -399,7 +411,10 @@ new window. Each segment is retried 5 times, 30 seconds apart, over an RPC clien
 retries 8 times; after that the command exits and a rerun continues. The top-level tables are
 written only after every segment and the graduate follow-up are complete.
 `EventStore.load(data/hist)`, `bootstrap --events data/hist` and `stream-train --events data/hist`
-read only the top-level tables.
+read only the top-level tables. A rerun later computes a later follow-until time for graduates;
+the last graduates segment is then fetched again and extended to it, so the post-graduation
+record has no gap. A directory written by an older version (its `done` markers hold `1`) gets that
+last segment refetched once.
 
 ### Step 3 (optional): Solana configuration
 
@@ -409,13 +424,16 @@ nardis-neural solana init-config --out configs/solana.yaml
 
 This writes the defaults of `SolanaConfig`. Every threshold, horizon and window lives there. The
 setting operators change is `sample_interval_seconds` (default `10.0`). For long windows on a
-16 GB machine, set it to `60` before `tape-research`. `bootstrap` copies the config into
-`ws/solana.yaml`, and every later command reads that copy, so the value can also be edited there.
+16 GB machine, set it to `60` before `tape-research`. Pass it to `bootstrap` with
+`--solana-config configs/solana.yaml`; without that option `bootstrap` writes the defaults.
+`bootstrap` copies the config into `ws/solana.yaml`, and every later command reads that copy,
+so the value can also be edited there.
 
 ### Step 4: bootstrap the workspace
 
 ```bash
 nardis-neural solana bootstrap --events data/hist --workspace ws --profile auto
+nardis-neural solana bootstrap --events data/hist --workspace ws --profile auto --solana-config configs/solana.yaml   # only if step 3 was run
 ```
 
 * Builds leakage-free snapshots from the history, trains the neural ensemble, registers it as
@@ -423,10 +441,18 @@ nardis-neural solana bootstrap --events data/hist --workspace ws --profile auto
   `ws/solana.yaml` and the continual-learning files (`registry.json`, `models/`, replay and shadow
   state).
 * `--profile` has **no default** on `bootstrap`. Without it the default model is trained.
-  `--profile auto` picks `cpu-lite` on fewer than 8 cores and `cpu` on 8 or more. `--epochs` and
-  `--device` override the config.
-* Bootstrap into an empty directory. Re-running it on an existing workspace keeps the old
-  champion but replaces `events/`, `solana.yaml`, `config.yaml` and the risk model (reproduced).
+  `--profile auto` uses the detected hardware, as `nardis-neural hardware` reports it:
+  `gpu-frontier` on CUDA with 16 GB or more, `gpu` on other CUDA or on MPS, `cpu` on 8 or more
+  cores, otherwise `cpu-lite`. `--epochs` and `--device` override the config.
+* `bootstrap` refuses a directory that already holds a workspace: it exits with code 2 and
+  `Invalid value: ws already holds a workspace (solana.yaml, config.yaml, …); choose a new
+  directory or pass --overwrite to rebuild it from scratch` and changes nothing (checked).
+* `--overwrite` replaces **everything** a workspace holds (models, replay, `meta/` with Nardis's
+  settled trades, `forward/`, `capital/`, `stream/`, the cursor, `pending.pkl` …), but only after
+  the new ensemble and risk model have trained; a failed or interrupted rebuild leaves the old
+  workspace as it was. Other files in the directory are kept. `--events ws/events -w ws
+  --overwrite` works, because the history is read before anything is deleted. Back up `ws/meta/`
+  first if the archive does not hold every settled trade.
 
 ### Steps 5 to 8: install the research models
 
@@ -475,11 +501,11 @@ curl -s --noproxy '*' http://127.0.0.1:8787/health
 The service prints `addon listening on http://127.0.0.1:8787 (stream on)`. The HTTP API is
 specified in [API.md](API.md).
 
-**Moonshot push alerts are not available from the command line.** The `--alert-url` /
-`--alert-target` / `--alert-min-edge` / `--alert-every` flags shown in
-[INTEGRATION.md](INTEGRATION.md) are not defined on `serve`; the command exits with
-`No such option: --alert-url`. The code exists (`AddonService.alerts`) and is tested, but only
-from Python. Until the flags are wired, Nardis polls `GET /moonshots?target=10&min_edge=2`.
+**Push alerts.** Add `--alert-url http://127.0.0.1:9000/moonshot --alert-target 10
+--alert-min-edge 2` to have each new candidate POSTed to Nardis (checked with the real command on
+a tiny workspace: one POST per qualifying token, `/health` → `alerts` counting scans and sends).
+Without it, Nardis polls `GET /moonshots?target=10&min_edge=2`, which returns the same rows. See
+[API.md](API.md#push-alerts).
 
 ## Command map
 
@@ -492,24 +518,24 @@ from Python. Until the flags are wired, Nardis polls `GET /moonshots?target=10&m
 | `init-config` | write the default `SolanaConfig` YAML (default `configs/solana.yaml`) | no | no | optional |
 | `simulate` | simulate memecoin launches into an event directory (+ `archetypes.json`) | no | no | dev |
 | `build-dataset` | causal replay + hindsight labels → canonical neural dataset (inspection) | no | no | optional |
-| `bootstrap` | train the neural ensemble + risk model from history; create the workspace | no | creates it | setup |
+| `bootstrap` | train the neural ensemble + risk model from history; create the workspace (refuses an existing one unless `--overwrite`) | no | creates it | setup |
 | `replay` | stream a saved event directory through a workspace as if live | no | yes (maintenance saves) | dev |
 | `assess` | print assessments at the workspace's market time | no | no | optional |
 | `decode` | decode a JSONL of `getTransaction` results into events, offline | no | no | optional |
 | `backfill` | fetch the latest pump.fun / PumpSwap transactions (`--limit` per program) | yes | no | optional |
-| `stream` | live stream into a workspace, assessments to JSONL, no HTTP API | yes | yes | optional (`serve` covers it) |
-| `edge-research` | walk-forward triple-barrier edge research; installs `ws/edge/` | no | yes | research |
-| `moonshot-research` | P(≥2x … ≥1000x) tail model research; installs `ws/moonshot/` | no | yes | setup, research |
+| `stream` | live stream into a workspace, assessments to JSONL, no HTTP API; bounded memory by default (`--keep-history` to keep events); saves at each maintenance and on Ctrl-C | yes | yes | optional (`serve` covers it) |
+| `edge-research` | walk-forward triple-barrier edge research; installs `ws/edge/`; `--events` for a streamed workspace | no | yes | research |
+| `moonshot-research` | P(≥2x … ≥1000x) tail model research; installs `ws/moonshot/`; `--events` as above | no | yes | setup, research |
 | `stream-train` | learn by streaming history (RPC `--start/--end`, or `--events`) without storing it | yes (RPC mode) | creates or resumes | research |
-| `tape-research` | Tape Transformer (tail + collapse); installs `ws/tape/` | no | yes | setup, research |
-| `stopping-research` | optimal-stopping exit model; installs `ws/stopping/` | no | yes | setup, research |
+| `tape-research` | Tape Transformer (tail + collapse); installs `ws/tape/`; `--events` as above | no | yes | setup, research |
+| `stopping-research` | optimal-stopping exit model; installs `ws/stopping/`; `--events` as above | no | yes | setup, research |
 | `fetch-history` | resumable fetch of a pump.fun window into an event directory | yes | no | setup |
 | `meta-train` | train the trade meta-learner on Nardis's archive | no | `ws/meta/` | setup (or use `serve --archive`) |
-| `serve` | the HTTP/JSON sidecar | yes (unless `--no-stream`) | yes (autosave with the stream on) | daily |
-| `runner-research` | runner detector P(reach 2x … 1000x); installs `ws/runners/` | no | yes | research |
+| `serve` | the HTTP/JSON sidecar; `--alert-url` pushes candidates | yes (unless `--no-stream`) | yes (checkpoint every 5 minutes and on stop, both modes) | daily |
+| `runner-research` | runner detector P(reach 2x … 1000x); installs `ws/runners/`; `--events` as above | no | yes | research |
 | `forward-report` | paper-ticket scorecard from `ws/forward/` | no | no | daily (monitoring) |
 | `research-suite` | moonshot (and `--tape`) research over several simulated markets | no | no (JSON only with `--out`) | dev |
-| `allocate` | recommended stakes for current opportunities (`--equity`, `--peak`) | no | no | optional (same as `POST /allocate`) |
+| `allocate` | recommended stakes for current opportunities (`--equity`, `--peak`, `--day-start-equity`) | no | `capital/book.json` (the day's opening equity) | optional (same as `POST /allocate`) |
 
 All of these are `nardis-neural solana <command>`. Top-level commands an operator may use on a
 Solana workspace (it is also a continual-learning registry root):
@@ -520,6 +546,12 @@ Solana workspace (it is also a continual-learning registry root):
 | `nardis-neural status --workspace ws` | champion, challenger, replay sizes, adaptation / retrain / promotion counters |
 | `nardis-neural rollback --workspace ws [--to VERSION]` | restore the previous (or a named) neural champion |
 | `nardis-neural benchmark --model ws --data …` | inference latency, throughput and memory on this machine |
+
+The other top-level commands (`generate-synthetic`, `train`, `pretrain`, `evaluate`, `predict`,
+`extract-embeddings`, `cluster-regimes`, `ingest`, `adapt`, `full-retrain`, `shadow-evaluate`,
+`promote`, `drift-report`, `inspect-model`) drive the generic neural brain on canonical datasets
+([OVERVIEW.md](OVERVIEW.md)). Nardis and the sidecar do not need them. Every command and option
+is listed in the README's generated CLI reference.
 
 The top-level `nardis-neural init-config` (not `solana init-config`) defaults to
 `configs/default.yaml`. Run from the addon directory, it overwrites the tracked file that a test
@@ -538,10 +570,12 @@ These are all the variables the code reads (a search for `os.environ`, `getenv` 
 | `SSL_CERT_FILE` | [rpc.py](../src/nardis_neural/solana/ingest/rpc.py) | CA bundle for TLS to the RPC endpoint, used only if the file exists; otherwise the system CAs |
 | `HTTPS_PROXY` / `https_proxy` | rpc.py, for `https://` endpoints | TLS through the proxy's `CONNECT` tunnel; the certificate is still verified end to end |
 | `HTTP_PROXY` / `http_proxy` | rpc.py, for `http://` endpoints | the connection is tunnelled through the proxy |
-| `NO_PROXY` / `no_proxy` | rpc.py | comma-separated host names that bypass the proxy; exact match only, no wildcards, suffixes or ports |
+| `NO_PROXY` / `no_proxy` | rpc.py | comma-separated entries that bypass the proxy: `*`, the host itself, or any parent domain (`example.com` and `.example.com` both match `rpc.example.com`); a `host:port` entry is matched by its host |
 
-Credentials in a proxy URL (`user:pass@`) are not sent, so a proxy that needs authentication
-refuses the tunnel.
+Credentials in a proxy URL (`user:pass@`, percent-encoded characters allowed) are sent as
+`Proxy-Authorization: Basic …` on the `CONNECT` tunnel. The alert POST (`serve --alert-url`) goes
+through Python's `urllib`, which reads the same proxy variables with its own rules; keep the
+receiver's host in `NO_PROXY` if `HTTP_PROXY` is set.
 
 ### Outbound: read-only JSON-RPC only
 
@@ -555,7 +589,7 @@ refuses the tunnel.
 | `getSignaturesForAddress` | program (or graduated mint) address, `limit` ≤ 1000, `before` / `until`, `commitment: confirmed` | `fetch-history`, `stream-train`, `serve`, `stream`, `backfill` |
 | `getTransaction` | `encoding: jsonParsed`, `maxSupportedTransactionVersion: 1`, `commitment: confirmed` | all of the above |
 | `getSlot`, `getBlockTime`, `getBlock` (`transactionDetails: signatures`) | slot search to start listing at the window's end | `fetch-history`, `stream-train` (RPC mode) |
-| `getAccountInfo` (`jsonParsed`) | a new mint's mint / freeze authority, once per launch | live decoding: `serve`, `stream`, `backfill`; never in history replays, where today's authorities would leak the future |
+| `getAccountInfo` (`jsonParsed`) | mint / freeze authority of a token first seen on an AMM venue, once per token (pump.fun launches make no call and count as revoked) | live streaming only: `serve` with the stream on, and `stream`. Never `backfill`, `fetch-history`, `stream-train` or `POST /ingest`: in history, today's authorities would leak the future, and `/ingest` has no RPC |
 
 The other five allowed methods are not called by the current code.
 
@@ -575,9 +609,9 @@ fail at once.
 successful transactions/s. On a busy day the live feed lags; when a poll's backlog exceeds 50 000
 signatures, the oldest part is skipped ([INTEGRATION.md](INTEGRATION.md)). `--pumpswap` adds
 PumpSwap, which the help text calls heavy. If Nardis already receives the chain (for example over
-Yellowstone gRPC), it can push transactions to `POST /ingest` instead; read the `--no-stream`
-caveats first. Whether such a feed converts losslessly to `getTransaction` `jsonParsed` JSON has
-not been checked.
+Yellowstone gRPC), it can push transactions to `POST /ingest` instead, with `serve --no-stream`
+([API.md](API.md#post-ingest)). Whether such a feed converts losslessly to `getTransaction`
+`jsonParsed` JSON has not been checked.
 
 ### Inbound: the sidecar port
 
@@ -585,8 +619,8 @@ not been checked.
   and no TLS. Keep it on loopback, or firewall it.
 * If the machine sets `HTTP_PROXY` / `HTTPS_PROXY`, make sure Nardis's HTTP client does not send
   `127.0.0.1` through the proxy (`NO_PROXY=127.0.0.1,localhost`, or `curl --noproxy '*'`).
-* The sidecar makes no other outbound calls. The push-alert loop would POST to a URL Nardis
-  chooses, but it is not wired to the command line.
+* The sidecar makes no other outbound calls, except the push alerts: with `--alert-url` it POSTs
+  candidate JSON to the URL Nardis chooses.
 
 ### Secrets
 
@@ -599,71 +633,77 @@ logs. The code never reads a keypair, a seed phrase or a wallet file, and it can
 
 ```bash
 nardis-neural solana serve --workspace ws --port 8787 \
-    --archive /data/nardis/parquet            # or: --archive /data/nardis/buffer.db --table trades
+    --archive /data/nardis/parquet \
+    --alert-url http://127.0.0.1:9000/moonshot --alert-target 10 --alert-min-edge 2
+# archive alternative: --archive /data/nardis/buffer.db --table trades
 ```
 
 | flag | default | recommendation |
 |---|---|---|
 | `--host` | `127.0.0.1` | keep it |
 | `--port` | `8787` | any free port |
-| `--stream / --no-stream` | stream | stream, unless Nardis pushes a full feed to `POST /ingest` (read the `--no-stream` caveats first) |
+| `--stream / --no-stream` | stream | stream, unless Nardis pushes a full feed to `POST /ingest` |
 | `--poll-interval` | `2.0` s | keep |
 | `--workers` | `6` | 6 was measured; raise only if the node allows more requests/s |
 | `--pumpswap` | off | off (suggestion): on the measured window every peak came at or before graduation ([REAL_DATA.md](REAL_DATA.md) §7) |
 | `--archive`, `--table` | none | point at Nardis's trade archive so the trade learner keeps training |
 | `--archive-every` | `600` s | keep |
 | `--map`, `--features`, `--return-percent` | – | only if the archive's columns need mapping ([INTEGRATION.md](INTEGRATION.md)) |
+| `--alert-url` | none | Nardis's receiver for moonshot candidates; leave it out to poll `GET /moonshots` instead |
+| `--alert-target`, `--alert-min-edge`, `--alert-every` | `10`, `2.0`, `5` s | the target must be 2, 5, 10, 100 or 1000 |
+| `--assess-every` | `10` s | keep; `0` stops the assessment rounds, and with them continual learning and the forward ledger |
 | `--device` | auto (CUDA, then MPS, then CPU) | leave it, or `cpu` to keep a GPU free |
 
 ### What runs inside `serve`
 
-Three loops share one lock, so API calls wait while any of them holds it. The thread table is in
-[API.md](API.md#operations).
+Up to three background threads and one thread per HTTP request share one lock. API calls wait while a background step holds it. The thread
+tables are in [API.md](API.md#operations).
 
 | loop | cadence | work |
 |---|---|---|
 | HTTP requests | on demand | each call takes the lock |
-| stream thread | every `--poll-interval` | poll the chain, ingest events in chunks of 50 (the lock is released between chunks); every 10 s resolve matured outcomes; every 600 s run maintenance and evict tokens idle for 2 hours; every 300 s save the workspace |
-| archive thread | every `--archive-every` | re-read the whole archive, learn trades not yet seen, save `ws/meta/` when something was added |
+| background thread (`addon-stream`) | every `--poll-interval` | with the stream on, poll the chain and ingest events in chunks of 50 (the lock is released between chunks); in both modes, every 10 s assess the active tokens (skipped while the market clock stands still) and resolve matured outcomes; every 600 s evict tokens idle for 2 hours and run maintenance; every 300 s save the workspace |
+| archive thread | every `--archive-every` | re-read the whole archive outside the lock, then learn trades not yet seen and save `ws/meta/` under the lock when something was added |
+| alert thread | every `--alert-every` | scan for candidates under the lock, then POST new ones outside it |
 
 Maintenance runs neural adaptation, full retraining and promotion when due, the risk-model refit
-and the gated tail-model refit, all under the lock. How long a maintenance run or an archive scan
-blocks requests on a real workspace has not been measured.
+and the gated tail-model refit, all under the lock. An adaptation that cannot be built is
+reported under `adapt_error` / `full_retrain_error` and retried at the next run; the rest of the
+maintenance and its save still run. How long a maintenance run blocks requests on a real
+workspace has not been measured.
 
-**`--no-stream` caveats.** The stream thread is the only place that resolves outcomes, runs
-maintenance, evicts idle tokens, autosaves and switches the brain to bounded-memory mode. With
-`--no-stream` none of that happens: pushed transactions are kept in the in-memory event history
-without limit, idle tokens are never evicted, outcomes never resolve (so the neural, risk and tail
-models and the paper ledger do not learn), and nothing is saved until `POST /save` or Ctrl-C. The
-trade meta-learner and the archive thread still work. Until this is fixed (open work item 2),
-`--no-stream` suits short sessions, not a feed that runs for weeks.
+`--no-stream` runs the same thread without the RPC poll: pushed events do not accumulate, idle
+tokens are evicted, outcomes resolve, the models and the paper ledger learn, and the workspace is
+saved every 5 minutes.
 
 ### How it keeps learning
 
 | model | learns while serving? | trigger |
 |---|---|---|
 | trade meta-learner (`/advise_trade`) | yes | every `POST /settle_trade` and every archive scan; base rates until 50 trades have settled, then a refit every 25, deployed only if it beats the base rate on the newest 20 % |
-| neural ensemble | yes, with the stream on | continual-learning loop at maintenance (adapt, retrain, shadow, promote) |
-| risk model | yes, with the stream on | at maintenance, once 200 new labelled samples exist and every risk label has at least 3 positives |
-| moonshot tail model | yes, with the stream on, only if installed with `--inputs raw` (the default) | every 6 hours of market time, with at least 40 tokens, trained on the older 80 % and kept only if it matches the installed model's NLL (within 0.02) on the newest 20 % |
+| neural ensemble | yes | continual-learning loop at maintenance (adapt, retrain, shadow, promote) |
+| risk model | yes | at maintenance, once 200 new labelled samples exist and every risk label has at least 3 positives |
+| moonshot tail model | yes, only if installed with `--inputs raw` (the default) | every 6 hours of market time, with at least 40 tokens, trained on the older 80 % and kept only if it matches the installed model's NLL (within 0.02) on the newest 20 % |
 | tape, stopping, runner, edge models | **no** | only by re-running their research command |
 
-The neural, risk and tail-model learning is fed by **assessments**. `serve` does not assess on a
-timer: it assesses when Nardis calls `/ranking`, `/moonshots`, `/assess`, `/allocate`,
-`/advise_trade` (with the market view) or `/hold_advice`. The paper-ticket ledger behind
-`forward-report` is fed the same way. If Nardis rarely calls those endpoints, these models rarely
-learn.
+The neural, risk and tail-model learning is fed by **assessments**. The background thread
+assesses every active token every 10 s (`--assess-every`) while events arrive, and Nardis's calls
+to `/ranking`, `/moonshots`, `/assess`, `/allocate`, `/advise_trade` (with the market view) or
+`/hold_advice` add more. The paper-ticket ledger behind `forward-report` is fed the same way.
+Assessments still waiting for their horizon are saved in `ws/pending.pkl` and labelled after a
+restart.
 
 **Archive self-training.** Each scan reads the full archive, skips trade ids already known,
 replays the new settled trades in exit-time order and refits once at the end. Open trades (no
-result yet) are skipped until they close. A half-written file makes the scan fail; the error is
-counted and the next scan retries. A file that stays corrupt blocks every scan until it is
-removed (reproduced with `meta-train`), so watch `archive.errors` and `archive.last_error`.
+result yet) are skipped until they close. In a Parquet directory, a file that cannot be read is
+skipped and counted (`archive.last.unreadable_files`); the other files still load. It is retried
+at the next scans and given up after 3 failures until it changes. A single Parquet file or SQLite
+database that cannot be read fails the scan, which is counted in `archive.errors` and retried.
 
-**Cold start.** With no settled trades, `advise_trade` answers `"source": "prior"`,
-`"evidence": 0` and 0.5 for every probability, which makes `edge_100x` and `edge_1000x` very
-large (about 1665 at 1000x). `chase_target` stays 0 until real hits exist. Ignore the edges while
-`source` is `"prior"`.
+**Cold start.** With no settled trades, `advise_trade` answers `"source": "prior"`, `"evidence":
+0`, `p_win` 0.5, and holds every chase target at its break-even probability until it has 3 real
+hits: `p_10x` 0.0323, `p_100x` 0.00302, every `edge_{k}x` 1.0, `tail_ev` 0.7 and `chase_target` 0
+(recorded). Read an `edge_{k}x` of exactly 1.0 as "not proven".
 
 ### Monitoring
 
@@ -673,15 +713,15 @@ large (about 1665 at 1000x). `chase_target` stays 0 until real hits exist. Ignor
 |---|---|
 | `ok` | no answer at all |
 | `market_time` | wall clock minus `market_time` growing: the feed is lagging or stalled |
-| `tokens` | steady growth over days (expected with `--no-stream`) |
-| `models.moonshot / tape / stopping / edge` | `false` for a model Nardis relies on (`/ranking` and `/moonshots` answer 409 without the tail model) |
-| `learner.pending_trades` | proposals that never settle (they never expire) |
-| `stream.polls`, `stream.errors` | `polls` not increasing; `errors` rising |
-| `archive.errors`, `archive.last_error` | rising errors |
-| `alerts` | empty until alerts are wired |
-
-Not exposed: the runner detector under `models`, and the count of polls whose backlog was skipped
-(`ChainStreamer.gaps`).
+| `tokens` | steady growth over days (idle tokens are evicted every 10 minutes, so it should level off) |
+| `models.moonshot / tape / stopping / edge / runners / risk` | `false` for a model Nardis relies on (`/ranking`, `/moonshots` and `/allocate` answer 409 without the tail model) |
+| `learner.pending_trades` | proposals that never settle; capped at 20 000, beyond which the oldest are dropped |
+| `stream.polls`, `stream.errors` | `polls` not increasing (stream on); `errors` rising |
+| `stream.gaps`, `stream.fetch_errors`, `stream.decode_errors` | any increase: skipped backlog, transactions given up after 3 failed polls, transactions the decoder could not read |
+| `stream.assessments`, `stream.resolved`, `stream.maintenance`, `stream.saves` | not increasing while events arrive |
+| `ingest.undecodable`, `ingest.duplicates` | (`--no-stream`) a pusher sending malformed or repeated transactions |
+| `archive.errors`, `archive.last_error`, `archive.last.unreadable_files` | rising errors, unreadable files |
+| `alerts.errors` | rising: the receiver is down or answers 4xx / 5xx |
 
 Also useful, read-only, while the service runs (they read the last saved state):
 
@@ -692,17 +732,21 @@ nardis-neural status --workspace ws                  # neural champion / challen
 
 ### Saving and stopping
 
-* With the stream on, the service saves every 5 minutes. With `--no-stream` it **never saves on a
-  timer**; call `POST /save`.
-* Ctrl-C (SIGINT) stops the threads and saves (reproduced). **SIGTERM does not save**: the process
-  exits at once and everything since the last save is lost (reproduced). `docker stop` and
-  `systemctl stop` send SIGTERM by default. Send SIGINT, or call `POST /save` first.
-* The market checkpoint `ws/stream/market.pkl` is written atomically (temp file, then rename). The
-  other files (`meta/`, `forward/`, `moonshot/online.npz`, `solana_state.json`,
-  `risk_samples.npz`, `registry.json`, `events/`) are plain writes.
-* The chain cursor (`stream_cursor.json`) is saved at every poll, independently of the brain
-  checkpoint. After a crash or SIGTERM, activity between the last save and the stop is not
-  fetched again.
+* The service saves every 5 minutes and after each maintenance, with or without the stream.
+  `POST /save` saves on demand.
+* Ctrl-C (SIGINT) and SIGTERM both stop the threads and save. `docker stop` and
+  `systemctl stop` (SIGTERM by default) are fine (checked: SIGTERM exited with code 0 after
+  1.1 s on a tiny workspace and rewrote the state files).
+* Files are written through a temporary file and a rename: `stream/market.pkl`, `pending.pkl`,
+  `solana_state.json`, `capital/book.json`, `forward/ledger.json` and `summary.json`,
+  `meta/meta.json` (its tree files are new files per save, and the old ones are removed only
+  after `meta.json` names the new ones), `stream_cursor.json`, `registry.json` and
+  `shadow/records.jsonl`. The replay buffer, `state.json`, `risk_samples.npz`,
+  `moonshot/online.npz` and `events/` are plain writes.
+* The chain cursor (`stream_cursor.json`) is written only after a brain checkpoint, with the
+  position that checkpoint covers. After a crash or `kill -9` the restarted service fetches again
+  what came after the last checkpoint (at most 5 minutes), within the 50 000-signature backlog
+  limit.
 
 Example systemd unit (not tested):
 
@@ -713,9 +757,10 @@ After=network-online.target
 
 [Service]
 WorkingDirectory=/opt/nardis-neural
-EnvironmentFile=/etc/nardis-neural.env        # SOLANA_RPC_URL=…
-ExecStart=/opt/nardis-neural/.venv/bin/nardis-neural solana serve --workspace /var/lib/nardis-neural/ws --archive /data/nardis/parquet
-KillSignal=SIGINT                              # SIGINT triggers the final save
+# holds SOLANA_RPC_URL=…
+EnvironmentFile=/etc/nardis-neural.env
+ExecStart=/opt/nardis-neural/.venv/bin/nardis-neural solana serve --workspace /var/lib/nardis-neural/ws --archive /data/nardis/parquet --alert-url http://127.0.0.1:9000/moonshot
+# SIGTERM (the default stop signal) triggers the final save
 TimeoutStopSec=60
 Restart=on-failure
 RestartSec=10
@@ -724,15 +769,16 @@ RestartSec=10
 WantedBy=multi-user.target
 ```
 
-With Docker, the equivalent is `--stop-signal SIGINT` (Compose: `stop_signal: SIGINT`) and a
-`stop_grace_period` long enough for the save. Also not tested.
+With Docker, the default stop signal (SIGTERM) also saves; give it a `stop_grace_period` long
+enough for the save. Also not tested.
 
 ### Backups
 
 Suggested practice, not tested: back up the whole workspace directory once a day and before every
 research re-run or upgrade. The pieces that cannot be rebuilt from chain history are `ws/meta/`
-(what was learned from Nardis's trades, unless the archive is kept) and `ws/forward/` (the
-paper-ticket record). Take the copy after `POST /save`, or with the service stopped.
+(what was learned from Nardis's trades, unless the archive is kept), `ws/forward/` (the
+paper-ticket record) and `ws/capital/book.json` (the day's opening equity). Take the copy after
+`POST /save`, or with the service stopped.
 
 ```bash
 curl -s --noproxy '*' -X POST http://127.0.0.1:8787/save
@@ -741,11 +787,12 @@ tar -czf ws-$(date +%F).tgz ws
 
 ### Do not share a workspace between processes
 
-`serve` loads every model once, at start-up, and overwrites `meta/`, `forward/` and the market
-checkpoint on every save. While `serve` runs on `ws`, a research command on `ws` installs a model
-that the running service will not use (and with streaming on, it has no history to train on), and
-`meta-train` on `ws` is overwritten by the service's next save. Restart `serve` after installing
-any model. Never open one workspace from two processes.
+`serve` loads every model once, at start-up, and overwrites `meta/`, `forward/`, `pending.pkl`
+and the market checkpoint on every save. While `serve` runs on `ws`, a research command on `ws`
+installs a model that the running service will not use, and `meta-train` on `ws` is overwritten
+by the service's next save. `solana allocate` on `ws` rewrites `capital/book.json`, which the
+running service does not re-read. Restart `serve` after installing any model. Never open one
+workspace from two processes.
 
 ### Retraining the research models
 
@@ -755,13 +802,15 @@ no event history. A way to refresh them (suggested, not tested end to end):
 1. Fetch a new window into a new directory: `solana fetch-history --out data/hist-2 --hours 12`.
 2. Build a new workspace: `solana bootstrap --events data/hist-2 --workspace ws-2 --profile auto`.
 3. Run the research commands on `ws-2` and compare their reports with the previous ones.
-4. Stop `serve` with SIGINT and start it on `ws-2` with the same `--archive`. The first archive
-   scan relearns every trade in the archive. Trades only ever sent through `/settle_trade` and not
-   in the archive are lost unless `ws/meta/` is copied over.
+4. Stop `serve` (SIGTERM or Ctrl-C) and start it on `ws-2` with the same `--archive`. The first
+   archive scan relearns every trade in the archive. Trades only ever sent through
+   `/settle_trade` and not in the archive are lost unless `ws/meta/` is copied over.
 5. Keep `ws` as the rollback.
 
-In Python, the research methods take `history=EventStore.load(...)`, which also works on a
-streamed workspace. How often to retrain is not established. The docs call for windows of at
+To refresh one model on the running workspace instead, stop `serve`, back up `ws`, run the
+research command with `--events data/hist-2` on `ws`, and start `serve` again; this keeps the
+champion, `meta/`, `forward/` and the market state. In Python, the research methods take
+`history=EventStore.load(...)` the same way. How often to retrain is not established. The docs call for windows of at
 least 8 to 12 hours before entry labels resolve, and for days of history before a 10x edge can be
 judged ([REAL_DATA.md](REAL_DATA.md) §2, §8). `stream-train` is the alternative for long
 histories ([SOLANA.md](SOLANA.md) §11); its result is also a streaming workspace.
@@ -771,7 +820,9 @@ histories ([SOLANA.md](SOLANA.md) §11); its result is also a streaming workspac
 The install is editable, so `git pull` changes the running code on the next start. Suggested
 order, not tested: back up the workspace, pull, run `pip install -e ".[dev]"` and
 `pytest tests/test_solana_service.py`, then restart `serve`. `ws/stream/market.pkl` is a pickle of
-the market object, so a change to that class can stop an old checkpoint from loading (see
+the market object and `ws/pending.pkl` of the pending assessments, so a change to those classes
+can stop an old checkpoint from loading (an unreadable `pending.pkl` is ignored and only costs
+the labels of those assessments; see
 [Persisted formats](#persisted-formats-and-backward-compatibility)). Feature lists change between
 versions (73 → 76 features in [REAL_DATA.md](REAL_DATA.md) §10); models trained on old features
 then need their research re-run on a new workspace.
@@ -781,16 +832,20 @@ then need their research re-run on a new workspace.
 | failure | what happens | what to do |
 |---|---|---|
 | `fetch-history` interrupted or out of retries | finished segments stay (`done` markers) | rerun the identical command |
-| RPC down or rate-limiting while serving | requests retried (6 times, backoff from 1 s); a failed poll counts in `stream.errors` and the loop continues | check `stream.errors` and `market_time` lag |
-| a poll fails after its retries | that poll's transactions are skipped: the in-memory cursor had already moved past them | nothing; it shows as one more `stream.errors` |
-| service killed (crash, SIGKILL, SIGTERM) | on restart the market loads from the last `market.pkl` (at most 5 minutes old with the stream on); activity between that checkpoint and the kill is not replayed | restart; stop with SIGINT to avoid the gap |
+| RPC down or rate-limiting while serving | requests retried (6 times, backoff from 1 s); a failed poll counts in `stream.errors`, the cursor stays put and the whole poll is retried; no assessment round runs while the market clock stands still | check `stream.errors` and `market_time` lag |
+| one transaction never fetches | after 3 failed polls in a row it is skipped and counted in `stream.fetch_errors`; the cursor moves on | nothing, unless `fetch_errors` keeps rising |
+| one transaction does not decode | it alone is skipped and counted in `stream.decode_errors` | nothing, unless it keeps rising |
+| service stopped with SIGTERM or Ctrl-C | threads stop, the workspace and the cursor are saved | restart |
+| service killed (crash, SIGKILL) | on restart the market loads from the last checkpoint (at most 5 minutes old) and, with the stream on, the chain after it is fetched again | restart |
 | restart after a long outage | the streamer pages back to its cursor, up to 50 000 signatures; beyond that the oldest backlog is skipped | nothing |
-| half-written archive file | scan fails, counted, retried next scan | nothing |
-| permanently corrupt archive file | every scan fails | remove or fix the file; check `archive.last_error` |
+| half-written file in a Parquet archive directory | that file is skipped and counted in `archive.last.unreadable_files`; the rest is learned; the file is retried at the next scan | nothing |
+| permanently corrupt file in a Parquet archive directory | skipped; after 3 failed scans it is not read again until it changes | remove or fix it |
+| unreadable single-file archive or SQLite database | the scan fails, counted in `archive.errors`, retried next scan | check `archive.last_error` |
 | a research run installs a worse model | the new model replaces the old one in the workspace | restore that model's directory from the backup, restart |
 | the neural champion regresses | – | `nardis-neural rollback --workspace ws` (optionally `--to VERSION`), then restart |
 | `market.pkl` cannot be loaded (for example after an upgrade) | `serve` fails at start | restore the backup, or build a new workspace |
-| `maintenance()` raises `ValueError: no experiences old enough …` | the serve stream loop counts it and skips the rest of that maintenance, including its save; `solana stream` and `stream-train` crash | the next periodic save still runs under `serve`; see known defects |
+| adaptation cannot be built (`no experiences old enough …`) | `maintenance()` records it under `adapt_error` / `full_retrain_error`, runs the rest and saves; retried next time | nothing |
+| `bootstrap --overwrite` fails or is interrupted | the old workspace is left as it was | fix the cause and rerun |
 
 ## Using it from Python
 
@@ -838,18 +893,15 @@ with lock:
     print(brain.hold_advice(mint, brain.market.now - 60.0))  # {} until an exit model is installed
 
     # Upkeep, off the hot path (seconds to minutes); it ends with save()
-    try:
-        print(brain.maintenance())
-    except ValueError as exc:  # see the caveats below
-        print("maintenance skipped:", exc)
-        brain.save()
+    print(brain.maintenance())
 ```
 
-On the tiny workspace this printed a risk dict, a round-trip cost of 0.0199, per-horizon
-`prob_net_positive`, one red flag, then `0.5 1.0 False prior 0` for the advice, `{}` for
-`hold_advice`, and a maintenance summary with `'adapted': 'failed'` (the fine-tuned candidate
-failed its offline validation gate, the expected outcome on a toy model). The numbers show call
-shapes, not quality.
+Rerun at `d8785d4` on a tiny workspace, this printed a risk dict, a round-trip cost of 0.0199,
+per-horizon `prob_net_positive`, one red flag, then `0.5 1.0 False prior 0` for the advice, `{}`
+for `hold_advice`, and a maintenance summary with `'adapted': 'failed'`, `'adapt_error': None`,
+`'full_retrain': 'failed'` (the candidates failed their offline validation gate, the expected
+outcome on a toy model; both were pruned from `models/` at once). The numbers show call shapes,
+not quality.
 
 Clock rule: `brain.market.now` is the time of the latest ingested event (Unix seconds), not the
 wall clock.
@@ -859,7 +911,7 @@ wall clock.
 | call | returns | notes |
 |---|---|---|
 | `SolanaBrain(workspace, device=None)` | `SolanaBrain` | Loads `solana.yaml`, the neural champion, the market state (from `stream/market.pkl` if present, else by replaying `events/`), and every installed model. Raises if `solana.yaml`, `config.yaml`, `registry.json` or the champion's model directory is missing. `device` accepts `"cpu"`, `"cuda"` or a `torch.device`; every saved model is loaded with `map_location="cpu"` first. |
-| `SolanaBrain.bootstrap(workspace, history, cfg=None, neural_cfg=None, device=None, log=None)` | `SolanaBrain` | Trains the neural ensemble and the risk model from an `EventStore` and writes a new workspace. `cfg` is a `SolanaConfig`; `neural_cfg` is the base `NeuralConfig`, whose input dimensions are overwritten to match the Solana features. Bootstrap into an empty directory. |
+| `SolanaBrain.bootstrap(workspace, history, cfg=None, neural_cfg=None, device=None, log=None, overwrite=False)` | `SolanaBrain` | Trains the neural ensemble and the risk model from an `EventStore` and writes a new workspace. `cfg` is a `SolanaConfig`; `neural_cfg` is the base `NeuralConfig`, whose input dimensions are overwritten to match the Solana features. Raises `FileExistsError` if the directory holds any workspace entry (`WORKSPACE_ENTRIES`); with `overwrite=True` it replaces them only after training succeeded. |
 
 ### Methods Nardis uses
 
@@ -870,17 +922,17 @@ wall clock.
 | `assess_many(mints)` | `list[SolanaAssessment]` | One batched forward pass for several tokens. |
 | `assess_active(max_idle_seconds=120.0, min_age_seconds=None)` | `list[SolanaAssessment]` | Every token that traded within `max_idle_seconds` and is at least `min_age_seconds` old (default `cfg.min_token_age_seconds`, 3 s). |
 | `moonshot_ranking(max_idle_seconds=120.0, include_vetoed=False)` | `list[SolanaAssessment]` | Active tokens inside the entry window (20 s to 600 s by default), best `chase_score` first. `RuntimeError` without a tail model. |
-| `allocate(equity_sol, open_stakes=None, peak_equity_sol=None, cfg=None, max_idle_seconds=120.0)` | `list[Allocation]` | Recommended stakes (`mint`, `stake_sol`, `fraction`, `reason`). Needs a tail model. See [CAPITAL.md](CAPITAL.md). |
+| `allocate(equity_sol, open_stakes=None, peak_equity_sol=None, cfg=None, max_idle_seconds=120.0, day_start_equity_sol=None)` | `list[Allocation]` | Recommended stakes (`mint`, `stake_sol`, `fraction`, `reason`). Needs a tail model. Remembers the market day's opening equity in `capital/book.json` (daily loss stop) and counts open stakes toward their creator family. See [CAPITAL.md](CAPITAL.md). |
 | `hold_advice(mint, t_signal)` | `dict[str, float]` | `liquidation_multiple`, `sell_now_utility`, `continuation_utility`, `advantage`. `{}` without a fitted exit model. See [STOPPING.md](STOPPING.md). |
 | `trade_context(mint)` | `dict[str, float]` | The addon's view of a token, flattened to `moonshot_*`, `tape_*`, `edge_*`, `risk_*` and four `feature_*` keys. `{}` for an unknown mint. |
 | `advise_trade(proposal, with_market=True)` | `TradeAdvice` | Advice on a Nardis trade; with `with_market`, the `trade_context` values are joined as `addon_*` features (a full `assess` of the mint, about 20 ms on the tiny workspace). |
 | `settle_trade(outcome)` | `bool` | Reports a closed trade. `False` if the `trade_id` was never proposed or was already settled. Refits when due. |
 | `resolve()` | `int` | Labels every assessment whose longest horizon (and risk horizon) has elapsed, adds it to the replay buffer and risk samples, settles forward-ledger tickets. Returns the count labelled. |
-| `maintenance(risk_refit_min_new=200)` | `dict` | Neural adapt, full retrain and promotion (all gated), risk refit, online tail refit, then `save()`. Keys: `moonshot_online`, `adapted`, `full_retrain`, `promoted`, `risk_refit`, `champion`, `pending`, `forward`. Seconds to minutes. |
+| `maintenance(risk_refit_min_new=200)` | `dict` | Neural adapt, full retrain and promotion (all gated), risk refit, online tail refit, then `save()`. Keys: `moonshot_online`, `adapted`, `adapt_error`, `full_retrain`, `full_retrain_error`, `promoted`, `risk_refit`, `champion`, `pending`, `forward`. An adaptation that cannot be built leaves its `*_error` set and the step `None`; it does not raise. Seconds to minutes. |
 | `enable_streaming(evict_idle_seconds=7200.0)` | `None` | Bounded-memory mode: no event history is kept, `save()` writes `stream/market.pkl` instead of `events/`. |
 | `evict()` | `list[str]` | In streaming mode: labels finished moonshot rows, then forgets tokens idle for `evict_idle_seconds`. |
 | `refit_moonshot_online(every_seconds=21600.0, min_tokens=40, members=3, epochs=60, tolerance=0.02)` | `dict` or `None` | Retrains a raw-input tail model from the online buffer behind a hold-out gate. Called by `maintenance`. |
-| `save()` | `None` | Checkpoints the workspace. |
+| `save()` | `None` | Checkpoints the workspace, including the pending assessments (`pending.pkl`). Most files are written atomically (see [Saving and stopping](#saving-and-stopping)). |
 
 Research methods train on `history` (default `brain.history`), write a model directory, install
 the model in memory and return the research report as a dict. They are what the CLI research
@@ -915,7 +967,10 @@ tokens).
 | `TradeAdvice` | `trade_id`, `p_win`, `p_10x`, `p_100x`, `expected_multiple`, `size_multiplier`, `veto`, `reason`, `evidence`, `source`, `chase` (see [API.md](API.md#post-advise_trade)) |
 
 `nardis_neural.solana.archive.train_from_archive(brain.meta, path, mapping, table)` replays
-Nardis's trade archive into the same learner as `meta-train`.
+Nardis's trade archive into the same learner as `meta-train`; its result includes
+`unreadable_files`. `archive.learn_trades(learner, trades)` learns an already read and normalised
+table (`read_table` plus `normalise_trades`), which is what the service's archive thread does
+under its lock.
 
 ### Thread safety
 
@@ -931,28 +986,40 @@ report recorded 9.8 s). Do not open the same workspace from two processes.
 background threads. It works without HTTP:
 
 ```python
+import queue
+
 from nardis_neural.solana import SolanaBrain
 from nardis_neural.solana.service import AddonService
 
 service = AddonService(SolanaBrain("ws", device="cpu"))
-status, body = service.handle("GET", f"/assess?mint={mint}", {})   # (200, {...})
-status, body = service.handle("POST", "/advise_trade", {"trade_id": "x1", "mint": mint, "features": {"s": 1.0}})
-service.stream(my_feed)            # my_feed.poll() -> list of events, in time order
-service.alerts("in-process", target=10.0, min_edge=2.0, post=lambda url, body: queue.put(body))
-service.stop()                     # stops the threads and saves
+mint = next(iter(service.brain.market.tokens))
+alerts: queue.Queue[dict] = queue.Queue()
+my_feed = None  # or any object whose poll() returns events in time order
+status, body = service.handle("GET", f"/assess?mint={mint}", {})  # (200, {...})
+status, body = service.handle(
+    "POST", "/advise_trade", {"trade_id": "x1", "mint": mint, "features": {"s": 1.0}}
+)
+service.stream(my_feed)  # my_feed.poll() -> list of events, in time order; None = upkeep only
+service.alerts("in-process", target=10.0, min_edge=2.0, post=lambda url, body: alerts.put(body))
+service.stop()  # stops the threads and saves
 ```
 
 * `handle(method, path, payload)` returns `(http_status, body)` with the same routes and errors
   as the HTTP server.
 * `stream(streamer, poll_interval=2.0, resolve_every=10.0, maintenance_every=600.0,
-  save_every=300.0, chunk=50, bounded_memory=True)` accepts any object with a `poll()` method that
-  returns events. It is the easiest way for a Python Nardis with its own decoded feed to get the
-  full upkeep schedule, all on the wall clock. Exceptions inside the loop are counted in
-  `service.stream_stats["errors"]` and never stop it.
+  save_every=300.0, chunk=50, bounded_memory=True, assess_every=10.0)` accepts any object with a
+  `poll()` method that returns events, or `None` for the upkeep alone (what `serve --no-stream`
+  runs). It is the easiest way for a Python Nardis with its own decoded feed to get the full
+  upkeep schedule, all on the wall clock. Exceptions inside the loop are counted in
+  `service.stream_stats["errors"]` and never stop it. If the streamer has `cursor` and `commit`
+  (as `ChainStreamer` does), the cursor is committed after each checkpoint.
 * `alerts(...)` with `post` set to a callable sends candidates to that callable (verified: 10
   scans, 0 errors).
 * `train_on_archive(path, mapping=None, table=None, every=600.0)` keeps the meta-learner training
   on Nardis's trade archive.
+* `ChainStreamer.poll()` no longer writes its cursor file. A caller that uses it directly must
+  call `streamer.commit()` after checkpointing what it ingested, as `run_live` and the service
+  do.
 
 The generic neural API (`NeuralEngine`, `ContinualLearner`, `NeuralObservation`,
 `NeuralOutcome`; [INTEGRATION.md](INTEGRATION.md) sections 1 to 6 and
@@ -962,18 +1029,10 @@ need it.
 
 ### Caveats
 
-* **`maintenance()` can raise `ValueError`.** When adaptation is due but every buffered
-  experience is within the embargo (the longest horizon, 300 s by default) of the newest 20 %,
-  `ContinualLearner.adapt` raises "no experiences old enough to train on without overlapping
-  validation". Reproduced with the adapt threshold lowered to 30 samples; with the default of 500
-  it needs a busy start. Catch it and call `save()`, because the `save()` at the end of
-  `maintenance()` is skipped.
-* **Pending assessments are not saved**, only their count. Assessments not yet resolved at
-  shutdown are never labelled.
 * **Streamed workspaces have no event history.** Pass `history=EventStore.load(...)` to the
-  research methods explicitly.
+  research methods explicitly (`--events` on the CLI).
 * **Non-streaming mode grows without bound.** Use `enable_streaming()` for anything that runs for
-  more than a few hours.
+  more than a few hours. `AddonService.stream` does it by default.
 
 ## The workspace on disk
 
@@ -996,6 +1055,7 @@ ws/
   events/                         event history: launches / swaps / ... .parquet (non-streaming)
   stream/market.pkl               market checkpoint, only in streaming mode (replaces events/ as the source)
   stream_cursor.json              RPC cursor, only when serve / stream polled the chain
+  pending.pkl                     assessments waiting to be labelled
   solana_state.json               market clock and counters
   risk/                           risk model: members.pt  scaler.npz  risk.json
   risk_samples.npz                resolved risk training rows
@@ -1005,11 +1065,15 @@ ws/
   edge/                           edge.json members.pt scaler.npz trees.npz research.json REPORT.md
   runners/                        runners.json runner_<k>x.npz REPORT.md
   forward/                        ledger.json summary.json
-  meta/                           meta.json level_<k>.npz value.npz
+  meta/                           meta.json level_<k>.g<N>.npz value.g<N>.npz
+  capital/book.json               allocator book: market day and its opening equity
 ```
 
-`runner_<k>x.npz` and `level_<k>.npz` exist only for the targets or levels that were trained and
-deployed. `value.npz` exists only when the meta-learner's value model beat its base rate.
+`runner_<k>x.npz` and `level_<k>.g<N>.npz` exist only for the targets or levels that were
+trained and deployed. `value.g<N>.npz` exists only when the meta-learner's value model beat its
+base rate. `<N>` is the save generation named in `meta.json`; a directory written before
+`d8785d4` has untagged `level_<k>.npz` / `value.npz`, which still load and are replaced at the
+first save. A leftover `*.tmp` file is an interrupted atomic write and can be deleted.
 
 "If missing" was tested by deleting each entry from a complete tiny workspace, then loading,
 assessing, calling `hold_advice` and saving. Sizes are from the tiny synthetic workspace (8
@@ -1020,31 +1084,35 @@ launches, one-member tiny model); production sizes will be larger.
 | `solana.yaml` | `bootstrap` | load fails (`FileNotFoundError`) | 1 KB | edit before research to change e.g. `sample_interval_seconds` |
 | `config.yaml` | `bootstrap` | load fails (`FileNotFoundError`) | 5 KB | neural learner, replay and promotion settings |
 | `registry.json` | learner | load fails (`RuntimeError: workspace has no champion`) | 9 KB, 28 KB after two candidates | |
-| `models/<version>/` | learner | champion dir missing: load fails | 0.36 MB per one-member tiny model | failed candidates stay until the next promotion prunes them; up to 5 former champions are kept |
+| `models/<version>/` | learner | champion dir missing: load fails | 0.36 MB per one-member tiny model | a failed or replaced candidate is pruned right after registration (its registry entry stays, marked deleted); up to 5 former champions are kept |
 | `replay/` | learner `save()` | empty buffer | 3.8 MB for 359 experiences | pools capped at 5 000 recent, 20 000 historical, 5 000 rare |
 | `shadow/records.jsonl` | learner `save()` | graceful | 0 bytes without a challenger | |
 | `state.json` | learner `save()` | counters reset | 0.2 KB | |
 | `reports/` | learner | graceful | under 1 KB per report | never pruned |
 | `events/` | `bootstrap`; `save()` when not streaming | empty market (0 tokens, clock 0) | 0.97 MB for 22 267 events | rewritten in full at every non-streaming `save()` |
 | `stream/market.pkl` | `save()` in streaming mode (atomic rename) | falls back to `events/` and non-streaming mode | 383 KB with 4 tokens and 168 wallets | a Python pickle: load only your own, same package version |
-| `solana_state.json` | `save()` | defaults | 0.2 KB | contains `-Infinity` before the first online tail refit |
+| `pending.pkl` | `save()` (atomic rename) | no pending assessments (an unreadable file is ignored the same way) | 274 KB for 27 pending assessments, 795 KB for 74 (about 10 KB each) | a Python pickle of the assessments waiting for their horizon; labelled by `resolve()` after a restart |
+| `solana_state.json` | `save()` (atomic rename) | defaults | 0.2 KB | strict JSON: `moonshot_last_refit` is `null` before the first online tail refit (older files with `-Infinity` still load) |
 | `risk/` | `bootstrap`, maintenance refit | `risk` empty, no rug flag, guard runs without P(rug) | 0.13 MB | |
 | `risk_samples.npz` | `save()` | refit starts from zero | 149 KB | rolling window of 50 000 rows |
 | `moonshot/` model files | `fit_moonshot`, `refit_moonshot_online` | `moonshot` empty, ranking and allocate raise, no forward tickets | 0.22 MB | `research.json` and `REPORT.md` are not read by the brain |
 | `moonshot/online.npz` | `save()` | empty online buffer | 27 KB | rolling window of 200 000 rows |
 | `tape/` | `fit_tape` | `tape` empty; without `research.json` no exit alarm | 0.32 MB (d = 16); an untrained default model saves a 26.4 MB `tape.pt` | wallet embeddings keyed by a stable hash of the address |
 | `stopping/` | `fit_stopping` | `hold_advice` returns `{}` | 0.17 MB | |
-| `edge/` | `fit_edge` | `edge` empty | 0.29 MB | if `edge.json` exists, `research.json` is required, else the load fails |
+| `edge/` | `fit_edge` | `edge` empty | 0.29 MB | without `research.json` the brain still loads and the edge threshold is 0 |
 | `runners/` | `fit_runners` | no `runner_p_*` keys | not measured | |
-| `forward/` | `save()` | empty ledger | under 1 KB with no tickets | tickets open only with a tail model; closed tickets are never pruned |
-| `meta/` | `save()`, `meta-train`, archive thread | fresh meta-learner (cold start) | 0.8 KB after one trade | holds every settled trade's features and all pending proposals |
-| `stream_cursor.json` | `ChainStreamer` at every poll | next poll starts from the latest 1 000 signatures per program | tiny | not used by the brain |
+| `forward/` | `save()` (atomic rename per file) | empty ledger | under 1 KB with no tickets | tickets open only with a tail model; closed tickets are never pruned |
+| `meta/` | `save()`, `meta-train`, archive thread | fresh meta-learner (cold start) | 0.8 KB after one trade | holds every settled trade's features and up to 20 000 pending proposals; `meta.json` replaced atomically, tree files per generation |
+| `capital/book.json` | `allocate` (HTTP or CLI), atomic rename | the next allocate starts a new day book | under 0.1 KB | `{"day": <market day>, "day_start_equity": <SOL>}` |
+| `stream_cursor.json` | `ChainStreamer.commit`, after each brain checkpoint (atomic rename) | next poll starts from the latest 1 000 signatures per program | tiny | not used by the brain; always matches the last checkpoint |
 
-**Copying a workspace.** Stop the process first (only `market.pkl` is written atomically). The
-directory is relocatable: model paths in `registry.json` are relative and no absolute path was
-found in any tested file. Weights load with `map_location="cpu"`, so a GPU-trained workspace
-should load on a CPU (not tested). Install the same package version on both machines. Never load
-a workspace from an untrusted source: `stream/market.pkl` is unpickled, and unpickling runs code.
+**Copying a workspace.** Stop the process first: most files are written atomically, but the
+replay buffer, `risk_samples.npz`, `moonshot/online.npz` and `events/` are not, and a copy taken
+mid-save mixes two checkpoints. The directory is relocatable: model paths in `registry.json` are
+relative and no absolute path was found in any tested file. Weights load with
+`map_location="cpu"`, so a GPU-trained workspace should load on a CPU (not tested). Install the
+same package version on both machines. Never load a workspace from an untrusted source:
+`stream/market.pkl` and `pending.pkl` are unpickled, and unpickling runs code.
 
 **Event directories.** One Parquet table per event type, written by `EventStore.save` only when
 it has rows. Columns are the dataclass fields in [events.py](../src/nardis_neural/solana/events.py).
@@ -1093,8 +1161,8 @@ Numbers are in [Evidence](#evidence).
 | Narratives ([narrative.py](../src/nardis_neural/solana/narrative.py)) | theme heat of a token's name words, copycats | inputs only (`narrative_heat_log`, `name_copycats_3600s_log`, `copies_recent_runner`) | computed live, causally | **real, significant** at 5x and 10x |
 | Wallet intelligence ([wallets.py](../src/nardis_neural/solana/wallets.py)) | funding clusters, reputations, runner skill | inputs only | computed live | clustering bug fixed in `c40edaa`; not re-measured |
 
-`GET /health` reports which of `moonshot`, `tape`, `stopping` and `edge` are installed. It does
-not list the runner detector or the risk model.
+`GET /health` → `models` reports which of `moonshot`, `tape`, `stopping`, `edge`, `runners` and
+`risk` are installed.
 
 ## The chase, hard-coded
 
@@ -1125,7 +1193,9 @@ needed. Probabilities are first made non-increasing in k.
 edge.
 
 **Proven-hits rule.** In trade advice, target k is proven only when at least 3 of Nardis's
-settled trades reached k (peak or realised). The moonshot view (`/ranking`, `/moonshots`,
+settled trades reached k (peak or realised). Until then its probability (`p_{k}x`, and the
+top-level `p_10x` / `p_100x`) is capped at its break-even, so `edge_{k}x` is at most 1, and
+`tail_ev` counts only proven rungs (0.7 with none proven). The moonshot view (`/ranking`, `/moonshots`,
 `/assess`, alerts) passes no hit counts, so every target counts as proven there, and a
 market-side `chase_target` can be 100 or 1000 on model probabilities alone. Only a guard veto
 forces `chase_target` and `chase_edge` to 0; trust does not lower them.
@@ -1161,12 +1231,12 @@ The fields that drive decisions:
 
 Everything here is advice. Nardis decides.
 
-### What is proven and what is not
+### What is measured and what is not
 
 | signal | status |
 |---|---|
-| Crash risk `p_collapse_1m` / `_5m` / `_15m` | Proven on real data (AUC ≥ 0.96, well calibrated). The strongest signal the addon has. |
-| Log-utility stopping (`/hold_advice`) | Proven on real data: lost 39 % less than the ladder and 76 % less than holding, out of sample. Still a loss in absolute terms on that window. |
+| Crash risk `p_collapse_1m` / `_5m` / `_15m` | Measured out of sample on one 1.5 h real window (W1, 688 test tokens): AUC ≥ 0.96 and well calibrated. The strongest signal the addon has. |
+| Log-utility stopping (`/hold_advice`) | Measured out of sample on the same window (645 paths, no confidence interval): lost 39 % less than the ladder and 76 % less than holding. Still a loss in absolute terms. |
 | Ranking by P(≥2x) / chase score | Real ranking skill (AUC about 0.84 to 0.90). One small sample (18 tokens in the top 5 %) put the 2x hit rate above break-even. |
 | 5x and 10x ranking | Real AUC 0.78 to 0.92 across windows, but too few hits to prove a 10x hit rate above its 3.2 % break-even. |
 | 100x and 1000x | Never observed in real data. Probabilities are rankings, not odds. |
@@ -1178,8 +1248,8 @@ Everything here is advice. Nardis decides.
 
 ### At entry: filtering and ranking
 
-1. Pull candidates from `GET /moonshots?target=2&min_edge=1` or `GET /ranking`. Vetoed tokens are
-   already removed.
+1. Pull candidates from `GET /moonshots?target=2&min_edge=1` or `GET /ranking`, or receive them
+   from `serve --alert-url`. Vetoed tokens are already removed.
 2. Drop or down-rank tokens whose `flags` Nardis does not accept, and tokens with low `trust`.
 3. Rank by `chase_score` or by `edge_2x`. Do not read a market-side `chase_target` of 100 or 1000
    as a real opportunity: that view has no proven-hits gate and the far tail is unmeasured (on
@@ -1197,8 +1267,10 @@ Everything here is advice. Nardis decides.
   at most 2).
 * Use `POST /allocate` as an upper bound and keep its defaults. On the real bankroll test it broke
   even with a 1.6 % drawdown while flat staking lost 7.8 %.
-* Pass `open_stakes` and `peak_equity_sol` on every call. Enforce Nardis's own daily loss stop:
-  the endpoint cannot.
+* Pass `open_stakes` and `peak_equity_sol` on every call. The endpoint remembers the market
+  day's opening equity (`capital/book.json`) and stops new stakes 15 % below it; pass
+  `day_start_equity_sol` if Nardis's own day starts elsewhere. Keep Nardis's own daily stop as
+  well: the addon's day follows the market clock and only sees the equity Nardis sends.
 * Raise `kelly_scale` (Python only) only after the forward ledger's track record confirms the
   edge.
 
@@ -1260,18 +1332,23 @@ or wallet dependency.
 * **mypy**: `strict = true`, `mypy_path = "src"`, `files = ["src/nardis_neural", "tests",
   "examples"]`, `plugins = ["pydantic.mypy"]`. The paths are relative, so run mypy from the addon
   directory.
-* Current state (ruff 0.16.9, mypy 2.3.1): `mypy` reports no issues in 148 source files (45 s),
-  `ruff check .` passes, `ruff format --check src tests examples` passes. Do not run
-  `ruff format .` over the docs without regenerating the README afterwards.
-* **Tests**: 34 test modules, 249 test functions, 276 collected items, 4 marked `slow`. pytest
-  settings: `-q`, `timeout = 900` per test, markers `slow`, `cuda`, `mps`.
-  `pytest -m "not slow"` passed in about 20 minutes wall time (46 minutes of CPU time) on a shared
-  4-core machine, with 3 device tests skipped. The slowest items were
+* Current state (ruff 0.16.9, mypy 2.3.1): at `d8785d4`, `ruff check .` passes and
+  `ruff format --check src tests examples` passes (150 files). The fix run reported `mypy src`
+  clean (111 source files) and mypy clean on the changed test files. The full `mypy` (148 source
+  files and 45 s at `cecfa9c`) was not re-run for this document. Do not run `ruff format .` over
+  the docs without regenerating the README afterwards.
+* **Tests**: 36 test modules, 288 test functions, 326 collected items, 4 marked `slow` (counted at
+  `d8785d4`). pytest settings: `-q`, `timeout = 900` per test, markers `slow`, `cuda`, `mps`.
+  Before the hand-off fixes (34 modules, 276 items), `pytest -m "not slow"` passed in about 20
+  minutes wall time (46 minutes of CPU time) on a shared 4-core machine, with 3 device tests
+  skipped. The fix run then ran every changed test file on its own, all passing; the whole suite
+  was not re-run. The slowest items were
   `test_walk_forward_edge_research_and_brain_integration` (297 s),
   `test_runner_research_and_brain_integration` (152 s) and
   `test_stream_train_bootstraps_bounds_memory_learns_online_and_resumes` (120 s). The 4 slow items
   were not timed.
-* `tests/` is a Python package, and 18 test modules import `tests.conftest`. If Nardis also has a
+* `tests/` is a Python package, and 18 test modules import from it (`tests.conftest` and others).
+  If Nardis also has a
   top-level `tests` package, one pytest run over both trees fails at collection (reproduced).
   Run them separately. `pytest nardis-neural/tests` from Nardis's root works: pytest picks
   `nardis-neural/pyproject.toml` as its config and `nardis-neural/` as rootdir.
@@ -1337,9 +1414,19 @@ hooks that must be kept, and extended when state is added:
 * `WalletIntel.__setstate__` ([wallets.py](../src/nardis_neural/solana/wallets.py) line 247) fills
   `paid_by`; `WalletIntel.from_dict` defaults `tail_prior`, `tail_alpha`, `tail_beta`, `paid_by`.
 * JSON loaders read newer keys with `.get(default)`: `MetaLearner.load` (`trade_ids`,
-  `since_fit`, `smear`, `report`), `SolanaBrain` state (`evict_idle_seconds`,
-  `moonshot_last_refit`), `TailModel.load` (`inputs`, `report`), `StoppingModel.load` (`gamma`,
-  `report`), `RunnerDetector.load` (`report`, `blend_targets`), `EdgeModel.load` (`report`).
+  `since_fit`, `smear`, `report`, `generation`, `value`; a config without `max_pending` gets the
+  default, and an interim `pending_ttl_seconds` key is dropped), `SolanaBrain` state
+  (`evict_idle_seconds`, `moonshot_last_refit`; `null` means infinite, and the `-Infinity` of
+  older files still parses), `TailModel.load` (`inputs`, `report`), `StoppingModel.load`
+  (`gamma`, `report`), `RunnerDetector.load` (`report`, `blend_targets`), `EdgeModel.load`
+  (`report`). A missing `edge/research.json` gives an edge threshold of 0.
+* `MetaLearner.load` reads both the generation-tagged tree files (`level_<k>.g<N>.npz`) and the
+  older untagged ones. `pending.pkl` holds `_Pending` objects (a `NeuralObservation`, a
+  `NeuralPrediction` and a NumPy row) pickled by class path, like `market.pkl`; an unreadable
+  file is ignored.
+* `solana_state.json` is written with `allow_nan=False`, so it is strict JSON. Every
+  `SolanaBrain.save()` writes files through a temporary file and a rename, except the replay
+  buffer, `risk_samples.npz`, `moonshot/online.npz` and `events/`; keep new state files atomic.
 * Rule for new state: a new attribute on a pickled class needs a `state.setdefault(...)` in
   `__setstate__`; a new JSON key needs a `.get(key, default)` in the loader.
 * Model weights are loaded with `torch.load(..., weights_only=True)`, except the trainer's resume
@@ -1348,15 +1435,21 @@ hooks that must be kept, and extended when state is added:
 ### Thread safety
 
 `SolanaBrain` is not thread-safe. `AddonService` holds one `threading.RLock` around every request
-and every background step. The stream thread releases the lock between 50-event chunks; the
-archive thread holds it for a whole scan and refit; maintenance holds it for the whole
-adaptation or retrain.
+and every background step that touches the brain. The stream thread releases the lock between
+50-event chunks, and a checkpoint waits (on a condition of the same lock) until a poll in
+progress is fully ingested, so the saved brain and the committed cursor always match. The archive
+thread reads and parses the archive outside the lock and holds it only to learn new trades,
+refit and save `meta/`. The alert thread holds it while scanning and posts outside it.
+Maintenance holds it for the whole adaptation or retrain; moving that off the lock would need
+training on a snapshot and swapping models in, which is not built.
 
 ### Security
 
-* The HTTP API has **no authentication and no TLS** and no request size limit. `serve --host` and
-  `make_server` default to `127.0.0.1`. Never bind it to a public interface without a firewall.
-* `stream/market.pkl` is loaded with `pickle.load`. Only load workspaces this system wrote.
+* The HTTP API has **no authentication and no TLS**. Request bodies are capped at 16 MiB (413).
+  `serve --host` and `make_server` default to `127.0.0.1`. Never bind it to a public interface
+  without a firewall.
+* `stream/market.pkl` and `pending.pkl` are loaded with `pickle.load`. Only load workspaces this
+  system wrote.
 * The RPC URL may carry a provider key. Keep it out of the repository and logs.
 * Model checkpoints record the current git commit by running `git rev-parse HEAD` in the package
   directory. After the merge this is Nardis's commit.
@@ -1368,7 +1461,7 @@ adaptation or retrain.
 | [ingest/rpc.py](../src/nardis_neural/solana/ingest/rpc.py) | `READ_ONLY_METHODS` allowlist of 11 read methods; `SolanaRpc.call` raises `PermissionError` for anything else. Tested by `test_solana_ingest.py::test_rpc_is_read_only_and_retries` (`sendTransaction`, `requestAirdrop`). |
 | [pyproject.toml](../pyproject.toml) | no Solana SDK, signing or key-handling dependency |
 | output schemas | `test_inference.py` and `test_solana_brain.py` assert that `NeuralPrediction` and `SolanaAssessment` contain none of `action`, `signal`, `buy`, `sell`, `order`, `side`, `size`, `position` |
-| [service.py](../src/nardis_neural/solana/service.py) | every endpoint returns numbers; none builds a transaction. The only other outbound HTTP is `AddonService.alerts`, which POSTs candidate JSON to a URL the operator gives |
+| [service.py](../src/nardis_neural/solana/service.py) | every endpoint returns numbers; none builds a transaction. The only other outbound HTTP is `AddonService.alerts` (`serve --alert-url`), which POSTs candidate JSON to a URL the operator gives |
 
 `SolanaRpc._http` is private and skips the allowlist; only `call` is the public path. Keep it that
 way in the merge: Nardis's own signing code must not be wired into `nardis_neural`, and no
@@ -1379,11 +1472,28 @@ way in the merge: Nardis's own signing code must not be wired into `nardis_neura
 * **`.gitignore`.** An unanchored `data/` or `models/` in Nardis's root `.gitignore` hides new
   files under `nardis-neural/src/nardis_neural/data` or `…/models`. The addon's own `.gitignore`
   anchors its data folders to its root (`/data/`, `/models/`, `/workspaces/`) for that reason.
-* **`serve --alert-url` does not exist.** Leave it out of any start-up script until it is wired.
 * **`init-config` writes into the working directory** (see [Command map](#command-map)).
 * **`benchmark.py` imports `resource`**, which exists only on Unix.
 
 ## Status at hand-off
+
+### Current state
+
+The code is at `d8785d4` (29 September 2026) plus the follow-up "Fix four defects found in the
+docs review" (D1 to D4); the other later commits update only the docs and the generated README. Three commits after the real-data work matter for the
+merge. `c40edaa` stopped program payments from merging every buyer of a token into one funding
+cluster; the cluster features have not been re-measured since (open work item 1). `cecfa9c`
+added this guide and [API.md](API.md) to the README and corrected the stale scope, window and
+formatting statements (defects 37 to 39). `d8785d4` fixed the code defects found in the hand-off
+review: `serve` now pushes alerts, runs the full upkeep with or without the RPC stream, saves on
+SIGTERM, answers every request with a status code, de-duplicates `/ingest`, remembers the
+allocator's day, and saves its state atomically. Four more found by the docs verification (D1 to D4) are fixed too. Of the 39 defects, 33 are fixed, 1 is partly
+fixed (13) and 5 stay open: 24, 25 and 29 by design, 28 and 36 not yet fixed; both lists are
+below. The fixes were checked with the test
+suite, one file at a time, and on tiny synthetic workspaces. None has run on a real workspace or
+against the live chain yet.
+
+### What the addon can and cannot do
 
 The addon gives advice and never trades. On real pump.fun data three things hold up out of
 sample: the crash (collapse) probabilities, the log-utility exit rule, and the ranking of which
@@ -1403,8 +1513,8 @@ long, not days, and they overlap.
 
 ### What was built
 
-55 commits between 27 and 29 September 2026. Run `git log --format='%h %ad %s' --date=short` for
-the full list.
+57 commits up to `d8785d4`, between 27 and 29 September 2026; later commits change only the docs.
+Run `git log --format='%h %ad %s' --date=short d8785d4` for the full list.
 
 | area (date) | commit | what |
 |---|---|---|
@@ -1452,6 +1562,8 @@ the full list.
 | | `1be49c5` | runner hits credited the moment they happen; `GET /moonshots` and the push-alert scanner |
 | | `3574822` | narrative signals |
 | | `75d2ca6` | the 3 h 40 min benchmark and the measured value of narratives |
+| hand-off (29 Sep) | `cecfa9c` | this guide and [API.md](API.md) in the README; stale scope and window statements corrected |
+| | `d8785d4` | sidecar and core state hardened: alerts, upkeep without the stream, SIGTERM save, error codes, `/ingest` de-duplication, cursor commits, atomic saves, remembered allocator book |
 
 ### Evidence
 
@@ -1484,7 +1596,7 @@ W1 lies inside W3, so these are not independent samples. All come from one eveni
 | Capital allocator | **yes**, W1, 100 SOL book | +0.0 % return, 1.6 % drawdown, 145 tickets, against −7.8 % / 12.5 % for a flat 0.5 SOL stake; bootstrap P(loss) 69 % against 82 % | Deflated Sharpe 1.00 on two markets |
 | Graduates after PumpSwap | yes, W1: 22 graduates, 21 with an entry price | 10 peaked ≥ 2x, 2 ≥ 10x (31.3x, 28.4x), 0 ≥ 50x, 16 ended under 0.1x; every peak within 17 min of launch | – |
 | Cluster features after the funding fix | **not re-measured** | median largest-cluster share of a token's buyers fell from 0.71 to 0.04 (p90 0.91 → 0.11) | – |
-| Criticality (Hawkes) features | indirect only | branching ratios in the top 8 permutation importances for 2x and 10x runners (W2) | ablation: test NLL 0.188 against 0.283 with herding |
+| Criticality (Hawkes) features | indirect only | branching ratios in the top 8 permutation importances for 2x and 10x runners (W2) | ablation on a simulated herding market: test NLL 0.188 with the criticality features against 0.283 without (all 3 seeds) |
 | Edge engine | no | – | +25.8 % and +20.1 % mean net per trade on two 60-launch markets, 20–25 trades each |
 | Risk model | no | – | AUC about 0.99; the simulated world is easy |
 | Neural core | no | – | tiny model: downside AUC 0.84, return rank correlation 0.13 |
@@ -1498,101 +1610,105 @@ Sources: [REAL_DATA.md](REAL_DATA.md) sections 1 to 11, [TAPE.md](TAPE.md),
 [CRITICALITY.md](CRITICALITY.md), [EDGE.md](EDGE.md), [SOLANA.md](SOLANA.md) and
 [INTEGRATION.md](INTEGRATION.md).
 
-### Known limitations
+### Fixed during the hand-off review
+
+The hand-off review found 39 defects by reading the code and reproducing them on tiny synthetic
+workspaces. The docs verification that followed found four more (D1 to D4 below), fixed in the
+final commit of the hand-off, "Fix four defects found in the docs review". Defects 37 and 38 were fixed in the docs in `cecfa9c`, and defect 39 in `cecfa9c` and the later
+docs update; the rest were fixed in
+`d8785d4` unless listed as open in the next section. Numbers are the review's.
+
+| # | defect | what changed | what Nardis sees differently |
+|---|---|---|---|
+| 1 | `serve` had no alert options | `--alert-url`, `--alert-target`, `--alert-min-edge`, `--alert-every` start the alert thread; a target outside 2, 5, 10, 100, 1000 exits with code 2 | candidates are POSTed to its receiver; `/health` → `alerts` counts them |
+| 2 | `--no-stream` ran no upkeep | the background thread always runs: assessment rounds, resolve, eviction, maintenance, a save every 5 minutes, bounded memory | no `POST /save` timer needed; memory stays bounded; models and the paper ledger learn |
+| 3 | SIGTERM skipped the final save | SIGTERM stops the threads and saves, like Ctrl-C | `systemctl stop` and `docker stop` are safe |
+| 4 | research commands failed on a streamed workspace | `--events` / `-e` on `edge-`, `moonshot-`, `tape-`, `stopping-` and `runner-research`; a clear message without it | research after the first `serve` needs `--events` |
+| 5 | an adaptation `ValueError` escaped `maintenance()` | caught and returned as `adapt_error` / `full_retrain_error`; promotion, refits and the save still run | two new keys in the maintenance summary; `solana stream` and `stream-train` no longer crash |
+| 6 | some failures closed the connection; every `RuntimeError` was a 409 | 400 for a non-object `/ingest` element, 500 for any other failure, 409 only while no tail model is installed; `"meta": null` decodes as no events | every GET or POST failure has a status code and a JSON body |
+| 7 | `/ingest` counted re-sent transactions twice | de-duplication by first signature (last 200 000); a push without `meta`, or one that fails to decode, is not remembered | new `duplicates` field; a complete resend of a meta-less push is ingested |
+| 8 | `/allocate` built a fresh book per call | the day's opening equity is kept in `capital/book.json`; `day_start_equity_sol` and `--day-start-equity` set it; open stakes count toward their creator family | `daily loss stop` and `family cap` can now appear |
+| 9 | the cursor moved before a poll was fetched; one bad transaction dropped the poll | the cursor advances only after a full poll; a transaction that does not decode is skipped alone; after 3 failed polls a transaction that never fetches is skipped | `stream.decode_errors`, `stream.fetch_errors` |
+| 10 | the cursor was saved every poll, the brain every 5 minutes | `ChainStreamer.commit` writes the cursor only after a brain checkpoint, with the position it covers | after a crash the chain is replayed, not skipped; `ChainStreamer.poll()` alone no longer writes the cursor file |
+| 11 | `/health` omitted gaps, the runner detector and the risk model | `models.runners`, `models.risk`, the new `stream` counters and an `ingest` block | more fields; `stream.gaps` counts each skipped backlog once |
+| 12 | decoder state grew forever | eviction also forgets the evicted tokens in both decoders | constant memory over weeks |
+| 14 | `serve` had no assessment timer | an assessment round every `--assess-every` seconds (10), skipped while the market clock stands still | the forward ledger and continual learning advance without Nardis polling |
+| 15 | a missing `edge/research.json` stopped the brain loading | it loads with an edge threshold of 0 | – |
+| 16 | `bootstrap` over a workspace mixed old and new parts | it refuses an existing workspace; `--overwrite` replaces everything, only after training succeeded | exit code 2 instead of a silent partial rebuild |
+| 17 | `solana_state.json` held `-Infinity` | strict JSON, `null` for "never" | strict parsers can read it |
+| 18 | pending assessments were not saved; pending proposals never expired | `pending.pkl` is saved and labelled after a restart; at most 20 000 proposals wait, the oldest is dropped | `learner.pending_trades` stays bounded; a dropped proposal settles with `accepted: false` |
+| 19 | a settled `trade_id` could be learned twice | re-advising it stores nothing; settling it again is refused | `accepted: false` |
+| 20 | `meta/`, `solana_state.json` and `forward/` were written in place | atomic writes; `meta/` tree files are tagged by save generation | new file names in `meta/`; a crash mid-save leaves the previous state |
+| 21 | failed candidates stayed in `models/` | pruned right after registration | a smaller `models/` |
+| 22 | one corrupt Parquet file blocked every archive scan | it is skipped and counted, and given up after 3 failed scans until it changes | `archive.last.unreadable_files` |
+| 23 | the guard docstring said trust scales the tail probabilities | the docstring now matches the code: trust scales `chase_score` and `lottery_kelly` only | – (behaviour unchanged) |
+| 26 | cold-start chase showed `edge_1000x` about 1665 and `tail_ev` about 500 | an unproven target is capped at break-even; `tail_ev` banks proven targets only | cold start: every `edge_{k}x` 1.0, `tail_ev` 0.7, `p_10x` 0.0323 |
+| 27 | a negative `limit` on `/moonshots` dropped rows from the end | clamped to 0, as on `/ranking` | an empty list |
+| 30 | request bodies had no size limit | 413 above 16 MiB (bodies up to 64 MiB are read first so the client sees it); 400 for a bad `Content-Length` | a 413 instead of unbounded memory |
+| 31 | proxy credentials were ignored; `NO_PROXY` matched exact hosts only | `Proxy-Authorization` from `user:pass@`; `NO_PROXY` matches `*` and parent domains | authenticating proxies work |
+| 32 | `backfill` looked up today's mint authorities for past transactions | it decodes without lookups, as history replays do | no `getAccountInfo` calls from `backfill` |
+| 33 | a rerun never extended a graduates segment cut short | the `done` marker records the end reached; the last segment is refetched when a rerun ends later | no post-graduation gap after a rerun |
+| 34 | Ctrl-C on `solana stream` skipped the final save | ingest the rest of the poll, save and commit the cursor in a `finally` block | – |
+| 35 | a regular install shipped no YAML presets | installed under `<prefix>/share/nardis-neural/configs/` | – |
+| 37 | docs said the repository had no Solana RPC or ingestion | scope notes corrected (`cecfa9c`) | – |
+| 38 | the "12-hour window" had been fetched only in part | REAL_DATA.md names the 3 h 40 min actually used (`cecfa9c`) | – |
+| 39 | `ruff format --check .` failed on Python blocks in Markdown | the blocks were formatted in `cecfa9c`, except one block of this document, which was formatted in the hand-off update after `d8785d4` | – |
+| D1 | a positive stake under 0.02 SOL kept its plain reason while a capped-to-zero stake said ` (below minimum)` (inverted) | the label now goes on the stake that was cut for being too small | `reason` reads e.g. `sized (below minimum)`; `stake_sol` 0 still means do not enter |
+| D2 | a list or string in `features` or `open_stakes` gave 500 | validated as JSON objects | 400 with `features must be a JSON object of name: number` |
+| D3 | a reply JSON could not hold gave a 500 body without the exception type | same shape as every other 500, cut to 500 characters | – |
+| D4 | `solana stream` never evicted idle tokens, so its memory grew without bound | bounded memory by default (`--bounded-memory/--keep-history`); idle tokens and their decoder state are evicted at each maintenance; `run_live` reports `evicted` | the `solana stream` stats gain `evicted` |
+
+### Known limitations and open design choices
+
+What is still true after the fixes, with the reason.
 
 | limitation | detail | what to do |
 |---|---|---|
-| Live feed throughput | a hosted node fetches about 58 transactions/s; pump.fun peaks at about 80. On a busy day the feed lags; a poll backlog beyond 50 000 signatures is skipped and counted in `ChainStreamer.gaps` (not shown by `/health`) | if Nardis already has a full feed, push it through `POST /ingest` with `--no-stream`, after fixing open-work item 2 |
+| Maintenance blocks requests (defect 13, partly fixed) | maintenance trains and swaps the models that requests read, so it runs under the service lock; only the archive read moved off it. The pause on a real workspace is unmeasured (9.8 s for one adaptation of the tiny config) | set client timeouts and treat a timeout as "no advice"; measure it (open work item 7) |
+| Market-side chase is not hit-gated (defect 24, by design) | `/ranking`, `/moonshots`, `/assess` and alerts pass no hit counts, so `chase_target` can be 100 or 1000 on model probabilities alone ([CHASE.md](CHASE.md) §2) | treat it as a ranking, not odds; use the hit-gated `chase` of `/advise_trade` for targets |
+| Candidate `p_ge_{k}x` and `edge_{k}x` can disagree (defect 25, by design) | `p_ge_{k}x` is the tail model alone; `edge_{k}x` averages in the runner detector for its `blend_targets` | read `edge_{k}x` as the blended view; see [API.md](API.md#get-ranking) |
+| `t_exit` is not used (defect 28, open) | `/settle_trade` accepts it; the learner orders trades by the proposal's `t` | send it anyway; it costs nothing |
+| `/tokens` shows the launch venue (defect 29, by design) | `/assess` shows the current venue, so a graduated pump.fun token differs between the two | use `/assess` for the current venue |
+| docgen needs a source checkout (defect 36, open) | `ROOT` is the package's grandparent directory, so a regular install cannot build or check the README | install editable (`pip install -e`) |
+| `solana stream` is the lesser live path | it has no HTTP API. By default (`--bounded-memory`) it keeps no event history and evicts idle tokens and their decoder state at each maintenance; `--keep-history` keeps everything in memory. It always polls PumpSwap as well as pump.fun. It saves only at maintenance and on Ctrl-C, and SIGTERM ends it without the final save (from reading the code) | use `serve` |
+| In-process memories | `/ingest` de-duplication and the alert thread's sent list are not saved: after a restart a re-sent transaction is ingested again and current candidates are alerted again | send each transaction once; tolerate a repeated alert after a restart |
+| Very large bodies | above 64 MiB the 413 is sent without reading the body, and the connection is closed; some clients report a reset | keep `/ingest` batches small |
+| `pending.pkl` size | about 10 KB per pending assessment (tiny workspace); it holds every assessment still inside its horizon | watch the workspace size on a busy day |
+| Live feed throughput | a hosted node fetches about 58 transactions/s; pump.fun peaks at about 80. On a busy day the feed lags; a poll backlog beyond 50 000 signatures is skipped and counted in `stream.gaps` | if Nardis already has a full feed, push it through `POST /ingest` with `--no-stream` |
+| `/ingest` is tested on synthetic transactions only | real mainnet `getTransaction` JSON has not been pushed through it | check `ingest.undecodable` on the first real day |
 | Short real windows | the longest scored window is 3 h 40 min, all from one evening; 10x has 4 to 10 hits per test set, 100x and 1000x none | treat every real number as a first measurement; fetch days before judging a 10x chase |
 | Graduates peaked at graduation | in W1 every graduate peaked within 17 minutes of launch, at or before graduation | treat graduation as a decision point |
 | Wallet reputations need time | runner skill, wallet skill and creator track record are learned from what the market has seen; 3.7 hours gave them little time | keep the sidecar running for days before judging these features |
 | Memory for 10 s snapshots | on W1, 10 s snapshots for the Tape Transformer exceeded 15 GB | set `sample_interval_seconds: 60` in `ws/solana.yaml` before `tape-research` on a 16 GB machine |
 | Exit alarm | mixed on the simulator (+3 % and −12 %), small gain on W1 | log it as an input; do not use it as a rule |
-| Meta-learner cold start | base rates, `size_multiplier` 1 and no veto until 50 trades have settled; refits every 25; the 10x and 100x classifiers need 8 hits and 8 misses; a chase target needs 3 real hits | settle every trade; expect days before any learned answer |
+| Meta-learner cold start | base rates, `size_multiplier` 1 and no veto until 50 trades have settled; refits every 25; the 10x and 100x classifiers need 8 hits and 8 misses; a chase target needs 3 real hits and stays at break-even until then | settle every trade; expect days before any learned answer |
 | `settle_trade` needs `advise_trade` first | an unadvised `trade_id` returns `"accepted": false` and is not learned | advise every trade, even in shadow mode |
-| Market-side chase is not hit-gated | `/ranking`, `/moonshots`, `/assess` and alerts can report `chase_target` 100 or 1000 | treat it as a ranking, not odds |
 | Entry model at long horizons | with a 1-hour horizon on a short window most labels are censored | use windows of 8 to 12 hours or more for entry research |
 | No authentication | the HTTP API has none | bind to `127.0.0.1` (the default) |
 
-### Known defects
-
-Found during the hand-off review by reading the code and, where marked, reproducing on a tiny
-synthetic workspace. None is fixed yet.
-
-| # | where | defect | reproduced |
-|---|---|---|---|
-| 1 | [cli.py](../src/nardis_neural/solana/cli.py) 669–742, docstring line 709; [INTEGRATION.md](INTEGRATION.md) lines 35–47; README | `serve` has no `--alert-url`, `--alert-target`, `--alert-min-edge`, `--alert-every`; `AddonService.alerts` (service.py 179) is never started outside tests; the documented command fails with `No such option` | yes |
-| 2 | [service.py](../src/nardis_neural/solana/service.py) 302–362 with cli.py 715–731 | with `serve --no-stream` nothing calls `resolve`, `maintenance`, `evict`, the periodic `save` or `enable_streaming`: no autosave, unbounded memory, no labels, forward tickets never settle; contradicts INTEGRATION.md lines 78 and 107–108 | by reading and test |
-| 3 | cli.py 736–742 | only `KeyboardInterrupt` is handled; SIGTERM skips `service.stop()` and the final save | yes |
-| 4 | brain.py 196–207 with the research commands in cli.py | once `stream/market.pkl` exists the workspace has no event history and every research command fails; the CLI research commands have no `--events` option | yes |
-| 5 | brain.py 593–614 | `ValueError` from `ContinualLearner.adapt` (continual.py 337–338) propagates out of `maintenance()`; `solana stream` (ingest/stream.py 162) and `stream-train` (streaming.py 120–121) crash; `serve` skips that maintenance's save | yes (threshold lowered) |
-| 6 | service.py 283; ingest/decoder.py 92 and 100; service.py 90–96 | a non-object element in `/ingest` or a transaction with `"meta": null` plus a `transaction` object raises `AttributeError`, which is not caught: the client gets no HTTP response. No catch-all for other exception types, and every `RuntimeError` (including internal ones) is reported as 409 | yes |
-| 7 | service.py 273–295 | `/ingest` has no signature de-duplication (the stream has one, ingest/stream.py 101–104); re-sent transactions are double counted | yes |
-| 8 | brain.py 558–563 with capital/allocator.py 123–126 | `/allocate` and `solana allocate` build a fresh book per call, so the 15 % daily loss stop never fires and the family cap ignores families of `open_stakes` | by reading |
-| 9 | ingest/stream.py 93 and 95–124 | the in-memory cursor advances before transactions are fetched and decoded; a failure after retries, or a decoder exception, skips the whole batch for good | by reading |
-| 10 | ingest/stream.py 124 vs service.py 308 | the cursor is saved every poll, the brain every 300 s; after a crash up to 5 minutes of chain activity is never ingested | by reading |
-| 11 | service.py 101–120, 321 | `/health` omits `ChainStreamer.gaps` (INTEGRATION.md 104–105 says skips are "counted, never silent"), the runner detector and the risk model | by reading |
-| 12 | service.py 344–351 | after `brain.evict()` the stream thread never calls `streamer.decoder.forget(gone)` (streaming.py 122 does), so decoder per-mint state grows for the life of the sidecar | by reading |
-| 13 | service.py 342–356, 364–381 | maintenance and the whole archive scan and refit run under the service lock and block every request; the module docstring (service.py 25–26) says each call takes milliseconds | not measured |
-| 14 | service.py | `serve` has no periodic assessment round (unlike `solana stream`, ingest/stream.py 154): continual learning and the forward ledger only advance when Nardis calls assessing endpoints | by reading |
-| 15 | brain.py 215–217 | if `edge/edge.json` exists and `edge/research.json` does not, the whole brain fails to load | yes |
-| 16 | brain.py 263–294 with continual.py 171–176 | `bootstrap` on an existing workspace keeps the old champion but overwrites `events/`, `solana.yaml`, `config.yaml` and refits `risk/` on the new, discarded engine's embeddings | yes |
-| 17 | brain.py 252, 961–975 | `solana_state.json` holds `"moonshot_last_refit": -Infinity` until the first online tail refit; not valid for strict JSON parsers | yes |
-| 18 | brain.py 936–975; metalabel.py 168, 334 | pending assessments are not persisted (only their count); pending trade proposals never expire | by reading |
-| 19 | metalabel.py 167–168, 231–249 | `settle` does not check known ids: advising an already settled `trade_id` again and settling it adds a duplicate history row | by reading |
-| 20 | metalabel.py 305–340; brain.py 962; forward.py 180–181 | `meta/`, `solana_state.json` and `forward/` are written in place, not atomically; a crash mid-save can leave `meta/` inconsistent | by reading |
-| 21 | training/continual.py 566 | `ModelRegistry.prune` runs only on promotion, so failed candidate directories accumulate in `models/` | yes |
-| 22 | archive.py 69–72 | one permanently corrupt Parquet file blocks every archive scan | yes |
-| 23 | moonshot/guard.py 9; brain.py 452–480 | the docstring says trust multiplies the tail probabilities; the code applies trust only to `chase_score` and `lottery_kelly` (a toy token with trust 0.20 got `chase_target` 1000) | yes |
-| 24 | brain.py 468–475 | market-side `chase_profile` gets no hit counts, so `chase_target` can be 100 or 1000 from unmeasured far-tail probabilities (documented in CHASE.md §2, but a design risk) | by reading |
-| 25 | service.py 148–153 | candidate `p_ge_{k}x` is the tail model alone while `edge_{k}x` averages in the runner detector for `blend_targets`; undocumented before [API.md](API.md) | by reading |
-| 26 | metalabel.py 153–157, 192 | with no or few settled trades the chase reports `edge_1000x` about 1665, `tail_ev` about 500 under `source: "prior"`; misleading if read directly | yes |
-| 27 | service.py 176 vs 157 | `/moonshots` slices `rows[:limit]`, so a negative limit drops rows from the end; `/ranking` clamps to 0 | by reading |
-| 28 | service.py 246–253 | `settle_trade` accepts `t_exit` but the learner never uses it | by reading |
-| 29 | service.py 126 | `/tokens` reports the launch venue while `/assess` reports the current venue; INTEGRATION.md line 69 just says "venue" | by reading |
-| 30 | service.py 424 | the request body is read by `Content-Length` with no upper bound on an unauthenticated server | by reading |
-| 31 | ingest/rpc.py 95–112 | proxy credentials (`user:pass@`) are ignored; `NO_PROXY` matches exact host names only | by reading |
-| 32 | cli.py 258–259 (`backfill`) | the live decoder looks up today's mint authorities while decoding recent-history transactions, which history.py deliberately avoids | by reading |
-| 33 | cli.py 611 with history.py `follow_graduates` | a graduates segment already marked `done` is never extended when a rerun computes a later follow-until time | plausible, not reproduced |
-| 34 | ingest/stream.py `run_live` | `brain.save()` at the end of `solana stream` is not in a `finally` block, so Ctrl-C skips the final save | by reading |
-| 35 | pyproject.toml `[tool.setuptools.package-data]` | `configs/*.yaml` matches nothing under `src/nardis_neural/`, so a non-editable install ships no YAML presets | by reading |
-| 36 | docgen.py 30 | with a non-editable install `ROOT` points inside the environment, so docgen and `tests/test_docs.py` work only from a source checkout | by reading |
-| 37 | docs/OVERVIEW.md (scope note near line 14, "Optional / not included" near line 624), docs/ARCHITECTURE.md lines 10–12, src/nardis_neural/__init__.py lines 17–18 | say the repository has no Solana RPC or real-market ingestion; `solana/ingest/` contradicts this. OVERVIEW.md lines 598–610 summarise only the first 1.5 h window; its repository layout omits `runners.py` and `narrative.py` | by reading |
-| 38 | docs/REAL_DATA.md line 274, commit `c40edaa` | "the 12-hour window" was fetched only in part (22 of 72 segments, the same 3 h 40 min as §10) | from fetch logs outside the repository |
-| 39 | README.md, docs/INTEGRATION.md line 283, docs/STOPPING.md line 158 | `ruff format --check .` (the quality gate in OVERVIEW.md) fails on Python blocks inside Markdown | yes |
-
 ### Open work
 
-Ranked by value for the merge. Items 1 to 3 are small code fixes; the rest are measurements.
+The code fixes from the review are done. What is left is mostly measurement, ranked by value for
+the merge.
 
-1. **Wire the alert scanner into `serve`.** Add the four `--alert-*` options and call
-   `service.alerts(...)` when `--alert-url` is set (defect 1).
-2. **Give `--no-stream` an upkeep thread.** Run `resolve`, `maintenance`, `evict` and `save` on a
-   timer, and enable bounded-memory mode, when events arrive by `POST /ingest` (defect 2).
-   Optionally add an assessment round so the forward ledger fills without Nardis's polling
-   (defect 14).
-3. **Harden the sidecar for production.** Handle SIGTERM like SIGINT (defect 3), catch
-   `AttributeError` in `/ingest` and add a 500 catch-all (defect 6), de-duplicate `/ingest`
-   signatures (defect 7), expose `gaps` and the runner detector in `/health` (defect 11), catch
-   the `maintenance()` `ValueError` in `solana stream` and `stream-train` (defect 5).
-4. **Re-measure the cluster features after the funding-cluster fix (`c40edaa`).** The stored
+1. **Re-measure the cluster features after the funding-cluster fix (`c40edaa`).** The stored
    segments were decoded before the fix, so the cluster features (`holder_clusters_log`,
    `top_cluster_share`, `bundle_share`, `creator_cluster_share` and the graph and tape cluster
    fields) were trained on "bought something", not "shares an operator". A fresh fetch is needed,
    then the paired bootstrap of [REAL_DATA.md](REAL_DATA.md) §10.
-5. **Count 100x+ among graduates followed through PumpSwap.** `fetch-history` follows graduates
+2. **Count 100x+ among graduates followed through PumpSwap.** `fetch-history` follows graduates
    6 hours past the window by default. Re-fetch, then count peaks at 10x, 100x and 1000x from a
    20 s entry, as in [REAL_DATA.md](REAL_DATA.md) §7.
-6. **Fetch a full 12-hour window or longer.** The "12-hour window" in §11 was fetched only in
-   part. At 0.63x real time, 12 hours takes about 7 to 8 hours.
-7. **Finish the two cut-short experiments** named in [REAL_DATA.md](REAL_DATA.md) §11: label
+3. **Fetch a full 12-hour window or longer.** No window longer than 3 h 40 min has been fetched
+   in full. At 0.63x real time, 12 hours takes about 7 to 8 hours.
+4. **Finish the two cut-short experiments** named in [REAL_DATA.md](REAL_DATA.md) §11: label
    engineering and entry timing. Both were stopped by an infrastructure restart; no result exists.
-8. **Forward-test the signals live before trusting them.** Run the sidecar through Nardis's paper
+5. **Forward-test the signals live before trusting them.** Run the sidecar through Nardis's paper
    trading and read `nardis-neural solana forward-report --workspace ws`: tickets, paper PnL, mean
    and median multiple with a bootstrap interval, alarm exits (`alarm_minus_ladder_pnl_sol`),
    predicted against observed P(≥10x), and the top quintile by `chase_score` against the rest
    (once 10 tickets have settled).
-9. **Better inputs**, from the research sweep in [REAL_DATA.md](REAL_DATA.md) §11. Six attempts
+6. **Better inputs**, from the research sweep in [REAL_DATA.md](REAL_DATA.md) §11. Six attempts
    showed a bigger or different model does not help; better inputs might:
    * hidden supply: in 47 % of fully observed launches a wallet sells more than it was seen buying
      (9 % of sell SOL); read pre-trade token balances;
@@ -1604,8 +1720,10 @@ Ranked by value for the merge. Items 1 to 3 are small code fixes; the rest are m
      tokens;
    * wash-adjusted order flow: 19.6 % of trades reverse the same wallet's previous trade in the
      same token within 10 s.
-10. **Fix the stale docs** (defects 37 to 39), and add this document and [API.md](API.md) to
-    `PARTS` in docgen if they should appear in the README.
+7. **Measure the sidecar on a real workspace.** Start-up time, memory over days, the pause a
+   maintenance run causes, the size of `pending.pkl`, and a day of Nardis's real feed through
+   `POST /ingest`. If the maintenance pause is too long for Nardis's timeouts, train on a snapshot
+   and swap the models in, so maintenance can leave the lock (defect 13).
 
 ### First week after merging
 
@@ -1622,7 +1740,8 @@ nardis-neural solana bootstrap --events data/hist --workspace ws --profile auto
 nardis-neural solana moonshot-research --workspace ws
 nardis-neural solana tape-research --workspace ws
 nardis-neural solana stopping-research --workspace ws
-nardis-neural solana serve --workspace ws --port 8787 --archive /data/nardis/parquet
+nardis-neural solana serve --workspace ws --port 8787 --archive /data/nardis/parquet \
+    --alert-url http://127.0.0.1:9000/moonshot --alert-target 10 --alert-min-edge 2
 ```
 
 In Nardis:
@@ -1632,11 +1751,13 @@ In Nardis:
 * call `POST /settle_trade` after every close, with `peak_multiple` when known;
 * call `POST /hold_advice` for open positions and log `advantage` and `p_collapse_1m` /
   `p_collapse_5m` next to Nardis's own exits;
-* poll `GET /ranking` (or `GET /moonshots`) on a timer, so the forward ledger opens paper tickets;
-* check `GET /health` for stream counters and learner status.
+* receive the `--alert-url` pushes (or poll `GET /moonshots` / `GET /ranking`) and log the
+  candidates next to Nardis's own picks; the sidecar's assessment round opens the paper tickets on
+  its own;
+* check `GET /health` for stream and ingest counters and learner status.
 
-If Nardis pushes its own feed with `--no-stream`, fix open-work item 2 first, or call `POST /save`
-on a timer.
+If Nardis pushes its own feed, start `serve` with `--no-stream` and push each transaction once to
+`POST /ingest`; the upkeep and the 5-minute save run the same way.
 
 **Days 2 to 5: compare, do not act.**
 
@@ -1669,10 +1790,10 @@ One installable Python package, `nardis_neural`, plus its tests, docs, configs a
 |---|---|
 | [pyproject.toml](../pyproject.toml) | package metadata, dependencies, the `nardis-neural` entry point, ruff, mypy and pytest settings |
 | [README.md](../README.md) | generated by `python -m nardis_neural.docgen` from `docs/*.md` and the code; never edit by hand |
-| `docs/` | hand-written sources of the README (OVERVIEW, then the 12 docs in `PARTS`), plus this document and [API.md](API.md) |
-| `configs/` | `default.yaml` (must equal the code defaults; a test checks it) and `small.yaml` (compact CPU model) |
+| `docs/` | hand-written sources of the README: OVERVIEW, then the 14 docs in `PARTS`, starting with this document and [API.md](API.md) |
+| `configs/` | `default.yaml` (must equal the code defaults; a test checks it) and `small.yaml` (compact CPU model); a regular install copies them to `<prefix>/share/nardis-neural/configs/` |
 | `examples/` | [nardis_integration.py](../examples/nardis_integration.py): runnable reference integration of the generic brain; a test runs it |
-| `tests/` | 34 test modules, a Python package (`tests/__init__.py`, `tests/conftest.py`) |
+| `tests/` | 36 test modules, a Python package (`tests/__init__.py`, `tests/conftest.py`) |
 | `src/nardis_neural/` | the package |
 | [.gitignore](../.gitignore) | ignores caches, `.venv/` and ML artifacts; data folders are anchored to the root |
 
@@ -1729,10 +1850,10 @@ One installable Python package, `nardis_neural`, plus its tests, docs, configs a
 | document | what it covers |
 |---|---|
 | [API.md](API.md) | the complete HTTP sidecar contract: every endpoint, field, error, push alerts, `/ingest` format, operations |
-| [OVERVIEW.md](OVERVIEW.md) | Part I of the README: the generic neural brain, quick start, CLI, configuration, quality gates (some scope notes are stale, see defect 37) |
+| [OVERVIEW.md](OVERVIEW.md) | Part I of the README: the generic neural brain, quick start, CLI, configuration, quality gates |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | the neural network, uncertainty, calibration, OOD, measured inference latency (§9) |
 | [CONTINUAL_LEARNING.md](CONTINUAL_LEARNING.md) | replay, adaptation, full retraining, shadow mode, promotion and rollback |
-| [INTEGRATION.md](INTEGRATION.md) | sidecar quickstart, generic Python integration, forward test, meta-labeling and archive columns (alert flags and `--no-stream` claims are wrong, see defects 1 and 2) |
+| [INTEGRATION.md](INTEGRATION.md) | sidecar quickstart, generic Python integration, forward test, meta-labeling and archive columns |
 | [SOLANA.md](SOLANA.md) | the Solana layer: events, features, risk, ingestion, streaming training |
 | [EDGE.md](EDGE.md) | the triple-barrier edge engine |
 | [MOONSHOT.md](MOONSHOT.md) | the tail model, the manipulation guard, online learning |

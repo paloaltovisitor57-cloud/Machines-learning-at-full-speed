@@ -41,15 +41,19 @@ nardis-neural solana serve --workspace ws --port 8787 --archive /data/nardis/par
 
 With `--alert-url`, the sidecar scans the live market every 5 seconds (`--alert-every`) and
 **POSTs each new candidate to Nardis the moment it qualifies**, once per token per hour:
-`{"type": "moonshot", "target": 10, "candidate": {mint, age_seconds, p_ge_2x … p_ge_1000x,
-edge_2x … edge_1000x, chase_target, trust, p_collapse_1m, flags, …}}`. A failed delivery is
-retried at the next scan and never stops the scanner. `GET /health` shows scans, sent alerts
-and errors.
+`{"type": "moonshot", "target": 10.0, "candidate": {mint, age_seconds, p_ge_2x … p_ge_1000x,
+edge_2x … edge_1000x, chase_target, trust, p_collapse_1m, flags, …}}`. `--alert-target` must be
+2, 5, 10, 100 or 1000. A failed delivery is retried at the next scan and never stops the
+scanner. `GET /health` shows scans, sent alerts and errors. Without `--alert-url` no alerts are
+sent; `GET /moonshots` returns the same rows.
 
 * The archive is a Parquet file or a directory (read recursively, so date-partitioned layouts
   work), or an SQLite `.db` with `--table`. The live service rescans it every 10 minutes
   (`--archive-every`) and learns **only trades it has not seen yet**, by trade id. It is
-  crash-safe: a half-written file is retried at the next scan.
+  crash-safe: in a Parquet directory a half-written or corrupt file is skipped and counted
+  (`archive.last.unreadable_files` in `/health`) while the other files are learned, and it is
+  retried at the next scans (given up after 3 failures until the file changes). The archive is
+  read outside the service lock, so requests wait only while new trades are learned.
 * Columns are found by common names:
   `trade_id|id|signature`, `mint|token|token_address`, `entry_time|open_time|…`,
   `exit_time|close_time|…`, and the result as `multiple`, or `entry_sol` + `exit_sol`, or `return`
@@ -65,7 +69,7 @@ and errors.
 
 | call | when Nardis makes it | returns |
 |---|---|---|
-| `GET /health` | at start-up, then periodically | market clock, tracked tokens, installed models, learner status |
+| `GET /health` | at start-up, then periodically | market clock, tracked tokens, installed models, learner status, stream, ingest, archive and alert counters |
 | `GET /tokens?active_seconds=120` | to see what is live | active tokens, youngest first, with age and venue |
 | `GET /moonshots?target=10&min_edge=2` | to look for entries | tokens still in the entry window whose odds of reaching the target are at least `min_edge` times its break-even, best first, vetoed tokens excluded |
 | `GET /ranking?limit=20` | to look for entries | moonshot candidates with `chase_score`, expected multiple, P(≥10x / ≥100x), trust, crash risk, flags |
@@ -74,21 +78,23 @@ and errors.
 | `POST /settle_trade` | **after every trade closes** | the learner updates (and refits when due) |
 | `POST /hold_advice` | while a position is open | sell-now vs continuation value, P(collapse within 1 / 5 / 15 min) |
 | `POST /allocate` | when sizing | recommended stakes under the capital engine's limits |
-| `POST /ingest` | optional: push the chain transactions Nardis already receives | decodes `getTransaction` JSON (`jsonParsed`) into the brain; lets you run with `--no-stream` |
-| `POST /save` | on shutdown (also automatic every 5 minutes) | checkpoints the workspace |
+| `POST /ingest` | optional: push the chain transactions Nardis already receives | decodes `getTransaction` JSON (`jsonParsed`) into the brain; repeats are skipped by signature; lets you run with `--no-stream` |
+| `POST /save` | on demand, e.g. before a backup | checkpoints the workspace (also automatic every 5 minutes and on Ctrl-C or SIGTERM, with or without the stream) |
 
 ```bash
 curl -s localhost:8787/advise_trade -d '{"trade_id": "t-123", "mint": "<mint>",
      "features": {"nardis_score": 0.82, "signal_strength": 3.1}}'
-# example response: {"p_win": 0.41, "p_10x": 0.05, "p_100x": 0.004, "expected_multiple": 1.12,
+# example response: {"p_win": 0.41, "p_10x": 0.05, "p_100x": 0.003, "expected_multiple": 1.12,
 #  "size_multiplier": 1.3, "veto": false, "reason": "learned; chase 10x (edge 1.6x break-even)",
 #  "evidence": 212, "source": "learned",
 #  "chase": {"p_2x": 0.31, "edge_2x": 1.3, "p_5x": 0.11, "edge_5x": 1.6, "p_10x": 0.05, "edge_10x": 1.6,
-#            "p_100x": 0.004, "edge_100x": 1.3, "chase_target": 10.0, "chase_edge": 1.6, "proven_100x": 0.0, …}}
+#            "p_100x": 0.003, "edge_100x": 1.0, "chase_target": 10.0, "chase_edge": 1.6, "proven_100x": 0.0, …}}
 
 curl -s localhost:8787/settle_trade -d '{"trade_id": "t-123", "multiple": 1.8, "peak_multiple": 3.1}'
 curl -s localhost:8787/hold_advice -d '{"mint": "<mint>", "t_signal": 1790650000}'
 ```
+
+`edge_100x` stays at 1.0 until 3 settled trades have reached 100x.
 
 * `features` is any set of named numbers Nardis has for the trade. Keep the names stable
   between trades; new names are picked up automatically.
@@ -102,10 +108,18 @@ curl -s localhost:8787/hold_advice -d '{"mint": "<mint>", "t_signal": 1790650000
   kept-alive connections; add `--pumpswap` to also follow graduated tokens (much heavier).
   A hosted node fetches about 58 transactions/s, below pump.fun's peak of about 80
   successful transactions/s, so on a busy day the feed lags and skips the oldest backlog
-  (counted, never silent). If Nardis already has a full feed (e.g. Yellowstone gRPC), push
-  it through `POST /ingest` instead and run with `--no-stream`.
-* **Memory.** The sidecar runs in bounded-memory mode: it keeps no event history, and tokens idle
-  for two hours are forgotten at each maintenance, so it can run for weeks.
+  (counted in `GET /health` → `stream.gaps`, never silent). If Nardis already has a full feed
+  (e.g. Yellowstone gRPC), push it through `POST /ingest` instead and run with `--no-stream`.
+* **Upkeep.** With or without `--no-stream`, a background thread assesses the active tokens every
+  10 seconds (`--assess-every`), resolves matured outcomes, runs maintenance every 10 minutes and
+  saves every 5 minutes, so continual learning and the forward-test ledger advance without Nardis
+  polling.
+* **Memory.** The sidecar runs in bounded-memory mode in both modes: it keeps no event history,
+  and tokens idle for two hours are forgotten at each maintenance, so it can run for weeks.
+* **Errors and shutdown.** 400 is a bad request, 404 an unknown endpoint, 409 a missing tail
+  model, 413 a body over 16 MiB, 500 an internal failure; the server keeps running after each.
+  Ctrl-C or SIGTERM (`systemctl stop`, `docker stop`) stops it with a final save. The full
+  contract is in [API.md](API.md).
 * Bind to `127.0.0.1` (the default). The API has no authentication, so never expose it to a
   network without a firewall.
 
@@ -231,8 +245,8 @@ Parquet layout: `observation_id` (string), `timestamp` (float), `current` (list<
   reload the champion (`NeuralEngine.load`) after a promotion.
 * **Latency**: see `docs/ARCHITECTURE.md` §9 and `nardis-neural benchmark`.
   `ensemble.mc_dropout_samples: 0` and smaller sequence lengths reduce latency.
-* **Monitoring**: `nardis-neural drift-report --reference … --current …` reports input,
-  embedding, prediction and error drift. `nardis-neural status --workspace …` shows
+* **Monitoring**: `nardis-neural drift-report --model workspaces/prod --reference … --current …`
+  reports input, embedding, prediction and error drift. `nardis-neural status --workspace …` shows
   lifecycle state.
 * **Safety**: the champion directory is immutable. Promotions and rollbacks only move a
   pointer in `registry.json`, and every transition is appended to its audit log.
@@ -305,7 +319,8 @@ How it stays honest:
   Otherwise the base rate stays. Pure-noise features are therefore never deployed (tested).
 * **Tails need evidence.** The 10x and 100x classifiers need at least 8 positive and 8 negative
   trades before they are even tried. Until then P(10x) and P(100x) are base rates, capped by
-  P(win).
+  P(win). Until a target has 3 real hits among the settled trades, its probability is also held
+  at its break-even, so the chase shows no edge there (`edge_{k}x` at most 1).
 * **Veto only when both signals agree.** A veto needs P(win) below half the average *and* an
   expected multiple below 1.
 

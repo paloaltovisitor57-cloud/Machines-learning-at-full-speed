@@ -162,6 +162,11 @@ def test_every_request_gets_an_answer(served, monkeypatch) -> None:  # type: ign
     service, port = served
     status, body = _call(port, "POST", "/ingest", {"transactions": [1, "x"]})
     assert status == 400 and "JSON object" in body["error"]
+    bad = {"trade_id": "bad", "mint": "m", "features": [1, 2], "with_market": False}
+    status, body = _call(port, "POST", "/advise_trade", bad)
+    assert status == 400 and "features must be a JSON object" in body["error"]
+    status, body = _call(port, "POST", "/allocate", {"equity_sol": 10, "open_stakes": "m"})
+    assert status == 400 and "open_stakes" in body["error"]
     null_meta = {
         "slot": 5,
         "meta": None,

@@ -198,11 +198,22 @@ def run_live(
 ) -> dict[str, int]:
     """Stream the chain into ``brain`` (a :class:`SolanaBrain`) until ``max_polls``.
 
+    In streaming mode (``brain.streaming``) idle tokens are evicted at each maintenance, with
+    their decoder state, so memory stays bounded.
+
     The streamer's cursor is committed after every brain checkpoint (maintenance and the final
     save), so a restart resumes from what the saved brain has seen.  The final save runs even on
     Ctrl-C or an error, after the rest of the poll in hand has been ingested.
     """
-    stats = {"polls": 0, "events": 0, "assessments": 0, "resolved": 0, "maintenance": 0, "rejected": 0}
+    stats = {
+        "polls": 0,
+        "events": 0,
+        "assessments": 0,
+        "resolved": 0,
+        "maintenance": 0,
+        "rejected": 0,
+        "evicted": 0,
+    }
     next_assess = clock() + assess_every
     next_maint = clock() + maintenance_every
     events: list[Event] = []
@@ -235,6 +246,10 @@ def run_live(
                 stats["resolved"] += brain.resolve()
             if now >= next_maint:
                 next_maint = now + maintenance_every
+                if getattr(brain, "streaming", False):  # bounded memory: forget idle tokens
+                    gone = brain.evict()
+                    stats["evicted"] += len(gone)
+                    streamer.decoder.forget(gone)
                 brain.maintenance()  # saves the brain
                 streamer.commit()
                 stats["maintenance"] += 1
