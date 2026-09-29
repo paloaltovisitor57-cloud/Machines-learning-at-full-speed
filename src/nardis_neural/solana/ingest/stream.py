@@ -41,6 +41,7 @@ class ChainStreamer:
         initial_limit: int = 1000,
         max_backlog: int = 50_000,
         seen_capacity: int = 200_000,
+        workers: int = 6,
     ) -> None:
         self.rpc = rpc
         self.decoder = decoder or TransactionDecoder(mint_info=rpc.mint_authorities)
@@ -48,6 +49,8 @@ class ChainStreamer:
         self.state_file = Path(state_file) if state_file is not None else None
         self.initial_limit = initial_limit
         self.max_backlog = max_backlog
+        self.workers = max(1, workers)
+        """Parallel ``getTransaction`` calls (one kept-alive connection each)."""
         self.gaps = 0
         """Polls whose backlog exceeded ``max_backlog`` (older activity was skipped)."""
         self.cursor: dict[str, str] = {}
@@ -103,9 +106,16 @@ class ChainStreamer:
                     sigs.append(s)
         while len(self._seen) > self._seen_capacity:
             self._seen.popitem(last=False)
+        ordered = sorted(sigs, key=lambda s: (int(s.get("slot", 0)), float(s.get("blockTime") or 0)))
+        if self.workers > 1 and len(ordered) > 1:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=self.workers) as pool:
+                fetched = list(pool.map(lambda s: self.rpc.get_transaction(s["signature"]), ordered))
+        else:
+            fetched = [self.rpc.get_transaction(s["signature"]) for s in ordered]
         txs = []
-        for s in sorted(sigs, key=lambda s: (int(s.get("slot", 0)), float(s.get("blockTime") or 0))):
-            tx = self.rpc.get_transaction(s["signature"])
+        for tx in fetched:  # map() keeps slot order
             if tx is not None:
                 txs.append(tx)
                 if self.raw_sink is not None:

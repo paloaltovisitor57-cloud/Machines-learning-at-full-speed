@@ -8,12 +8,15 @@ Endpoints (JSON in, JSON out):
 
 =========================  =====================================================================
 ``GET  /health``           market clock, tracked tokens, installed models, learner status
+``GET  /tokens``           tokens active in the last ``?active_seconds=120``, newest launch first
 ``GET  /ranking``          moonshot candidates, best ``chase_score`` first (``?limit=20``)
 ``GET  /assess``           full assessment of one token (``?mint=…``)
 ``POST /advise_trade``     ``{trade_id, mint, t?, features{}}`` → P(win / 10x / 100x), size, veto
 ``POST /settle_trade``     ``{trade_id, t_exit, multiple, peak_multiple?}`` → learner updates
 ``POST /hold_advice``      ``{mint, t_signal}`` → sell-now vs continuation value, crash risk
 ``POST /allocate``         ``{equity_sol, open_stakes{}, peak_equity_sol?}`` → recommended stakes
+``POST /ingest``           ``{transactions: [getTransaction JSON, …]}`` pushed by the trading
+                           system (slot order), decoded and fed to the brain
 ``POST /save``             checkpoint the workspace now
 =========================  =====================================================================
 
@@ -53,6 +56,8 @@ class AddonService:
         self.brain = brain
         self.lock = threading.RLock()
         self.stream_stats: dict[str, int] = {}
+        self.decoder: Any = None
+        """Decoder state for pushed transactions (``POST /ingest``)."""
         self._stop = threading.Event()
 
     # ------------------------------------------------------------------ routing
@@ -63,12 +68,14 @@ class AddonService:
         route = (method, url.path.rstrip("/") or "/")
         handlers = {
             ("GET", "/health"): self.health,
+            ("GET", "/tokens"): lambda: self.tokens(float(query.get("active_seconds", 120))),
             ("GET", "/ranking"): lambda: self.ranking(int(query.get("limit", 20))),
             ("GET", "/assess"): lambda: self.assess(query.get("mint", "")),
             ("POST", "/advise_trade"): lambda: self.advise_trade(payload),
             ("POST", "/settle_trade"): lambda: self.settle_trade(payload),
             ("POST", "/hold_advice"): lambda: self.hold_advice(payload),
             ("POST", "/allocate"): lambda: self.allocate(payload),
+            ("POST", "/ingest"): lambda: self.ingest(payload),
             ("POST", "/save"): self.save,
         }
         fn = handlers.get(route)
@@ -103,6 +110,16 @@ class AddonService:
             },
             "stream": self.stream_stats,
         }
+
+    def tokens(self, active_seconds: float) -> dict[str, Any]:
+        m = self.brain.market
+        now = m.now
+        rows = [
+            {"mint": mint, "age_seconds": now - m.token(mint).launch.t, "venue": m.token(mint).launch.venue}
+            for mint in m.active_tokens(now, active_seconds)
+        ]
+        rows.sort(key=lambda r: r["age_seconds"])
+        return {"time": now, "tokens": rows}
 
     def ranking(self, limit: int) -> dict[str, Any]:
         rows = []
@@ -169,6 +186,30 @@ class AddonService:
         )
         return {"allocations": [asdict(a) for a in allocs]}
 
+    def ingest(self, p: dict[str, Any]) -> dict[str, Any]:
+        """Decode pushed transactions (``getTransaction`` JSON, ``jsonParsed`` encoding) into the brain."""
+        from nardis_neural.solana.ingest.decoder import TransactionDecoder
+
+        if self.decoder is None:
+            self.decoder = TransactionDecoder()
+        txs = p["transactions"]
+        if not isinstance(txs, list):
+            raise ValueError("transactions must be a list")
+        accepted = rejected = undecodable = 0
+        for tx in sorted(txs, key=lambda x: int(x.get("slot", 0))):
+            try:
+                events = list(self.decoder.decode(tx))
+            except (ArithmeticError, KeyError, IndexError, TypeError, ValueError):
+                undecodable += 1
+                continue
+            for e in events:
+                try:
+                    self.brain.ingest(e)
+                    accepted += 1
+                except (KeyError, ValueError):
+                    rejected += 1
+        return {"events": accepted, "rejected": rejected, "undecodable_transactions": undecodable}
+
     def save(self) -> dict[str, Any]:
         self.brain.save()
         return {"saved": True}
@@ -181,8 +222,17 @@ class AddonService:
         resolve_every: float = 10.0,
         maintenance_every: float = 600.0,
         save_every: float = 300.0,
+        chunk: int = 50,
+        bounded_memory: bool = True,
     ) -> threading.Thread:
-        """Feed the chain into the brain on a daemon thread until :meth:`stop`."""
+        """Feed the chain into the brain on a daemon thread until :meth:`stop`.
+
+        With ``bounded_memory`` (default) the brain switches to streaming mode: events are not
+        accumulated and tokens idle for two hours are forgotten at each maintenance, so a
+        sidecar can run for weeks at constant memory."""
+        if bounded_memory and not self.brain.streaming:
+            with self.lock:
+                self.brain.enable_streaming()
         stats = self.stream_stats
         stats.update({"polls": 0, "events": 0, "rejected": 0, "errors": 0})
 
@@ -195,13 +245,17 @@ class AddonService:
             while not self._stop.is_set():
                 try:
                     events = list(streamer.poll())
+                    # small chunks, lock released in between: a request never waits behind a
+                    # whole poll's backlog
+                    for i in range(0, len(events), chunk):
+                        with self.lock:
+                            for e in events[i : i + chunk]:
+                                try:
+                                    self.brain.ingest(e)
+                                    stats["events"] += 1
+                                except (KeyError, ValueError):
+                                    stats["rejected"] += 1
                     with self.lock:
-                        for e in events:
-                            try:
-                                self.brain.ingest(e)
-                                stats["events"] += 1
-                            except (KeyError, ValueError):
-                                stats["rejected"] += 1
                         now = time.time()
                         if now >= nxt["resolve"]:
                             nxt["resolve"] = now + resolve_every
@@ -209,6 +263,8 @@ class AddonService:
                         if now >= nxt["maint"]:
                             nxt["maint"] = now + maintenance_every
                             self.brain.maintenance()
+                            if self.brain.streaming:
+                                self.brain.evict()
                         if now >= nxt["save"]:
                             nxt["save"] = now + save_every
                             self.brain.save()

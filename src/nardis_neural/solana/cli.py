@@ -627,12 +627,17 @@ def serve(
         typer.Option("--stream/--no-stream", help="feed the live chain into the brain in the background"),
     ] = True,
     poll_interval: Annotated[float, typer.Option("--poll-interval", help="seconds between RPC polls")] = 2.0,
+    workers: Annotated[int, typer.Option("--workers", help="parallel getTransaction calls")] = 6,
+    pumpswap: Annotated[
+        bool,
+        typer.Option("--pumpswap/--no-pumpswap", help="also poll PumpSwap (heavy: hundreds of tx/s)"),
+    ] = False,
     device: DeviceOpt = None,
 ) -> None:
     """Run the addon as a local HTTP/JSON sidecar for the trading system (advice only).
 
     Endpoints: GET /health /ranking /assess; POST /advise_trade /settle_trade /hold_advice
-    /allocate /save.  See docs/INTEGRATION.md."""
+    /allocate /ingest /save.  See docs/INTEGRATION.md."""
     from nardis_neural.solana.brain import SolanaBrain
     from nardis_neural.solana.ingest import ChainStreamer, SolanaRpc
     from nardis_neural.solana.service import AddonService, make_server
@@ -642,7 +647,15 @@ def serve(
     if stream:
         if rpc is None:
             raise typer.BadParameter("pass --rpc or set SOLANA_RPC_URL, or use --no-stream")
-        streamer = ChainStreamer(SolanaRpc(rpc), state_file=workspace / "stream_cursor.json")
+        from nardis_neural.solana.ingest.pumpfun import PUMP_FUN_PROGRAM, PUMP_SWAP_PROGRAM
+
+        programs = [PUMP_FUN_PROGRAM, PUMP_SWAP_PROGRAM] if pumpswap else [PUMP_FUN_PROGRAM]
+        streamer = ChainStreamer(
+            SolanaRpc(rpc, retries=6, backoff=1.0),
+            programs=programs,
+            state_file=workspace / "stream_cursor.json",
+            workers=workers,
+        )
         service.stream(streamer, poll_interval=poll_interval)
     server = make_server(service, host, port)
     typer.echo(f"addon listening on http://{host}:{port} (stream {'on' if stream else 'off'})")

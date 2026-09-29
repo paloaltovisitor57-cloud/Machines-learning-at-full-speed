@@ -100,7 +100,7 @@ flowchart TB
 | Continual learning | 3-pool replay (recent FIFO, historical reservoir, protected rare events), 5 sampling strategies, candidate cloning, distillation, EWC, full retraining with configurable weights |
 | Lifecycle | immutable checkpoints, champion/candidate/challenger/retired/failed registry with audit log, shadow mode, 10-gate promotion, manual and optional automatic rollback |
 | Representation | self-supervised pretraining (masked timestep, masked feature, contrastive), embedding export to Parquet/NumPy, KMeans / GMM / HDBSCAN regime discovery |
-| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 228 test functions |
+| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 229 test functions |
 
 ## Quick start
 
@@ -375,7 +375,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │                            edge/ (barriers · model · trees · backtest · research)
 │                            moonshot/ (labels · tail · guard · online · research)
 │                            tape/ (features · dataset · model · research · policy)
-└── tests/                   228 test functions incl. synthetic end-to-end pipeline
+└── tests/                   229 test functions incl. synthetic end-to-end pipeline
 ```
 
 ## Testing & quality gates
@@ -1162,12 +1162,14 @@ nardis-neural solana serve --workspace ws --port 8787    # streams the chain in 
 | call | when Nardis makes it | returns |
 |---|---|---|
 | `GET /health` | at start-up, then periodically | market clock, tracked tokens, installed models, learner status |
+| `GET /tokens?active_seconds=120` | to see what is live | active tokens, youngest first, with age and venue |
 | `GET /ranking?limit=20` | to look for entries | moonshot candidates with `chase_score`, expected multiple, P(≥10x / ≥100x), trust, crash risk, flags |
 | `GET /assess?mint=…` | for one token | the full assessment (risk, tail, tape, edge, guard) |
 | `POST /advise_trade` | **before every trade** | P(win / 10x / 100x) learned from Nardis's own trades, expected multiple, size multiplier 0–2, veto + reason |
 | `POST /settle_trade` | **after every trade closes** | the learner updates (and refits when due) |
 | `POST /hold_advice` | while a position is open | sell-now vs continuation value, P(collapse within 1 / 5 / 15 min) |
 | `POST /allocate` | when sizing | recommended stakes under the capital engine's limits |
+| `POST /ingest` | optional: push the chain transactions Nardis already receives | decodes `getTransaction` JSON (`jsonParsed`) into the brain; lets you run with `--no-stream` |
 | `POST /save` | on shutdown (also automatic every 5 minutes) | checkpoints the workspace |
 
 ```bash
@@ -1188,6 +1190,14 @@ curl -s localhost:8787/hold_advice -d '{"mint": "<mint>", "t_signal": 1790650000
 * Latency on a 4-core CPU: `advise_trade` 1.3 ms median (Nardis's features only,
   `"with_market": false`), about 20 ms with the addon's full market assessment of the token (the
   default). Requests are serialised with a lock, since the brain is not thread-safe.
+* **Live feed.** `serve` polls pump.fun through the RPC with 6 parallel workers (`--workers`) and
+  kept-alive connections; add `--pumpswap` to also follow graduated tokens (much heavier).
+  A hosted node fetches about 58 transactions/s, below pump.fun's peak of about 80
+  successful transactions/s, so on a busy day the feed lags and skips the oldest backlog
+  (counted, never silent). If Nardis already has a full feed (e.g. Yellowstone gRPC), push
+  it through `POST /ingest` instead and run with `--no-stream`.
+* **Memory.** The sidecar runs in bounded-memory mode: it keeps no event history, and tokens idle
+  for two hours are forgotten at each maintenance, so it can run for weeks.
 * Bind to `127.0.0.1` (the default). The API has no authentication, so never expose it to a
   network without a firewall.
 
@@ -3291,7 +3301,7 @@ history keeps only tokens created inside the window, SOL-priced (see clean_histo
 Run the addon as a local HTTP/JSON sidecar for the trading system (advice only).
 
 Endpoints: GET /health /ranking /assess; POST /advise_trade /settle_trade /hold_advice
-/allocate /save.  See docs/INTEGRATION.md.
+/allocate /ingest /save.  See docs/INTEGRATION.md.
 
 | option | type | default | description |
 |---|---|---|---|
@@ -3301,6 +3311,8 @@ Endpoints: GET /health /ranking /assess; POST /advise_trade /settle_trade /hold_
 | `--rpc` | str | null | read-only RPC endpoint URL (env `SOLANA_RPC_URL`) |
 | `--stream`, `--no-stream` | flag | true | feed the live chain into the brain in the background |
 | `--poll-interval` | float | 2.0 | seconds between RPC polls |
+| `--workers` | int | 6 | parallel getTransaction calls |
+| `--pumpswap`, `--no-pumpswap` | flag | false | also poll PumpSwap (heavy: hundreds of tx/s) |
 | `--device` | str | null | cpu \| cuda \| cuda:0 \| mps (default: auto) |
 
 ### `nardis-neural solana forward-report`
@@ -4580,7 +4592,7 @@ Capital research: turn a research test period into bankroll and overfitting evid
 - `moonshot_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history + champion)')]", inputs: "Annotated[str, typer.Option('--inputs', help='raw (on-chain features) or neural (walk-forward OOF stack)')]" = 'raw', size: "Annotated[float, typer.Option('--size', help='ticket size, SOL')]" = 0.5, latency: "Annotated[float, typer.Option('--latency', help='entry/exit latency, seconds')]" = 1.0, horizon_hours: "Annotated[float, typer.Option('--horizon-hours', help='outcome horizon after entry, hours')]" = 6.0, max_entry_age: "Annotated[float, typer.Option('--max-entry-age', help='latest entry after launch, seconds')]" = 600.0, min_ev: "Annotated[float, typer.Option('--min-ev', help='ticket when E[ladder payoff] per SOL is at least this')]" = 1.0, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of later tokens held out for the test')]" = 0.35, folds: "Annotated[int, typer.Option('--folds', help='walk-forward folds (neural inputs)')]" = 4, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Fat-tail research: P(≥2x … ≥1000x) per token, ladder payoff, lottery-Kelly sizing hints.
 - `replay(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace directory')]", events: "Annotated[Path, typer.Option('--events', '-e', help='new events to stream in')]", every: "Annotated[float, typer.Option('--assess-every', help='seconds between assessment rounds')]" = 10.0, out: "Annotated[Path | None, typer.Option('--out', '-o', help='JSONL of assessments')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Stream events through the brain as if live: assess, resolve outcomes, then maintain.
 - `research_suite(seeds: "Annotated[str, typer.Option('--seeds', help='comma-separated simulator seeds')]" = '7,19,23', market: "Annotated[str, typer.Option('--market', help='archetype mix: default or degen')]" = 'degen', tokens: "Annotated[int, typer.Option('--tokens', help='launches per simulated market')]" = 150, hours: "Annotated[float, typer.Option('--hours', help='simulated hours per market')]" = 8.0, tape: "Annotated[bool, typer.Option('--tape/--no-tape', help='also run the (slower) tape research')]" = False, out: "Annotated[Path | None, typer.Option('--out', '-o', help='write the JSON result here')]" = None) -> 'None'` — Run the moonshot (and optionally tape) research on several independent simulated markets and report every metric as mean ± sd across seeds.
-- `serve(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace')]", host: "Annotated[str, typer.Option('--host', help='bind address (keep 127.0.0.1 unless firewalled)')]" = '127.0.0.1', port: "Annotated[int, typer.Option('--port', help='HTTP port')]" = 8787, rpc: "Annotated[str | None, typer.Option('--rpc', envvar='SOLANA_RPC_URL', help='read-only RPC endpoint URL')]" = None, stream: "Annotated[bool, typer.Option('--stream/--no-stream', help='feed the live chain into the brain in the background')]" = True, poll_interval: "Annotated[float, typer.Option('--poll-interval', help='seconds between RPC polls')]" = 2.0, device: 'DeviceOpt' = None) -> 'None'` — Run the addon as a local HTTP/JSON sidecar for the trading system (advice only).
+- `serve(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace')]", host: "Annotated[str, typer.Option('--host', help='bind address (keep 127.0.0.1 unless firewalled)')]" = '127.0.0.1', port: "Annotated[int, typer.Option('--port', help='HTTP port')]" = 8787, rpc: "Annotated[str | None, typer.Option('--rpc', envvar='SOLANA_RPC_URL', help='read-only RPC endpoint URL')]" = None, stream: "Annotated[bool, typer.Option('--stream/--no-stream', help='feed the live chain into the brain in the background')]" = True, poll_interval: "Annotated[float, typer.Option('--poll-interval', help='seconds between RPC polls')]" = 2.0, workers: "Annotated[int, typer.Option('--workers', help='parallel getTransaction calls')]" = 6, pumpswap: "Annotated[bool, typer.Option('--pumpswap/--no-pumpswap', help='also poll PumpSwap (heavy: hundreds of tx/s)')]" = False, device: 'DeviceOpt' = None) -> 'None'` — Run the addon as a local HTTP/JSON sidecar for the trading system (advice only).
 - `simulate(out: "Annotated[Path, typer.Option('--out', '-o', help='event directory (Parquet tables)')]", tokens: "Annotated[int, typer.Option('--tokens', help='number of token launches to simulate')]" = 40, seed: "Annotated[int, typer.Option('--seed', help='random seed')]" = 0, prefix: "Annotated[str, typer.Option('--prefix', help='mint/wallet name prefix (distinguishes eras)')]" = 'Mint', start_time: "Annotated[float, typer.Option('--start-time', help='simulation start, unix seconds')]" = 1750000000.0, hours: "Annotated[float, typer.Option('--hours', help='simulated duration, hours')]" = 3.0, market: "Annotated[str, typer.Option('--market', help='archetype mix: default, or degen (mostly duds + runners)')]" = 'default', runners: "Annotated[float | None, typer.Option('--runners', help='override the share of 100–1000x runner launches')]" = None, herding: "Annotated[bool, typer.Option('--herding/--no-herding', help='self-exciting (Hawkes) retail demand')]" = False) -> 'None'` — Simulate memecoin launches (snipers, bundles, rugs, graduations, runners, smart money, bots).
 - `stopping_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history)')]", spacing: "Annotated[float, typer.Option('--spacing', help='minimum seconds between exit decisions')]" = 30.0, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of the latest-launched tokens held out for the test')]" = 0.35, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None, utility: "Annotated[str, typer.Option('--utility', help='installed exit objective: log (compounding) or power (runner mode)')]" = 'log', gamma: "Annotated[float, typer.Option('--gamma', help='risk aversion of power utility, 0 < gamma < 1')]" = 0.5) -> 'None'` — Fit the optimal-stopping exit model (Longstaff–Schwartz, log utility), score it against hold, timers and the ladder on later tokens, and install it.
 - `stream(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace directory')]", rpc: 'RpcOpt' = None, out: "Annotated[Path | None, typer.Option('--out', '-o', help='append assessments as JSONL')]" = None, polls: "Annotated[int | None, typer.Option('--polls', help='stop after N polls (default: run forever)')]" = None, poll_interval: "Annotated[float, typer.Option('--poll-interval', help='seconds between RPC polls')]" = 2.0, assess_every: "Annotated[float, typer.Option('--assess-every', help='seconds between assessment rounds')]" = 10.0, maintenance_every: "Annotated[float, typer.Option('--maintenance-every', help='seconds between maintenance runs')]" = 600.0, device: 'DeviceOpt' = None) -> 'None'` — Stream live chain activity into a Solana workspace (read-only) and emit assessments.
@@ -4948,11 +4960,13 @@ Local HTTP/JSON service: the addon as a sidecar the trading system calls from an
   - `handle(self, method: 'str', path: 'str', payload: 'dict[str, Any]') -> 'tuple[int, dict[str, Any]]'` — Dispatch one request; returns ``(http_status, body)``.
   - `health(self) -> 'dict[str, Any]'`
   - `hold_advice(self, p: 'dict[str, Any]') -> 'dict[str, Any]'`
+  - `ingest(self, p: 'dict[str, Any]') -> 'dict[str, Any]'` — Decode pushed transactions (``getTransaction`` JSON, ``jsonParsed`` encoding) into the brain.
   - `ranking(self, limit: 'int') -> 'dict[str, Any]'`
   - `save(self) -> 'dict[str, Any]'`
   - `settle_trade(self, p: 'dict[str, Any]') -> 'dict[str, Any]'`
   - `stop(self) -> 'None'` — Stop the stream thread and checkpoint.
-  - `stream(self, streamer: 'Any', poll_interval: 'float' = 2.0, resolve_every: 'float' = 10.0, maintenance_every: 'float' = 600.0, save_every: 'float' = 300.0) -> 'threading.Thread'` — Feed the chain into the brain on a daemon thread until :meth:`stop`.
+  - `stream(self, streamer: 'Any', poll_interval: 'float' = 2.0, resolve_every: 'float' = 10.0, maintenance_every: 'float' = 600.0, save_every: 'float' = 300.0, chunk: 'int' = 50, bounded_memory: 'bool' = True) -> 'threading.Thread'` — Feed the chain into the brain on a daemon thread until :meth:`stop`.
+  - `tokens(self, active_seconds: 'float') -> 'dict[str, Any]'`
 - `make_server(service: 'AddonService', host: 'str' = '127.0.0.1', port: 'int' = 8787) -> 'ThreadingHTTPServer'` — An HTTP server bound to ``host:port`` that routes to ``service``.
 
 ### `nardis_neural.solana.simulator`
@@ -5220,7 +5234,7 @@ Transparent PyTorch training engine.
 
 ## Test inventory
 
-228 test functions (some are parametrised over devices, experts or formats).
+229 test functions (some are parametrised over devices, experts or formats).
 
 ### `tests/test_cli.py`
 
@@ -5515,6 +5529,7 @@ Moonshot engine: executable peak-multiple labels with censoring, the censored po
 
 - `test_http_api_round_trip`
 - `test_http_api_rejects_bad_requests`
+- `test_pushed_transactions_are_ingested`
 - `test_stream_thread_feeds_the_brain`
 
 ### `tests/test_solana_signals.py`

@@ -45,6 +45,8 @@ def test_http_api_round_trip(served) -> None:  # type: ignore[no-untyped-def]
     status, health = _call(port, "GET", "/health")
     assert status == 200 and health["ok"] and health["tokens"] > 0
     mint = next(iter(service.brain.market.tokens))
+    status, listed = _call(port, "GET", "/tokens?active_seconds=1e9")
+    assert status == 200 and mint in {r["mint"] for r in listed["tokens"]}
     status, assessed = _call(port, "GET", f"/assess?mint={mint}")
     assert status == 200 and assessed["mint"] == mint
     status, advice = _call(
@@ -68,6 +70,13 @@ def test_http_api_rejects_bad_requests(served) -> None:  # type: ignore[no-untyp
     assert _call(port, "GET", "/assess?mint=unknown")[0] == 400
     assert _call(port, "POST", "/advise_trade", {"mint": "x"})[0] == 400  # no trade_id
     assert _call(port, "GET", "/ranking")[0] == 409  # no tail model installed yet
+
+
+def test_pushed_transactions_are_ingested(served) -> None:  # type: ignore[no-untyped-def]
+    _, port = served
+    status, out = _call(port, "POST", "/ingest", {"transactions": [{"slot": 1, "meta": None}]})
+    assert status == 200 and out["undecodable_transactions"] == 1
+    assert _call(port, "POST", "/ingest", {"transactions": "nope"})[0] == 400
 
 
 def test_stream_thread_feeds_the_brain(served) -> None:  # type: ignore[no-untyped-def]

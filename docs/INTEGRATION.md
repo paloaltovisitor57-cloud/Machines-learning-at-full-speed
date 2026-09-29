@@ -34,12 +34,14 @@ nardis-neural solana serve --workspace ws --port 8787    # streams the chain in 
 | call | when Nardis makes it | returns |
 |---|---|---|
 | `GET /health` | at start-up, then periodically | market clock, tracked tokens, installed models, learner status |
+| `GET /tokens?active_seconds=120` | to see what is live | active tokens, youngest first, with age and venue |
 | `GET /ranking?limit=20` | to look for entries | moonshot candidates with `chase_score`, expected multiple, P(≥10x / ≥100x), trust, crash risk, flags |
 | `GET /assess?mint=…` | for one token | the full assessment (risk, tail, tape, edge, guard) |
 | `POST /advise_trade` | **before every trade** | P(win / 10x / 100x) learned from Nardis's own trades, expected multiple, size multiplier 0–2, veto + reason |
 | `POST /settle_trade` | **after every trade closes** | the learner updates (and refits when due) |
 | `POST /hold_advice` | while a position is open | sell-now vs continuation value, P(collapse within 1 / 5 / 15 min) |
 | `POST /allocate` | when sizing | recommended stakes under the capital engine's limits |
+| `POST /ingest` | optional: push the chain transactions Nardis already receives | decodes `getTransaction` JSON (`jsonParsed`) into the brain; lets you run with `--no-stream` |
 | `POST /save` | on shutdown (also automatic every 5 minutes) | checkpoints the workspace |
 
 ```bash
@@ -60,6 +62,14 @@ curl -s localhost:8787/hold_advice -d '{"mint": "<mint>", "t_signal": 1790650000
 * Latency on a 4-core CPU: `advise_trade` 1.3 ms median (Nardis's features only,
   `"with_market": false`), about 20 ms with the addon's full market assessment of the token (the
   default). Requests are serialised with a lock, since the brain is not thread-safe.
+* **Live feed.** `serve` polls pump.fun through the RPC with 6 parallel workers (`--workers`) and
+  kept-alive connections; add `--pumpswap` to also follow graduated tokens (much heavier).
+  A hosted node fetches about 58 transactions/s, below pump.fun's peak of about 80
+  successful transactions/s, so on a busy day the feed lags and skips the oldest backlog
+  (counted, never silent). If Nardis already has a full feed (e.g. Yellowstone gRPC), push
+  it through `POST /ingest` instead and run with `--no-stream`.
+* **Memory.** The sidecar runs in bounded-memory mode: it keeps no event history, and tokens idle
+  for two hours are forgotten at each maintenance, so it can run for weeks.
 * Bind to `127.0.0.1` (the default). The API has no authentication, so never expose it to a
   network without a firewall.
 
