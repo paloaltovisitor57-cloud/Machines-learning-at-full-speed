@@ -100,7 +100,7 @@ flowchart TB
 | Continual learning | 3-pool replay (recent FIFO, historical reservoir, protected rare events), 5 sampling strategies, candidate cloning, distillation, EWC, full retraining with configurable weights |
 | Lifecycle | immutable checkpoints, champion/candidate/challenger/retired/failed registry with audit log, shadow mode, 10-gate promotion, manual and optional automatic rollback |
 | Representation | self-supervised pretraining (masked timestep, masked feature, contrastive), embedding export to Parquet/NumPy, KMeans / GMM / HDBSCAN regime discovery |
-| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 218 test functions |
+| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 223 test functions |
 
 ## Quick start
 
@@ -375,7 +375,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │                            edge/ (barriers · model · trees · backtest · research)
 │                            moonshot/ (labels · tail · guard · online · research)
 │                            tape/ (features · dataset · model · research · policy)
-└── tests/                   218 test functions incl. synthetic end-to-end pipeline
+└── tests/                   223 test functions incl. synthetic end-to-end pipeline
 ```
 
 ## Testing & quality gates
@@ -1286,6 +1286,55 @@ The report gives tickets, total paper PnL, mean and median multiple with a boots
 hit rates, the number of alarm exits, predicted versus observed P(≥10x), and how the top
 quintile by `chase_score` did compared with the rest. Compare it with your own algorithm's
 paper results on the same days before letting the signals size real positions.
+
+
+### Learning from Nardis's own trades (meta-labeling)
+
+The rest of the addon learns from **the market**. `nardis_neural.solana.metalabel` learns from
+**Nardis itself**: which of its own trades work, so that setups that keep failing get flagged
+and shrunk and setups that keep working get more weight. Nardis stays in charge of every
+decision; this layer only returns numbers.
+
+```python
+from nardis_neural.solana.metalabel import TradeOutcome, TradeProposal
+
+# before each trade: send whatever named numbers Nardis has for it
+advice = brain.advise_trade(
+    TradeProposal("trade-123", mint, now, {"nardis_score": 0.82, "entry_reason": 3.0})
+)
+advice.p_win, advice.p_10x, advice.p_100x      # probabilities learned from Nardis's own history
+advice.expected_multiple                       # Duan-smeared, so fat tails are not underestimated
+advice.size_multiplier                         # scale Nardis's own stake: 0 … 2
+advice.veto, advice.reason                     # a pattern that has been losing
+advice.source                                  # "prior" (base rates) or "learned"
+
+# after the trade closes (peak_multiple optional; it sharpens the 10x / 100x labels)
+brain.settle_trade(TradeOutcome("trade-123", exit_time, multiple=1.8, peak_multiple=3.1))
+brain.save()                                   # persists history and models in ws/meta/
+```
+
+`advise_trade` joins Nardis's features with the addon's own view of the token at that moment
+(moonshot, tape, edge and risk outputs, criticality and cluster features, all prefixed
+`addon_`), so the learner can also discover *which addon signals matter for Nardis's style*.
+
+How it stays honest:
+
+* **Cold start.** Until 50 trades have settled, answers are Jeffreys-prior base rates of the
+  trades so far (size 1, no vetoes). No model is ever used before it has evidence.
+* **Champion / challenger.** Every 25 settled trades it refits in time order: trained on the
+  older 80 %, scored on the newest 20 %. A model is deployed only if it beats the base rate
+  there (log loss for the win / 10x / 100x classifiers, squared error for the value model).
+  Otherwise the base rate stays. Pure-noise features are therefore never deployed (tested).
+* **Tails need evidence.** The 10x and 100x classifiers need at least 8 positive and 8 negative
+  trades before they are even tried. Until then P(10x) and P(100x) are base rates, capped by
+  P(win).
+* **Veto only when both signals agree.** A veto needs P(win) below half the average *and* an
+  expected multiple below 1.
+
+On a synthetic stream where a hidden quality drives outcomes, after 800 trades it ranks
+winners at AUC > 0.75 on 400 later proposals. It sizes the best sixth of proposals above 1.2x and the
+worst sixth below 0.8x, and the trades it vetoes lose on average while the rest make money. The
+real test is Nardis's paper trades: the more it trades, the better this layer gets.
 
 ## Solana intelligence layer (`nardis_neural.solana`)
 
@@ -4332,6 +4381,7 @@ SolanaBrain — the complete Solana ML module behind one small API.
 - `red_flags(f: 'dict[str, float]', pred: 'NeuralPrediction', risk: 'dict[str, float]') -> 'list[str]'` — Human-readable explanations of on-chain red flags present in the features.
 - **class `SolanaAssessment`** — Everything the ML module knows about one token right now (no trade decision).
 - **class `SolanaBrain`** — Live Solana intelligence over one workspace: causal market, neural ensemble, risk, edge and moonshot models.
+  - `advise_trade(self, proposal: 'TradeProposal', with_market: 'bool' = True) -> 'TradeAdvice'` — Advice on a trade the trading system is about to make, learned from its own settled trades, joined with this addon's market view of the token when ``with_market``.
   - `allocate(self, equity_sol: 'float', open_stakes: 'dict[str, float] | None' = None, peak_equity_sol: 'float | None' = None, cfg: 'AllocatorConfig | None' = None, max_idle_seconds: 'float' = 120.0) -> 'list[Allocation]'` — Recommended stakes for the current moonshot opportunities (advice, never orders).
   - `assess(self, mint: 'str') -> 'SolanaAssessment'` — Assess one token at the current market time (see :meth:`assess_many`).
   - `assess_active(self, max_idle_seconds: 'float' = 120.0, min_age_seconds: 'float | None' = None) -> 'list[SolanaAssessment]'` — Assess every token that traded within ``max_idle_seconds`` and is at least ``min_age_seconds`` old (default ``cfg.min_token_age_seconds``).
@@ -4351,6 +4401,8 @@ SolanaBrain — the complete Solana ML module behind one small API.
   - `refit_moonshot_online(self, every_seconds: 'float' = 21600.0, min_tokens: 'int' = 40, members: 'int' = 3, epochs: 'int' = 60, tolerance: 'float' = 0.02) -> 'dict[str, Any] | None'` — Retrain the raw-input tail model from the streamed buffer, behind a hold-out gate.
   - `resolve(self) -> 'int'` — Label every assessment whose longest horizon has elapsed and learn from it.
   - `save(self) -> 'None'` — Checkpoint the workspace: learner, event history (or the pickled market when streaming), moonshot buffer, risk samples and ``solana_state.json``.
+  - `settle_trade(self, outcome: 'TradeOutcome') -> 'bool'` — Report a closed trade; the learner updates (refits when due).
+  - `trade_context(self, mint: 'str') -> 'dict[str, float]'` — The addon's market view of a token right now, flattened for :meth:`advise_trade`.
 
 ### `nardis_neural.solana.capital`
 
@@ -4599,11 +4651,14 @@ pump.fun program constants and Anchor event (de)serialisation.
 
 - `decode_event(payload: 'bytes') -> 'PumpEvent | None'` — Decode one ``Program data`` payload; None for unrelated events.
 - `decode_log_events(logs: 'list[str]', program: 'str | None' = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P') -> 'list[PumpEvent]'` — pump.fun events in a transaction's ``Program data:`` log lines; other or corrupt lines are skipped.
+- `decode_pumpswap_event(payload: 'bytes') -> 'PumpSwapTrade | None'` — Decode one PumpSwap ``Program data`` payload; None for other events.
+- `decode_pumpswap_log_events(logs: 'list[str]') -> 'list[PumpSwapTrade]'` — PumpSwap trades logged by the PumpSwap program itself (attributed like :func:`decode_log_events`).
 - `discriminator(name: 'str') -> 'bytes'` — Anchor event discriminator: the first 8 bytes of ``sha256("event:<name>")``.
 - `encode_event(ev: 'PumpEvent', trailing: 'bytes' = b'') -> 'str'` — Base64 ``Program data`` payload for an event (``trailing`` mimics newer appended fields).
 - `pubkey_from_seed(seed: 'str') -> 'str'` — Deterministic fake public key (tests / simulations only).
 - **class `PumpComplete`** — pump.fun ``CompleteEvent``: the bonding curve of ``mint`` completed.
 - **class `PumpCreate`** — pump.fun ``CreateEvent``: token metadata, mint, bonding curve and creator.
+- **class `PumpSwapTrade`** — PumpSwap ``BuyEvent`` / ``SellEvent``: a trade against one pool, in raw units.
 - **class `PumpTrade`** — pump.fun ``TradeEvent``: amounts in lamports / raw token units, virtual reserves after the trade.
 
 ### `nardis_neural.solana.ingest.rpc`
@@ -4663,6 +4718,21 @@ Causal Solana market state and event-history persistence.
   - `ingest_many(self, events: 'Iterable[Event]') -> 'None'` — Ingest events in order (see :meth:`ingest`).
   - `rugged(self, mint: 'str') -> 'bool'` — True once a rug (dev dump or LP pull) has been attributed to ``mint``.
   - `token(self, mint: 'str') -> 'TokenEventLog'` — The event log of ``mint``; ``KeyError`` if unknown or evicted.
+
+### `nardis_neural.solana.metalabel`
+
+Meta-labeling: learn from the trading system's own trades.
+
+- `advice_dict(a: 'TradeAdvice') -> 'dict[str, Any]'` — Plain dict of an advice (for JSON transport to the trading system).
+- **class `MetaLearner`** — Online meta-labeling of the trading system's proposals.
+  - `advise(self, proposal: 'TradeProposal', market: 'dict[str, float] | None' = None, record: 'bool' = True) -> 'TradeAdvice'` — Score a proposal; with ``record`` it is kept pending until :meth:`settle`.
+  - `load(cls, directory: 'str | Path') -> 'MetaLearner'` — Rebuild a learner saved by :meth:`save`.
+  - `refit(self) -> 'dict[str, Any]'` — Champion / challenger refit on all settled trades (see the module docstring).
+  - `save(self, directory: 'str | Path') -> 'None'` — Write ``meta.json`` (history, pending proposals, report) and the deployed trees.
+  - `settle(self, outcome: 'TradeOutcome') -> 'bool'` — Record a settled trade; refits when due. Returns False for unknown trade ids.
+- **class `TradeAdvice`** — What the learner thinks of a proposal (advice only).
+- **class `TradeOutcome`** — The settled result of a proposal.
+- **class `TradeProposal`** — A trade the trading system is about to make.
 
 ### `nardis_neural.solana.moonshot`
 
@@ -5011,7 +5081,7 @@ Transparent PyTorch training engine.
 
 ## Test inventory
 
-218 test functions (some are parametrised over devices, experts or formats).
+223 test functions (some are parametrised over devices, experts or formats).
 
 ### `tests/test_cli.py`
 
@@ -5280,6 +5350,14 @@ Real-chain ingestion: base58, pump.fun event codec, transaction decoding, read-o
 - `test_pump_events_are_attributed_to_the_emitting_program`
 - `test_decoder_skips_non_sol_quoted_curves` — BuyV2 / SellV2 curves report zero SOL reserves; their trades are skipped, not zero-priced.
 - `test_first_sight_of_an_existing_pool_is_not_a_creation`
+- `test_pumpswap_events_decode_in_either_pool_orientation`
+
+### `tests/test_solana_metalabel.py`
+
+- `test_cold_start_answers_from_base_rates`
+- `test_learns_which_proposals_win_and_vetoes_losing_patterns`
+- `test_noise_features_do_not_get_deployed`
+- `test_brain_advises_and_learns_from_trades`
 
 ### `tests/test_solana_moonshot.py`
 

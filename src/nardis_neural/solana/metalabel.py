@@ -1,0 +1,326 @@
+"""Meta-labeling: learn from the trading system's own trades.
+
+The trading system (Nardis) decides *what* to trade.  This module learns, from the outcomes of
+its own past trades, *how good each new proposal is likely to be*, and answers in
+milliseconds before the trade:
+
+* ``p_win``: probability that the trade returns more than it cost;
+* ``p_10x`` / ``p_100x``: probability that it reaches 10x / 100x (from the peak multiple when
+  the trading system reports it, else from the realised multiple);
+* ``expected_multiple``;
+* ``size_multiplier``: scale for the trading system's own stake, above 1 for proposals that
+  look better than its average trade and below 1 for worse ones, capped at 2;
+* ``veto`` with a reason, when the proposal matches a pattern that has been losing.
+
+Inputs are whatever named numbers the trading system sends with each proposal, optionally
+joined with this addon's own market view of the token at that moment.
+
+Safeguards:
+
+* **cold start**: until ``min_trades`` trades have settled, answers come from Bayesian base rates
+  (Jeffreys prior) of the trades seen so far, never from a model;
+* **champion / challenger**: every refit is trained on the older 80 % of trades and scored on the
+  newest 20 %, in time order; a model is deployed only if it beats the base rate there
+  (log loss), otherwise the base rate stays;
+* **no lookahead**: labels only come from settled outcomes, and features are frozen at advice time.
+
+It never places, sizes or cancels anything itself; every output is advice.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import numpy.typing as npt
+
+from nardis_neural.solana.edge.trees import TreeEnsemble
+
+F64 = npt.NDArray[np.float64]
+LEVELS = (1.0, 10.0, 100.0)
+"""Outcome thresholds learned: win (> 1x), 10x, 100x."""
+
+
+@dataclass
+class TradeProposal:
+    """A trade the trading system is about to make."""
+
+    trade_id: str
+    mint: str
+    t: float
+    features: dict[str, float] = field(default_factory=dict)
+    """The trading system's own signal values (any names)."""
+
+
+@dataclass
+class TradeOutcome:
+    """The settled result of a proposal."""
+
+    trade_id: str
+    t_exit: float
+    multiple: float
+    """SOL returned per SOL staked, fees included."""
+    peak_multiple: float | None = None
+    """Best multiple the position reached, if the trading system tracks it (used for tail labels)."""
+
+
+@dataclass
+class TradeAdvice:
+    """What the learner thinks of a proposal (advice only)."""
+
+    trade_id: str
+    p_win: float
+    p_10x: float
+    p_100x: float
+    expected_multiple: float
+    size_multiplier: float
+    veto: bool
+    reason: str
+    evidence: int
+    """Settled trades the answer rests on."""
+    source: str
+    """``prior`` (base rates) or ``learned`` (deployed model)."""
+
+
+def _sigmoid(z: F64) -> F64:
+    return 1.0 / (1.0 + np.exp(-np.clip(z, -30, 30)))
+
+
+def _log_loss(p: F64, y: F64) -> float:
+    p = np.clip(p, 1e-6, 1 - 1e-6)
+    return float(-(y * np.log(p) + (1 - y) * np.log(1 - p)).mean())
+
+
+class MetaLearner:
+    """Online meta-labeling of the trading system's proposals."""
+
+    def __init__(
+        self,
+        min_trades: int = 50,
+        refit_every: int = 25,
+        min_positives: int = 8,
+        max_size: float = 2.0,
+        veto_ratio: float = 0.5,
+        seed: int = 0,
+    ) -> None:
+        self.min_trades, self.refit_every, self.min_positives = min_trades, refit_every, min_positives
+        self.max_size, self.veto_ratio, self.seed = max_size, veto_ratio, seed
+        self.feature_names: list[str] = []
+        self.pending: dict[str, tuple[float, dict[str, float]]] = {}
+        self.x: list[dict[str, float]] = []
+        self.t: list[float] = []
+        self.multiple: list[float] = []
+        self.peak: list[float] = []
+        self.models: dict[float, TreeEnsemble] = {}
+        self.value_model: TreeEnsemble | None = None
+        self.smear = 1.0
+        """Duan smearing factor: mean exp(residual) of the value model on held-out trades."""
+        self.report: dict[str, Any] = {}
+        self._since_fit = 0
+
+    # ------------------------------------------------------------------ data
+    def _matrix(self, rows: list[dict[str, float]]) -> F64:
+        m = np.full((len(rows), len(self.feature_names)), np.nan)
+        for i, r in enumerate(rows):
+            for j, name in enumerate(self.feature_names):
+                v = r.get(name)
+                if v is not None and math.isfinite(float(v)):
+                    m[i, j] = float(v)
+        return m
+
+    def _labels(self, level: float) -> F64:
+        mult = np.asarray(self.multiple)
+        if level <= 1.0:
+            return (mult > level).astype(np.float64)
+        best = np.maximum(np.asarray(self.peak), mult)
+        return (best >= level).astype(np.float64)
+
+    def _prior(self, level: float) -> float:
+        """Jeffreys-prior base rate of reaching ``level`` among settled trades."""
+        n = len(self.multiple)
+        k = float(self._labels(level).sum()) if n else 0.0
+        return (k + 0.5) / (n + 1.0)
+
+    # ------------------------------------------------------------------ advice
+    def advise(
+        self, proposal: TradeProposal, market: dict[str, float] | None = None, record: bool = True
+    ) -> TradeAdvice:
+        """Score a proposal; with ``record`` it is kept pending until :meth:`settle`."""
+        feats = dict(proposal.features)
+        if market:
+            feats |= {f"addon_{k}": float(v) for k, v in market.items()}
+        if record:
+            self.pending[proposal.trade_id] = (proposal.t, feats)
+        n = len(self.multiple)
+        base = {lv: self._prior(lv) for lv in LEVELS}
+        base_mean = float(np.mean(self.multiple)) if n else 1.0
+        p = dict(base)
+        exp_mult = base_mean
+        source = "prior"
+        if self.models or self.value_model is not None:
+            x = self._matrix([feats])
+            for lv, model in self.models.items():
+                p[lv] = float(_sigmoid(model.predict(x))[0])
+                source = "learned"
+            if self.value_model is not None:
+                # E[1 + m] = exp(E[log(1 + m)]) · E[exp(residual)] (Duan's smearing estimator)
+                exp_mult = float(np.exp(self.value_model.predict(x))[0] * self.smear) - 1.0
+                source = "learned"
+        # tails can never be more likely than winning at all
+        p[10.0] = min(p[10.0], p[1.0])
+        p[100.0] = min(p[100.0], p[10.0])
+        ratio_p = p[1.0] / max(base[1.0], 1e-6)
+        ratio_m = exp_mult / max(base_mean, 1e-6) if base_mean > 0 else 1.0
+        size = float(np.clip(ratio_p * ratio_m, 0.0, self.max_size)) if source == "learned" else 1.0
+        veto, reason = False, "no settled history" if n == 0 else "base rates only"
+        if source == "learned":
+            reason = "learned"
+            if p[1.0] < self.veto_ratio * base[1.0] and exp_mult < 1.0:
+                veto = True
+                reason = (
+                    f"similar trades have been losing: P(win) {p[1.0]:.0%} against {base[1.0]:.0%} "
+                    f"on average, expected {exp_mult:.2f}x"
+                )
+        return TradeAdvice(
+            proposal.trade_id,
+            p[1.0],
+            p[10.0],
+            p[100.0],
+            exp_mult,
+            size,
+            veto,
+            reason,
+            n,
+            source,
+        )
+
+    # ------------------------------------------------------------------ learning
+    def settle(self, outcome: TradeOutcome) -> bool:
+        """Record a settled trade; refits when due.  Returns False for unknown trade ids."""
+        entry = self.pending.pop(outcome.trade_id, None)
+        if entry is None:
+            return False
+        t, feats = entry
+        for k in feats:
+            if k not in self.feature_names:
+                self.feature_names.append(k)
+        self.x.append(feats)
+        self.t.append(t)
+        self.multiple.append(max(float(outcome.multiple), 0.0))
+        self.peak.append(float(outcome.peak_multiple) if outcome.peak_multiple is not None else 0.0)
+        self._since_fit += 1
+        if len(self.multiple) >= self.min_trades and self._since_fit >= self.refit_every:
+            self.refit()
+        return True
+
+    def refit(self) -> dict[str, Any]:
+        """Champion / challenger refit on all settled trades (see the module docstring)."""
+        from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
+
+        self._since_fit = 0
+        order = np.argsort(np.asarray(self.t), kind="stable")
+        x = self._matrix([self.x[i] for i in order])
+        n = len(order)
+        cut = int(n * 0.8)
+        rep: dict[str, Any] = {"trades": n, "features": list(self.feature_names), "levels": {}}
+        params = {"max_depth": 3, "learning_rate": 0.05, "max_iter": 150, "l2_regularization": 1.0}
+        models: dict[float, TreeEnsemble] = {}
+        for lv in LEVELS:
+            y = self._labels(lv)[order]
+            pos_train = int(y[:cut].sum())
+            entry: dict[str, Any] = {"positives": int(y.sum()), "deployed": False}
+            if n < self.min_trades or pos_train < self.min_positives or cut - pos_train < self.min_positives:
+                entry["why"] = "not enough positives and negatives yet"
+                rep["levels"][str(lv)] = entry
+                continue
+            clf = HistGradientBoostingClassifier(random_state=self.seed, **params).fit(x[:cut], y[:cut])
+            p_new = clf.predict_proba(x[cut:])[:, 1]
+            base = (y[:cut].sum() + 0.5) / (cut + 1.0)
+            loss_model, loss_base = _log_loss(p_new, y[cut:]), _log_loss(np.full(n - cut, base), y[cut:])
+            entry |= {"holdout_log_loss": loss_model, "holdout_base_log_loss": loss_base}
+            if loss_model < loss_base:
+                full = HistGradientBoostingClassifier(random_state=self.seed, **params).fit(x, y)
+                models[lv] = TreeEnsemble.export(full)
+                entry["deployed"] = True
+            else:
+                entry["why"] = "did not beat the base rate on the newest trades"
+            rep["levels"][str(lv)] = entry
+        self.models = models
+        # expected multiple: log1p target (bounded influence of rare giants), same champion rule
+        y_val = np.log1p(np.asarray(self.multiple)[order])
+        self.value_model = None
+        if n >= self.min_trades:
+            reg = HistGradientBoostingRegressor(random_state=self.seed, **params).fit(x[:cut], y_val[:cut])
+            resid = y_val[cut:] - reg.predict(x[cut:])
+            err_model = float(np.mean(resid**2))
+            err_base = float(np.mean((y_val[:cut].mean() - y_val[cut:]) ** 2))
+            rep["value"] = {
+                "holdout_mse": err_model,
+                "holdout_base_mse": err_base,
+                "deployed": err_model < err_base,
+            }
+            if err_model < err_base:
+                full_reg = HistGradientBoostingRegressor(random_state=self.seed, **params).fit(x, y_val)
+                self.value_model = TreeEnsemble.export(full_reg)
+                self.smear = float(np.mean(np.exp(resid)))
+        self.report = rep
+        return rep
+
+    # ------------------------------------------------------------------ persistence
+    def save(self, directory: str | Path) -> None:
+        """Write ``meta.json`` (history, pending proposals, report) and the deployed trees."""
+        d = Path(directory)
+        d.mkdir(parents=True, exist_ok=True)
+        for f in d.glob("level_*.npz"):
+            f.unlink()
+        for lv, model in self.models.items():
+            model.save(d / f"level_{lv:g}.npz")
+        if self.value_model is not None:
+            self.value_model.save(d / "value.npz")
+        elif (d / "value.npz").exists():
+            (d / "value.npz").unlink()
+        meta = {
+            "config": {
+                "min_trades": self.min_trades,
+                "refit_every": self.refit_every,
+                "min_positives": self.min_positives,
+                "max_size": self.max_size,
+                "veto_ratio": self.veto_ratio,
+                "seed": self.seed,
+            },
+            "feature_names": self.feature_names,
+            "history": {"x": self.x, "t": self.t, "multiple": self.multiple, "peak": self.peak},
+            "pending": {k: [t, f] for k, (t, f) in self.pending.items()},
+            "levels": list(self.models),
+            "smear": self.smear,
+            "since_fit": self._since_fit,
+            "report": self.report,
+        }
+        (d / "meta.json").write_text(json.dumps(meta, default=float))
+
+    @classmethod
+    def load(cls, directory: str | Path) -> MetaLearner:
+        """Rebuild a learner saved by :meth:`save`."""
+        d = Path(directory)
+        meta = json.loads((d / "meta.json").read_text())
+        m = cls(**meta["config"])
+        m.feature_names = list(meta["feature_names"])
+        h = meta["history"]
+        m.x, m.t, m.multiple, m.peak = list(h["x"]), list(h["t"]), list(h["multiple"]), list(h["peak"])
+        m.pending = {k: (float(v[0]), dict(v[1])) for k, v in meta["pending"].items()}
+        m.models = {float(lv): TreeEnsemble.load(d / f"level_{float(lv):g}.npz") for lv in meta["levels"]}
+        if (d / "value.npz").exists():
+            m.value_model = TreeEnsemble.load(d / "value.npz")
+        m._since_fit = int(meta.get("since_fit", 0))
+        m.smear = float(meta.get("smear", 1.0))
+        m.report = dict(meta.get("report", {}))
+        return m
+
+
+def advice_dict(a: TradeAdvice) -> dict[str, Any]:
+    """Plain dict of an advice (for JSON transport to the trading system)."""
+    return asdict(a)

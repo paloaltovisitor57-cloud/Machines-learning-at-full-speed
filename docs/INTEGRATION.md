@@ -159,3 +159,51 @@ hit rates, the number of alarm exits, predicted versus observed P(≥10x), and h
 quintile by `chase_score` did compared with the rest. Compare it with your own algorithm's
 paper results on the same days before letting the signals size real positions.
 
+
+## Learning from Nardis's own trades (meta-labeling)
+
+The rest of the addon learns from **the market**. `nardis_neural.solana.metalabel` learns from
+**Nardis itself**: which of its own trades work, so that setups that keep failing get flagged
+and shrunk and setups that keep working get more weight. Nardis stays in charge of every
+decision; this layer only returns numbers.
+
+```python
+from nardis_neural.solana.metalabel import TradeOutcome, TradeProposal
+
+# before each trade: send whatever named numbers Nardis has for it
+advice = brain.advise_trade(
+    TradeProposal("trade-123", mint, now, {"nardis_score": 0.82, "entry_reason": 3.0})
+)
+advice.p_win, advice.p_10x, advice.p_100x      # probabilities learned from Nardis's own history
+advice.expected_multiple                       # Duan-smeared, so fat tails are not underestimated
+advice.size_multiplier                         # scale Nardis's own stake: 0 … 2
+advice.veto, advice.reason                     # a pattern that has been losing
+advice.source                                  # "prior" (base rates) or "learned"
+
+# after the trade closes (peak_multiple optional; it sharpens the 10x / 100x labels)
+brain.settle_trade(TradeOutcome("trade-123", exit_time, multiple=1.8, peak_multiple=3.1))
+brain.save()                                   # persists history and models in ws/meta/
+```
+
+`advise_trade` joins Nardis's features with the addon's own view of the token at that moment
+(moonshot, tape, edge and risk outputs, criticality and cluster features, all prefixed
+`addon_`), so the learner can also discover *which addon signals matter for Nardis's style*.
+
+How it stays honest:
+
+* **Cold start.** Until 50 trades have settled, answers are Jeffreys-prior base rates of the
+  trades so far (size 1, no vetoes). No model is ever used before it has evidence.
+* **Champion / challenger.** Every 25 settled trades it refits in time order: trained on the
+  older 80 %, scored on the newest 20 %. A model is deployed only if it beats the base rate
+  there (log loss for the win / 10x / 100x classifiers, squared error for the value model).
+  Otherwise the base rate stays. Pure-noise features are therefore never deployed (tested).
+* **Tails need evidence.** The 10x and 100x classifiers need at least 8 positive and 8 negative
+  trades before they are even tried. Until then P(10x) and P(100x) are base rates, capped by
+  P(win).
+* **Veto only when both signals agree.** A veto needs P(win) below half the average *and* an
+  expected multiple below 1.
+
+On a synthetic stream where a hidden quality drives outcomes, after 800 trades it ranks
+winners at AUC > 0.75 on 400 later proposals. It sizes the best sixth of proposals above 1.2x and the
+worst sixth below 0.8x, and the trades it vetoes lose on average while the rest make money. The
+real test is Nardis's paper trades: the more it trades, the better this layer gets.

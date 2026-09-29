@@ -46,6 +46,7 @@ from nardis_neural.solana.features import SolanaFeatureBuilder
 from nardis_neural.solana.forward import ForwardLedger
 from nardis_neural.solana.labels import SolanaLabeler
 from nardis_neural.solana.market import EventStore, SolanaMarket
+from nardis_neural.solana.metalabel import MetaLearner, TradeAdvice, TradeOutcome, TradeProposal
 from nardis_neural.solana.moonshot import MoonshotSpec, TailModel, moonshot_markdown, run_moonshot_research
 from nardis_neural.solana.moonshot.guard import GuardConfig, assess_manipulation
 from nardis_neural.solana.moonshot.labels import position_marks
@@ -217,6 +218,9 @@ class SolanaBrain:
             TapeModel.load(self.root / "tape") if (self.root / "tape" / "tape.json").exists() else None
         )
         """Tape Transformer (tail + collapse), installed by :meth:`fit_tape`."""
+        meta_dir = self.root / "meta"
+        self.meta = MetaLearner.load(meta_dir) if (meta_dir / "meta.json").exists() else MetaLearner()
+        """Learns from the trading system's own trades (see :meth:`advise_trade`)."""
         self.stopping: StoppingModel | None = (
             StoppingModel.load(self.root / "stopping")
             if (self.root / "stopping" / "stopping.json").exists()
@@ -749,6 +753,31 @@ class SolanaBrain:
         self.forward.alarm = self._ledger_alarm()
         return research.report
 
+    def trade_context(self, mint: str) -> dict[str, float]:
+        """The addon's market view of a token right now, flattened for :meth:`advise_trade`."""
+        if mint not in self.market.tokens:
+            return {}
+        a = self.assess(mint)
+        out: dict[str, float] = {}
+        for group, values in (("moonshot", a.moonshot), ("tape", a.tape), ("edge", a.edge), ("risk", a.risk)):
+            for k, v in values.items():
+                if isinstance(v, int | float) and np.isfinite(v):
+                    out[f"{group}_{k}"] = float(v)
+        for k in ("buy_branching_ratio", "endogenous_buy_share", "top_cluster_share", "liquidity_sol_log"):
+            if k in a.features:
+                out[f"feature_{k}"] = float(a.features[k])
+        return out
+
+    def advise_trade(self, proposal: TradeProposal, with_market: bool = True) -> TradeAdvice:
+        """Advice on a trade the trading system is about to make, learned from its own settled
+        trades, joined with this addon's market view of the token when ``with_market``."""
+        market = self.trade_context(proposal.mint) if with_market else None
+        return self.meta.advise(proposal, market)
+
+    def settle_trade(self, outcome: TradeOutcome) -> bool:
+        """Report a closed trade; the learner updates (refits when due)."""
+        return self.meta.settle(outcome)
+
     def fit_stopping(
         self,
         spec: MoonshotSpec | None = None,
@@ -869,6 +898,7 @@ class SolanaBrain:
         (self.root / "moonshot").mkdir(exist_ok=True)
         self.tracker.save(self.root / "moonshot" / "online.npz")
         self.forward.save()
+        self.meta.save(self.root / "meta")
         if self.risk_y:
             np.savez(
                 self.root / "risk_samples.npz",
