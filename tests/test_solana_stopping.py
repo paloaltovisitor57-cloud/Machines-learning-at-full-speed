@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from nardis_neural.solana.stopping import StoppingModel, StoppingPath, _thin, state_matrix
 
@@ -79,3 +80,41 @@ def test_stopping_research_and_brain_integration(tmp_path) -> None:  # type: ign
     advice = reloaded.hold_advice(mint, reloaded.market.token(mint).launch.t + 30.0)
     assert {"liquidation_multiple", "sell_now_utility", "continuation_utility", "advantage"} <= set(advice)
     assert np.isfinite(advice["advantage"])
+
+
+def test_power_utility_sits_between_log_and_linear() -> None:
+    v = np.array([0.5, 1.0, 2.0, 100.0])
+    log, lin = StoppingModel("log").u(v), StoppingModel("linear").u(v)
+    power = StoppingModel("power", gamma=0.5).u(v)
+    assert power[1] == 0.0 and np.all(np.diff(power) > 0)
+    assert power[3] > log[3] and power[3] < lin[3]
+    with pytest.raises(ValueError):
+        StoppingModel("power", gamma=1.5)
+
+
+def _lottery_paths(n: int, seed: int) -> list[StoppingPath]:
+    """At 2x, one in ten positions later runs to 100x and the rest fall to 0.5x, indistinguishably.
+
+    E[log V] after 2x is below log 2 (a Kelly bettor sells), E[√V] is above √2 (a runner holds)."""
+    rng = np.random.default_rng(seed)
+    out = []
+    for i in range(n):
+        end = 100.0 if rng.random() < 0.1 else 0.5
+        marks = np.array([1.0, 1.5, 2.0, end])
+        feats = rng.normal(size=(4, 2)).astype(np.float32)
+        out.append(StoppingPath(f"m{i}", 0.0, np.arange(4, dtype=np.float64) * 30 + 1, marks, feats))
+    return out
+
+
+def test_runner_mode_holds_the_lottery_that_log_utility_sells(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    train, test = _lottery_paths(600, 0), _lottery_paths(200, 1)
+    log = StoppingModel("log", iterations=3, seed=0)
+    runner = StoppingModel("power", iterations=3, seed=0, gamma=0.5)
+    log.fit(train, max_iter=60)
+    runner.fit(train, max_iter=60)
+    assert np.mean([log.stop_index(p) == 2 for p in test]) > 0.9  # banks the 2x
+    # estimated from noisy features, so not every path: a clear majority, far above log utility
+    assert np.mean([runner.stop_index(p) == 3 for p in test]) > 0.5  # holds for the tail
+    runner.save(tmp_path)
+    again = StoppingModel.load(tmp_path)
+    assert again.utility == "power" and again.gamma == 0.5

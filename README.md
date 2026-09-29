@@ -100,7 +100,7 @@ flowchart TB
 | Continual learning | 3-pool replay (recent FIFO, historical reservoir, protected rare events), 5 sampling strategies, candidate cloning, distillation, EWC, full retraining with configurable weights |
 | Lifecycle | immutable checkpoints, champion/candidate/challenger/retired/failed registry with audit log, shadow mode, 10-gate promotion, manual and optional automatic rollback |
 | Representation | self-supervised pretraining (masked timestep, masked feature, contrastive), embedding export to Parquet/NumPy, KMeans / GMM / HDBSCAN regime discovery |
-| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 216 test functions |
+| Engineering | Pydantic v2 + YAML config, Typer CLI, CPU/CUDA/MPS, safe mixed precision, `mypy --strict`, `ruff`, 218 test functions |
 
 ## Quick start
 
@@ -375,7 +375,7 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │                            edge/ (barriers · model · trees · backtest · research)
 │                            moonshot/ (labels · tail · guard · online · research)
 │                            tape/ (features · dataset · model · research · policy)
-└── tests/                   216 test functions incl. synthetic end-to-end pipeline
+└── tests/                   218 test functions incl. synthetic end-to-end pipeline
 ```
 
 ## Testing & quality gates
@@ -2465,8 +2465,27 @@ With linear utility (maximise E[V]), fat tails dominate. A 1 % chance of 1000x i
 10x, so the rule learns to hold almost everything "for the lottery". With `u(V) = log V`,
 the rule maximises the expected growth rate of capital, which is the Kelly criterion
 applied to the exit. It still holds a runner while its continuation value is high, but it
-does not trade a likely 3x for a small chance at 100x. Both utilities are fitted and
-reported; the installed model uses log.
+does not trade a likely 3x for a small chance at 100x. The installed model uses log by
+default.
+
+#### Runner mode: power utility for chasing 100x
+
+For a strategy whose purpose is to catch the rare 100x, selling a likely 3x early is the
+wrong trade. **Runner mode** uses the CRRA family between the two:
+
+```
+u(V) = (V^(1−γ) − 1) / (1 − γ)        γ → 1: log utility      γ = 0: linear (expected value)
+```
+
+With γ = 0.5 (`u = 2(√V − 1)`) a 100x outcome is worth 18 units against 0.83 for a sure 2x, so a
+10 % chance of 100x justifies holding (E[u] = 1.27 > 0.83). Under log utility it does not: E[log V] = −0.16
+against log 2 = 0.69. A unit test builds exactly this lottery (at 2x, one position in ten
+later runs to 100x, the rest fall to 0.5x, indistinguishably). Log utility sells at 2x on
+99 % of test paths. Runner mode holds to the end on about two thirds, which is far more
+often; its continuation value is estimated from noisy features, so not on every path.
+
+All three utilities (log, power, linear) are fitted and reported by the research;
+`--utility power --gamma 0.5` installs runner mode.
 
 ### 2. The estimator
 
@@ -2568,6 +2587,7 @@ How to read this:
 
 ```bash
 nardis-neural solana stopping-research --workspace ws        # research + install ws/stopping/
+nardis-neural solana stopping-research --workspace ws --utility power --gamma 0.5   # runner mode
 ```
 
 ```python
@@ -3114,6 +3134,8 @@ hold, timers and the ladder on later tokens, and install it.
 | `--spacing` | float | 30.0 | minimum seconds between exit decisions |
 | `--test-fraction` | float | 0.35 | share of the latest-launched tokens held out for the test |
 | `--archetypes` | path | null | simulator archetypes.json for diagnostics |
+| `--utility` | str | "log" | installed exit objective: log (compounding) or power (runner mode) |
+| `--gamma` | float | 0.5 | risk aversion of power utility, 0 < gamma < 1 |
 
 ### `nardis-neural solana forward-report`
 
@@ -4319,7 +4341,7 @@ SolanaBrain — the complete Solana ML module behind one small API.
   - `evict(self) -> 'list[str]'` — Label finished moonshot rows, then drop tokens idle for ``evict_idle_seconds``.
   - `fit_edge(self, spec: 'BarrierSpec | None' = None, n_folds: 'int' = 4, max_positions: 'int' = 5, history: 'EventStore | None' = None, log: 'Callable[[str], None] | None' = None) -> 'dict[str, Any]'` — Walk-forward edge research on the workspace history; installs the edge model.
   - `fit_moonshot(self, spec: 'MoonshotSpec | None' = None, inputs: 'str' = 'raw', n_folds: 'int' = 4, test_fraction: 'float' = 0.35, min_expected_multiple: 'float' = 1.0, history: 'EventStore | None' = None, archetypes: 'dict[str, str] | None' = None, log: 'Callable[[str], None] | None' = None) -> 'dict[str, Any]'` — Fat-tail research on the workspace history; installs the tail model.
-  - `fit_stopping(self, spec: 'MoonshotSpec | None' = None, test_fraction: 'float' = 0.35, spacing: 'float' = 30.0, history: 'EventStore | None' = None, archetypes: 'dict[str, str] | None' = None, log: 'Callable[[str], None] | None' = None) -> 'dict[str, Any]'` — Optimal-stopping exit research on the workspace history; installs the refitted model.
+  - `fit_stopping(self, spec: 'MoonshotSpec | None' = None, test_fraction: 'float' = 0.35, spacing: 'float' = 30.0, history: 'EventStore | None' = None, archetypes: 'dict[str, str] | None' = None, log: 'Callable[[str], None] | None' = None, utility: 'str' = 'log', gamma: 'float' = 0.5) -> 'dict[str, Any]'` — Optimal-stopping exit research on the workspace history; installs the refitted model.
   - `fit_tape(self, spec: 'MoonshotSpec | None' = None, tape: 'TapeSpec | None' = None, test_fraction: 'float' = 0.35, members: 'int' = 3, epochs: 'int' = 40, history: 'EventStore | None' = None, archetypes: 'dict[str, str] | None' = None, log: 'Callable[[str], None] | None' = None, d: 'int' = 64, layers: 'int' = 2) -> 'dict[str, Any]'` — Tape Transformer research on the workspace history; installs the refitted model.
   - `hold_advice(self, mint: 'str', t_signal: 'float') -> 'dict[str, float]'` — Sell-or-hold advice for a ticket signalled at ``t_signal`` (an estimate, not an order).
   - `ingest(self, event: 'Event') -> 'None'` — Feed one event, in time order, into the market (and the event history unless streaming).
@@ -4389,7 +4411,7 @@ Capital research: turn a research test period into bankroll and overfitting evid
 - `replay(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace directory')]", events: "Annotated[Path, typer.Option('--events', '-e', help='new events to stream in')]", every: "Annotated[float, typer.Option('--assess-every', help='seconds between assessment rounds')]" = 10.0, out: "Annotated[Path | None, typer.Option('--out', '-o', help='JSONL of assessments')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Stream events through the brain as if live: assess, resolve outcomes, then maintain.
 - `research_suite(seeds: "Annotated[str, typer.Option('--seeds', help='comma-separated simulator seeds')]" = '7,19,23', market: "Annotated[str, typer.Option('--market', help='archetype mix: default or degen')]" = 'degen', tokens: "Annotated[int, typer.Option('--tokens', help='launches per simulated market')]" = 150, hours: "Annotated[float, typer.Option('--hours', help='simulated hours per market')]" = 8.0, tape: "Annotated[bool, typer.Option('--tape/--no-tape', help='also run the (slower) tape research')]" = False, out: "Annotated[Path | None, typer.Option('--out', '-o', help='write the JSON result here')]" = None) -> 'None'` — Run the moonshot (and optionally tape) research on several independent simulated markets and report every metric as mean ± sd across seeds.
 - `simulate(out: "Annotated[Path, typer.Option('--out', '-o', help='event directory (Parquet tables)')]", tokens: "Annotated[int, typer.Option('--tokens', help='number of token launches to simulate')]" = 40, seed: "Annotated[int, typer.Option('--seed', help='random seed')]" = 0, prefix: "Annotated[str, typer.Option('--prefix', help='mint/wallet name prefix (distinguishes eras)')]" = 'Mint', start_time: "Annotated[float, typer.Option('--start-time', help='simulation start, unix seconds')]" = 1750000000.0, hours: "Annotated[float, typer.Option('--hours', help='simulated duration, hours')]" = 3.0, market: "Annotated[str, typer.Option('--market', help='archetype mix: default, or degen (mostly duds + runners)')]" = 'default', runners: "Annotated[float | None, typer.Option('--runners', help='override the share of 100–1000x runner launches')]" = None, herding: "Annotated[bool, typer.Option('--herding/--no-herding', help='self-exciting (Hawkes) retail demand')]" = False) -> 'None'` — Simulate memecoin launches (snipers, bundles, rugs, graduations, runners, smart money, bots).
-- `stopping_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history)')]", spacing: "Annotated[float, typer.Option('--spacing', help='minimum seconds between exit decisions')]" = 30.0, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of the latest-launched tokens held out for the test')]" = 0.35, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None) -> 'None'` — Fit the optimal-stopping exit model (Longstaff–Schwartz, log utility), score it against hold, timers and the ladder on later tokens, and install it.
+- `stopping_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history)')]", spacing: "Annotated[float, typer.Option('--spacing', help='minimum seconds between exit decisions')]" = 30.0, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of the latest-launched tokens held out for the test')]" = 0.35, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None, utility: "Annotated[str, typer.Option('--utility', help='installed exit objective: log (compounding) or power (runner mode)')]" = 'log', gamma: "Annotated[float, typer.Option('--gamma', help='risk aversion of power utility, 0 < gamma < 1')]" = 0.5) -> 'None'` — Fit the optimal-stopping exit model (Longstaff–Schwartz, log utility), score it against hold, timers and the ladder on later tokens, and install it.
 - `stream(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace directory')]", rpc: 'RpcOpt' = None, out: "Annotated[Path | None, typer.Option('--out', '-o', help='append assessments as JSONL')]" = None, polls: "Annotated[int | None, typer.Option('--polls', help='stop after N polls (default: run forever)')]" = None, poll_interval: "Annotated[float, typer.Option('--poll-interval', help='seconds between RPC polls')]" = 2.0, assess_every: "Annotated[float, typer.Option('--assess-every', help='seconds between assessment rounds')]" = 10.0, maintenance_every: "Annotated[float, typer.Option('--maintenance-every', help='seconds between maintenance runs')]" = 600.0, device: 'DeviceOpt' = None) -> 'None'` — Stream live chain activity into a Solana workspace (read-only) and emit assessments.
 - `stream_train_cmd(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (created if new, else resumed)')]", events: "Annotated[Path | None, typer.Option('--events', '-e', help='stream a saved event directory instead of RPC')]" = None, rpc: 'RpcOpt' = None, start: "Annotated[str | None, typer.Option('--start', help='unix seconds or ISO date (RPC mode)')]" = None, end: "Annotated[str | None, typer.Option('--end', help='unix seconds or ISO date (RPC mode)')]" = None, segment_minutes: "Annotated[float, typer.Option('--segment-minutes', help='history segment length, minutes (RPC mode)')]" = 60.0, workers: "Annotated[int, typer.Option('--workers', help='parallel getTransaction calls')]" = 8, warmup_hours: "Annotated[float, typer.Option('--warmup-hours', help='hours of stream used to bootstrap a new workspace')]" = 6.0, evict_idle_hours: "Annotated[float, typer.Option('--evict-idle-hours', help='forget tokens idle this many hours')]" = 2.0, solana_config: 'SolCfg' = None, config: 'BaseCfg' = None, profile: "Annotated[str | None, typer.Option('--profile', help='auto | cpu-lite | cpu | gpu | gpu-frontier')]" = 'auto', device: 'DeviceOpt' = None) -> 'None'` — Learn by streaming history through the brain — nothing is downloaded to disk.
 - `tape_research(workspace: "Annotated[Path, typer.Option('--workspace', '-w', help='Solana workspace (history + champion)')]", max_trades: "Annotated[int, typer.Option('--max-trades', help='trades per tape (most recent kept)')]" = 96, members: "Annotated[int, typer.Option('--members', help='ensemble members')]" = 3, epochs: "Annotated[int, typer.Option('--epochs', help='maximum training epochs per member')]" = 40, d: "Annotated[int, typer.Option('--d', help='Transformer width')]" = 64, layers: "Annotated[int, typer.Option('--layers', help='Transformer layers')]" = 2, test_fraction: "Annotated[float, typer.Option('--test-fraction', help='share of the latest-launched tokens held out for the test')]" = 0.35, archetypes: "Annotated[Path | None, typer.Option('--archetypes', help='simulator archetypes.json for diagnostics')]" = None, device: 'DeviceOpt' = None) -> 'None'` — Train the Tape Transformer (trade tape + wallet embeddings → tail and collapse) and score it against the raw-feature tail model on later tokens; installs the model.
@@ -4738,7 +4760,7 @@ Agent-based simulator of Solana memecoin launches — for testing and demos only
 Optimal stopping for exits: Longstaff–Schwartz on executable liquidation paths.
 
 - `build_paths(mds: 'Any', mints: 'list[str]', data_end: 'float', spacing: 'float' = 30.0) -> 'tuple[list[StoppingPath], list[int]]'` — One position per token, entered at its first entry-window snapshot and marked at the token's later snapshots (at most one per ``spacing`` seconds) up to the horizon and to ``data_end`` (a sale decided at ``s`` fills at ``s + latency``, which must be observed). Returns the paths and the candidate row (into ``mds``) of each entry.
-- `run_stopping_research(store: 'Any', cfg: 'Any', spec: 'Any' = None, test_fraction: 'float' = 0.35, spacing: 'float' = 30.0, iterations: 'int' = 4, archetypes: 'dict[str, str] | None' = None, seed: 'int' = 0, log: 'Any' = None) -> 'tuple[dict[str, Any], StoppingModel]'` — Fit the exit model on earlier tokens (paths truncated at the cutoff), score it once on later tokens against hold-to-horizon, fixed timers, the take-profit ladder and the hindsight-perfect exit. Every token is entered, so only the exit decision is compared. Returns the report and a model refitted on every token's full path.
+- `run_stopping_research(store: 'Any', cfg: 'Any', spec: 'Any' = None, test_fraction: 'float' = 0.35, spacing: 'float' = 30.0, iterations: 'int' = 4, archetypes: 'dict[str, str] | None' = None, seed: 'int' = 0, log: 'Any' = None, production_utility: 'str' = 'log', gamma: 'float' = 0.5) -> 'tuple[dict[str, Any], StoppingModel]'` — Fit the exit model on earlier tokens (paths truncated at the cutoff), score it once on later tokens against hold-to-horizon, fixed timers, the take-profit ladder and the hindsight-perfect exit. Every token is entered, so only the exit decision is compared. Returns the report and a model refitted on every token's full path.
 - `state_matrix(p: 'StoppingPath') -> 'F32'` — Regression state: market features + time held + log multiple, running peak, drawdown.
 - `stopping_markdown(report: 'dict[str, Any]') -> 'str'` — Human-readable summary of :func:`run_stopping_research`.
 - **class `StoppingModel`** — Fitted-policy-iteration Longstaff–Schwartz exit model.
@@ -4989,7 +5011,7 @@ Transparent PyTorch training engine.
 
 ## Test inventory
 
-216 test functions (some are parametrised over devices, experts or formats).
+218 test functions (some are parametrised over devices, experts or formats).
 
 ### `tests/test_cli.py`
 
@@ -5288,6 +5310,8 @@ Runner-specific wallet skill, creator-family track records, sybil-resistant clus
 - `test_stopping_beats_holding_out_of_sample`
 - `test_unfitted_model_holds_and_thin_spacing`
 - `test_stopping_research_and_brain_integration`
+- `test_power_utility_sits_between_log_and_linear`
+- `test_runner_mode_holds_the_lottery_that_log_utility_sells`
 
 ### `tests/test_solana_streaming.py`
 

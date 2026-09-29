@@ -539,6 +539,13 @@ def stopping_research(
     archetypes: Annotated[
         Path | None, typer.Option("--archetypes", help="simulator archetypes.json for diagnostics")
     ] = None,
+    utility: Annotated[
+        str,
+        typer.Option("--utility", help="installed exit objective: log (compounding) or power (runner mode)"),
+    ] = "log",
+    gamma: Annotated[
+        float, typer.Option("--gamma", help="risk aversion of power utility, 0 < gamma < 1")
+    ] = 0.5,
 ) -> None:
     """Fit the optimal-stopping exit model (Longstaff–Schwartz, log utility), score it against
     hold, timers and the ladder on later tokens, and install it."""
@@ -547,7 +554,14 @@ def stopping_research(
 
     brain = SolanaBrain(workspace)
     arch = json.loads(archetypes.read_text()) if archetypes is not None else None
-    report = brain.fit_stopping(test_fraction=test_fraction, spacing=spacing, archetypes=arch, log=typer.echo)
+    report = brain.fit_stopping(
+        test_fraction=test_fraction,
+        spacing=spacing,
+        archetypes=arch,
+        log=typer.echo,
+        utility=utility,
+        gamma=gamma,
+    )
     typer.echo(stopping_markdown(report))
     typer.echo(f"stopping model installed in {workspace / 'stopping'}")
 

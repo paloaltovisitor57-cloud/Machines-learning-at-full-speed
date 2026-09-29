@@ -757,8 +757,12 @@ class SolanaBrain:
         history: EventStore | None = None,
         archetypes: dict[str, str] | None = None,
         log: Callable[[str], None] | None = None,
+        utility: str = "log",
+        gamma: float = 0.5,
     ) -> dict[str, Any]:
-        """Optimal-stopping exit research on the workspace history; installs the refitted model."""
+        """Optimal-stopping exit research on the workspace history; installs the refitted model.
+
+        ``utility="power"`` (with ``gamma``) installs runner mode, which holds runners longer."""
         report, model = run_stopping_research(
             history or self.history,
             self.cfg,
@@ -767,6 +771,8 @@ class SolanaBrain:
             spacing=spacing,
             archetypes=archetypes,
             log=log,
+            production_utility=utility,
+            gamma=gamma,
         )
         d = self.root / "stopping"
         model.report = model.report | {"research": report, "spacing": spacing}

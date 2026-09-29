@@ -29,8 +29,27 @@ With linear utility (maximise E[V]), fat tails dominate. A 1 % chance of 1000x i
 10x, so the rule learns to hold almost everything "for the lottery". With `u(V) = log V`,
 the rule maximises the expected growth rate of capital, which is the Kelly criterion
 applied to the exit. It still holds a runner while its continuation value is high, but it
-does not trade a likely 3x for a small chance at 100x. Both utilities are fitted and
-reported; the installed model uses log.
+does not trade a likely 3x for a small chance at 100x. The installed model uses log by
+default.
+
+### Runner mode: power utility for chasing 100x
+
+For a strategy whose purpose is to catch the rare 100x, selling a likely 3x early is the
+wrong trade. **Runner mode** uses the CRRA family between the two:
+
+```
+u(V) = (V^(1−γ) − 1) / (1 − γ)        γ → 1: log utility      γ = 0: linear (expected value)
+```
+
+With γ = 0.5 (`u = 2(√V − 1)`) a 100x outcome is worth 18 units against 0.83 for a sure 2x, so a
+10 % chance of 100x justifies holding (E[u] = 1.27 > 0.83). Under log utility it does not: E[log V] = −0.16
+against log 2 = 0.69. A unit test builds exactly this lottery (at 2x, one position in ten
+later runs to 100x, the rest fall to 0.5x, indistinguishably). Log utility sells at 2x on
+99 % of test paths. Runner mode holds to the end on about two thirds, which is far more
+often; its continuation value is estimated from noisy features, so not on every path.
+
+All three utilities (log, power, linear) are fitted and reported by the research;
+`--utility power --gamma 0.5` installs runner mode.
 
 ## 2. The estimator
 
@@ -132,6 +151,7 @@ How to read this:
 
 ```bash
 nardis-neural solana stopping-research --workspace ws        # research + install ws/stopping/
+nardis-neural solana stopping-research --workspace ws --utility power --gamma 0.5   # runner mode
 ```
 
 ```python

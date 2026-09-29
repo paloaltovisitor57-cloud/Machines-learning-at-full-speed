@@ -12,7 +12,10 @@ observed paths, backwards in time.  Here:
 
 * **utility** — ``u(V) = log V`` by default, the Kelly-consistent objective: with fat tails,
   maximising E[V] says "always hold for the lottery", while maximising E[log V] is what
-  compounds capital (``utility="linear"`` is available for comparison);
+  compounds capital (``utility="linear"`` is available for comparison).  ``utility="power"``
+  is the CRRA family ``u(V) = (V^(1−γ) − 1)/(1−γ)`` between them (γ → 1 is log, γ = 0 is
+  linear): **runner mode**, which keeps holding a position whose continuation value is
+  still high instead of banking a small gain, for strategies that chase 100x tails;
 * **state** — the token's current features (all of them, causal), time in the position,
   the current log multiple, the running peak and the drawdown from it;
 * **fitted policy iteration** — pooled over paths of different lengths: start from "hold to
@@ -65,17 +68,24 @@ def state_matrix(p: StoppingPath) -> F32:
 class StoppingModel:
     """Fitted-policy-iteration Longstaff–Schwartz exit model."""
 
-    def __init__(self, utility: str = "log", iterations: int = 4, seed: int = 0) -> None:
-        if utility not in ("log", "linear"):
-            raise ValueError("utility must be 'log' or 'linear'")
-        self.utility, self.iterations, self.seed = utility, iterations, seed
+    def __init__(self, utility: str = "log", iterations: int = 4, seed: int = 0, gamma: float = 0.5) -> None:
+        if utility not in ("log", "linear", "power"):
+            raise ValueError("utility must be 'log', 'linear' or 'power'")
+        if utility == "power" and not 0.0 < gamma < 1.0:
+            raise ValueError("gamma must be in (0, 1) for power utility")
+        self.utility, self.iterations, self.seed, self.gamma = utility, iterations, seed, gamma
         self.trees: TreeEnsemble | None = None
         self.report: dict[str, Any] = {}
 
     def u(self, v: F64) -> F64:
         """Utility of a liquidation multiple."""
         v = np.asarray(v, dtype=np.float64)
-        return np.log(np.maximum(v, FLOOR)) if self.utility == "log" else v
+        if self.utility == "log":
+            return np.log(np.maximum(v, FLOOR))
+        if self.utility == "power":
+            g = 1.0 - self.gamma
+            return (np.maximum(v, FLOOR) ** g - 1.0) / g
+        return v
 
     def continuation(self, x: F32) -> F64:
         """Estimated E[utility of continuing] for each state row."""
@@ -157,6 +167,7 @@ class StoppingModel:
             self.trees.save(d / "continuation.npz")
         meta = {
             "utility": self.utility,
+            "gamma": self.gamma,
             "iterations": self.iterations,
             "seed": self.seed,
             "report": self.report,
@@ -168,7 +179,9 @@ class StoppingModel:
         """Rebuild a model saved by :meth:`save`."""
         d = Path(directory)
         meta = json.loads((d / "stopping.json").read_text())
-        model = cls(str(meta["utility"]), int(meta["iterations"]), int(meta["seed"]))
+        model = cls(
+            str(meta["utility"]), int(meta["iterations"]), int(meta["seed"]), float(meta.get("gamma", 0.5))
+        )
         if (d / "continuation.npz").exists():
             model.trees = TreeEnsemble.load(d / "continuation.npz")
         model.report = dict(meta.get("report", {}))
@@ -240,6 +253,8 @@ def _exit_stats(mult: F64, size_sol: float) -> dict[str, float]:
         "median_multiple": float(np.median(m)),
         "mean_log_multiple": float(np.log(np.maximum(m, FLOOR)).mean()),
         "share_above_1x": float((m > 1.0).mean()),
+        "share_10x": float((m >= 10.0).mean()),
+        "best_multiple": float(m.max()),
     }
 
 
@@ -258,6 +273,8 @@ def run_stopping_research(
     archetypes: dict[str, str] | None = None,
     seed: int = 0,
     log: Any = None,
+    production_utility: str = "log",
+    gamma: float = 0.5,
 ) -> tuple[dict[str, Any], StoppingModel]:
     """Fit the exit model on earlier tokens (paths truncated at the cutoff), score it once on
     later tokens against hold-to-horizon, fixed timers, the take-profit ladder and the
@@ -285,8 +302,8 @@ def run_stopping_research(
     )
     policies: dict[str, StoppingModel] = {}
     fits: dict[str, Any] = {}
-    for utility in ("log", "linear"):
-        m = StoppingModel(utility, iterations, seed)
+    for utility in ("log", "power", "linear"):
+        m = StoppingModel(utility, iterations, seed, gamma)
         fits[utility] = m.fit(train_paths)
         policies[utility] = m
 
@@ -294,6 +311,7 @@ def run_stopping_research(
     held = np.array([p.marks[-1] for p in test_paths])
     exits: dict[str, F64] = {
         "optimal_stopping_log": np.array([p.marks[policies["log"].stop_index(p)] for p in test_paths]),
+        "optimal_stopping_runner": np.array([p.marks[policies["power"].stop_index(p)] for p in test_paths]),
         "optimal_stopping_linear": np.array([p.marks[policies["linear"].stop_index(p)] for p in test_paths]),
         "hold_to_horizon": held,
         "ladder": lab.ladder[np.asarray(test_rows, dtype=np.int64)] if test_rows else np.zeros(0),
@@ -313,7 +331,7 @@ def run_stopping_research(
         "log_policy_median_hold_seconds": float(np.median(hold_s)) if len(hold_s) else float("nan"),
     }
     full_paths, _ = build_paths(mds, tokens, mds.data_end, spacing)
-    production = StoppingModel("log", iterations, seed)
+    production = StoppingModel(production_utility, iterations, seed, gamma)
     production.fit(full_paths)
     return report, production
 
@@ -327,15 +345,16 @@ def stopping_markdown(report: dict[str, Any]) -> str:
         f"decisions every ≥ {report['decision_spacing_seconds']:g} s. Every test token is entered; "
         "only the exit differs.",
         "",
-        "| exit | tickets | PnL (SOL) | mean x | median x | mean log x | share > 1x |",
-        "|---|---|---|---|---|---|---|",
+        "| exit | tickets | PnL (SOL) | mean x | median x | mean log x | share > 1x | share ≥ 10x | best |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for name, s in report["exits"].items():
         if not s.get("tickets"):
             continue
         lines.append(
             f"| {name} | {s['tickets']:.0f} | {s['total_pnl_sol']:+.2f} | {s['mean_multiple']:.2f} | "
-            f"{s['median_multiple']:.2f} | {s['mean_log_multiple']:+.3f} | {s['share_above_1x']:.0%} |"
+            f"{s['median_multiple']:.2f} | {s['mean_log_multiple']:+.3f} | {s['share_above_1x']:.0%} | "
+            f"{s.get('share_10x', 0.0):.0%} | {s.get('best_multiple', float('nan')):.1f}x |"
         )
     lines.append("")
     lines.append(
