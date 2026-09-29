@@ -11,9 +11,15 @@ uncertainty, an out-of-distribution score, a latent market-state embedding and p
 expert weights. It keeps learning from newly labelled outcomes through a guarded
 champion → challenger lifecycle.
 
-> **Scope.** This repository is the ML brain *only*. It contains no Solana RPC, wallets,
+> **Scope.** This repository is the ML brain *only*. It contains no wallets, keys, signing,
 > transaction execution, order routing or trading strategy, and it never emits BUY/SELL
-> commands. The existing trading system decides what to do with the forecasts.
+> commands. Its only chain access is a **read-only** RPC client (`solana/ingest/`) that fetches
+> public pump.fun and PumpSwap transactions to learn from. The existing trading system decides
+> what to do with the forecasts.
+
+> **Merging this into Nardis? Start with [docs/HANDOFF.md](HANDOFF.md)** (the integration in one
+> page, the merge plan and checklist, setup, operations, signals, invariants and project status),
+> then [docs/API.md](API.md) (the full HTTP contract with real example responses).
 
 ---
 
@@ -37,7 +43,7 @@ champion → challenger lifecycle.
 - [Repository layout](#repository-layout)
 - [Testing & quality gates](#testing--quality-gates)
 - [Performance](#performance)
-- [Future Nardis integration](#future-nardis-integration)
+- [Nardis integration](#nardis-integration)
 - [Solana intelligence layer](#solana-intelligence-layer)
 - [Edge engine](#edge-engine)
 - [Moonshot engine](#moonshot-engine)
@@ -48,8 +54,8 @@ champion → challenger lifecycle.
 - [The chase](#the-chase)
 - [Real-data results](#real-data-results)
 - [Optional / not included](#optional--not-included)
-- **[Part II — In depth](#part-ii--in-depth)**: architecture, continual learning, integration,
-  Solana layer, edge engine, moonshot engine, Tape Transformer, criticality engine, capital
+- **[Part II — In depth](#part-ii--in-depth)**: merging into Nardis (start here), the HTTP API
+  reference, architecture, continual learning, integration, Solana layer, edge engine, moonshot engine, Tape Transformer, criticality engine, capital
   engine, optimal-stopping exits, real-data results (the full contents of `docs/`)
 - **[Part III — Generated reference](#part-iii--generated-reference)**: every CLI command and
   option, every configuration field and default, every feature, every output field, the
@@ -345,9 +351,10 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 ```
 ├── configs/                 default.yaml · small.yaml
 ├── README.md                generated: python -m nardis_neural.docgen (a test keeps it in sync)
-├── docs/                    OVERVIEW.md · ARCHITECTURE.md · CONTINUAL_LEARNING.md · INTEGRATION.md ·
-│                            SOLANA.md · EDGE.md · MOONSHOT.md · TAPE.md · CRITICALITY.md · CAPITAL.md ·
-│                            STOPPING.md · CHASE.md · REAL_DATA.md (README sources)
+├── docs/                    HANDOFF.md (start here) · API.md · OVERVIEW.md · ARCHITECTURE.md ·
+│                            CONTINUAL_LEARNING.md · INTEGRATION.md · SOLANA.md · EDGE.md · MOONSHOT.md ·
+│                            TAPE.md · CRITICALITY.md · CAPITAL.md · STOPPING.md · CHASE.md · REAL_DATA.md
+│                            (README sources)
 ├── examples/                nardis_integration.py (runnable, tested)
 ├── src/nardis_neural/
 │   ├── config.py            Pydantic config tree
@@ -368,7 +375,8 @@ distillation and EWC weights, drift thresholds, promotion gates and rollback. Pr
 │   ├── monitoring/          drift
 │   └── solana/              amm · events · market · wallets · features · labels · dataset ·
 │                            risk · simulator · brain · config · cli · streaming · hawkes ·
-│                            forward · suite · stopping · metalabel · service · chase · archive
+│                            forward · suite · stopping · metalabel · service · chase · archive ·
+│                            runners · narrative
 │                            capital/ (allocator · bankroll · overfit · research)
 │                            ingest/ (decoder · rpc · stream · history · encode · pumpfun · base58)
 │                            edge/ (barriers · model · trees · backtest · research)
@@ -418,9 +426,16 @@ CPU only, 4-core Xeon @ 2.1 GHz:
 Peak RSS is about 1 GB (0.8 GB for `cpu-lite`). GPUs are much faster. Run `nardis-neural benchmark` on your
 hardware.
 
-## Future Nardis integration
+## Nardis integration
 
-See [docs/INTEGRATION.md](INTEGRATION.md) and the runnable
+**Start with [docs/HANDOFF.md](HANDOFF.md)**: it is the single document for merging this repository
+into Nardis. For a Solana memecoin bot the recommended shape is the **sidecar**: run
+`nardis-neural solana serve` next to Nardis and call its HTTP/JSON API
+([docs/API.md](API.md)) before every trade (`/advise_trade`), while a position is open
+(`/hold_advice`) and after it closes (`/settle_trade`); it pushes moonshot alerts and keeps
+training itself on Nardis's Parquet/SQLite trade archive.
+
+For the generic (non-Solana) brain, see [docs/INTEGRATION.md](INTEGRATION.md) and the runnable
 [`examples/nardis_integration.py`](../examples/nardis_integration.py). In short: build a
 `NeuralObservation` from generic tensors (`build_bars` turns raw event streams into
 leakage-free bars), call `predict`, report `NeuralOutcome`s as horizons elapse, and run
@@ -597,12 +612,15 @@ that is proven (at least 3 real hits) and +EV. See [docs/CHASE.md](CHASE.md).
 
 ## Real-data results
 
-First mainnet measurement: 1.5 hours of pump.fun history (500 192 events, 1 985 SOL-priced
-launches). See [docs/REAL_DATA.md](REAL_DATA.md).
+Measured on real pump.fun mainnet history. See [docs/REAL_DATA.md](REAL_DATA.md).
 
-- **Entry: no demonstrated edge yet.** On a window this short most outcome labels are
-  censored, so the entry model cannot be scored; buying every launch lost about 3 % per
-  ticket (−8.3 SOL on 659 tickets).
+- **Runner identification (3 h 40 min, 5 006 launches, 760 fully observed test tokens).** The
+  production tail model ranks tokens that go on to 2x / 5x / 10x within 30 minutes with AUC
+  **0.896 / 0.917 / 0.923**; its top 10 % held 7 of the 10 tokens that reached 10x (base rate
+  1.3 %). Narrative features added +0.028 / +0.044 AUC at 5x / 10x (intervals exclude zero).
+  Six attempts with bigger or different models did not beat it.
+- **Buying every launch loses.** On the first 1.5-hour window (1 985 launches) it lost about
+  3 % per ticket (−8.3 SOL on 659 tickets).
 - **Exit: transfers.** The log-utility stopping rule lost 39 % less than the ladder and 76 %
   less than holding, out of sample; its median hold on real launches is 10 seconds.
 - **Crash model: transfers.** Collapse AUC 0.962 / 0.965 / 0.969 within 1 / 5 / 15 minutes,
@@ -621,5 +639,8 @@ launches). See [docs/REAL_DATA.md](REAL_DATA.md).
   small by design. Shadow mode on genuinely new data is the decisive test.
 - **Distributed or multi-node training** is intentionally out of scope (no Ray, Spark,
   Kafka and so on). Single-GPU or CPU training is supported.
-- **Real-market data ingestion** is out of scope: the trading system produces the datasets.
-  The synthetic generator exists to test the ML system, not to model profitability.
+- **Execution** is out of scope: there are no wallets, keys, signing or order routing. The
+  Solana layer reads public chain data through a read-only RPC client (an allowlist of read
+  methods) or from transactions the trading system pushes to it. For the generic brain, the
+  trading system produces the datasets; the synthetic generator exists to test the ML system,
+  not to model profitability.

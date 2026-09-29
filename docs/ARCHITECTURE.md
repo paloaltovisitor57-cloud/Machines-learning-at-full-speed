@@ -8,8 +8,10 @@ behind each design decision. For the learning lifecycle see
 ## 1. Scope
 
 The repository is the ML *brain* only. It receives generic tensors and returns
-probabilistic forecasts. There is **no** RPC, wallet, transaction, order-routing or
-strategy code, and no output is ever a BUY/SELL instruction.
+probabilistic forecasts. There is **no** wallet, key, signing, transaction-sending,
+order-routing or strategy code, and no output is ever a BUY/SELL instruction. The only chain
+access is the Solana layer's read-only RPC client, which fetches public transactions to learn
+from (see [SOLANA.md](SOLANA.md)).
 
 ## 2. Data contract
 

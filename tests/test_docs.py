@@ -40,3 +40,8 @@ def test_readme_is_generated_and_up_to_date() -> None:
     ):
         assert part in text
     assert "solana stream-train" in text and "solana moonshot-research" in text
+
+
+def test_every_doc_is_in_the_readme() -> None:
+    docs = {p.stem for p in (README.parent / "docs").glob("*.md")} - {"OVERVIEW"}
+    assert docs == {stem for stem, _ in docgen.PARTS}, "add every docs/*.md to docgen.PARTS"

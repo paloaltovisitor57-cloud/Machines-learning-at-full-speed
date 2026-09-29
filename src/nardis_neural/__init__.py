@@ -15,7 +15,8 @@ Minimal integration surface::
     trainer.full_retrain_if_needed()
 
 This package produces probabilistic forecasts only.  It contains no trading logic,
-order routing, wallet or RPC functionality.
+order routing, wallets, keys or transaction sending; its only chain access is a read-only
+RPC client that fetches public transactions to learn from.
 """
 
 from nardis_neural.config import NeuralConfig, load_config

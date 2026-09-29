@@ -155,11 +155,11 @@ nardis-neural solana stopping-research --workspace ws --utility power --gamma 0.
 ```
 
 ```python
-brain.fit_stopping()                              # same as the command
-advice = brain.hold_advice(mint, t_signal)        # a held ticket signalled at t_signal
-advice["liquidation_multiple"]                    # executable multiple if sold now
+brain.fit_stopping()  # same as the command
+advice = brain.hold_advice(mint, t_signal)  # a held ticket signalled at t_signal
+advice["liquidation_multiple"]  # executable multiple if sold now
 advice["sell_now_utility"], advice["continuation_utility"]
-advice["advantage"]                               # > 0: holding is worth more than selling now
+advice["advantage"]  # > 0: holding is worth more than selling now
 ```
 
 `hold_advice` marks the position on the model's decision grid from the signal to now (for

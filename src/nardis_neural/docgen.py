@@ -29,6 +29,8 @@ from pydantic import BaseModel
 
 ROOT = Path(__file__).resolve().parents[2]
 PARTS = (
+    ("HANDOFF", "Merging into Nardis: start here"),
+    ("API", "HTTP API reference"),
     ("ARCHITECTURE", "Architecture"),
     ("CONTINUAL_LEARNING", "Continual learning"),
     ("INTEGRATION", "Integration"),

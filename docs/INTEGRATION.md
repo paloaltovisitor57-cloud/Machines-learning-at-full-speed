@@ -280,15 +280,15 @@ from nardis_neural.solana.metalabel import TradeOutcome, TradeProposal
 advice = brain.advise_trade(
     TradeProposal("trade-123", mint, now, {"nardis_score": 0.82, "entry_reason": 3.0})
 )
-advice.p_win, advice.p_10x, advice.p_100x      # probabilities learned from Nardis's own history
-advice.expected_multiple                       # Duan-smeared, so fat tails are not underestimated
-advice.size_multiplier                         # scale Nardis's own stake: 0 … 2
-advice.veto, advice.reason                     # a pattern that has been losing
-advice.source                                  # "prior" (base rates) or "learned"
+advice.p_win, advice.p_10x, advice.p_100x  # probabilities learned from Nardis's own history
+advice.expected_multiple  # Duan-smeared, so fat tails are not underestimated
+advice.size_multiplier  # scale Nardis's own stake: 0 … 2
+advice.veto, advice.reason  # a pattern that has been losing
+advice.source  # "prior" (base rates) or "learned"
 
 # after the trade closes (peak_multiple optional; it sharpens the 10x / 100x labels)
 brain.settle_trade(TradeOutcome("trade-123", exit_time, multiple=1.8, peak_multiple=3.1))
-brain.save()                                   # persists history and models in ws/meta/
+brain.save()  # persists history and models in ws/meta/
 ```
 
 `advise_trade` joins Nardis's features with the addon's own view of the token at that moment

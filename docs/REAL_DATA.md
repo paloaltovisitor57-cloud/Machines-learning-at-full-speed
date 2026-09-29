@@ -271,8 +271,8 @@ bigger model.
 **Bug found and fixed: buyers were glued into one funding cluster.** When a buy pays SOL to
 the bonding curve, the payment is a System transfer made inside pump.fun's instruction. It was
 being recorded as *funding*, so union-find joined every buyer of a token through the curve
-account. On the 22 segments of the 12-hour window, the median share of a token's buyers
-(tokens with ≥ 20 buyers) in its largest "cluster" was **0.71** (p90 0.91). That made every
+account. On the 22 fetched 10-minute segments (the 3 h 40 min of section 10), the median share
+of a token's buyers (tokens with ≥ 20 buyers) in its largest "cluster" was **0.71** (p90 0.91). That made every
 cluster feature (`holder_clusters_log`, `top_cluster_share`, `bundle_share`,
 `creator_cluster_share` and the graph and tape cluster fields) measure "bought something"
 rather than "shares an operator". Two fixes:
